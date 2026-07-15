@@ -1,0 +1,93 @@
+/*
+ * Minimal user-agent stylesheet (oxidepage, MIT-licensed).
+ *
+ * Original work, informed by the display/box defaults in the HTML rendering
+ * spec (https://html.spec.whatwg.org/multipage/rendering.html). Deliberately
+ * small: it establishes display types, hides non-rendered elements, and sets a
+ * handful of default margins so the cascade and computed values are sensible.
+ * It is NOT a full UA sheet — presentational hints, forms, and tables get
+ * fleshed out in later phases.
+ */
+
+/* Non-rendered metadata elements. */
+html > head,
+head, title, meta, link, style, script, base,
+template, noscript, param, source, track {
+  display: none;
+}
+
+/* Block-level flow content. */
+html, body, address, article, aside, blockquote, details, dialog, dd, div,
+dl, dt, fieldset, figcaption, figure, footer, form, header, hgroup, main,
+nav, ol, p, pre, section, summary, ul, hr {
+  display: block;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  display: block;
+  font-weight: bold;
+}
+
+/* Inline defaults. */
+a, abbr, b, bdi, bdo, cite, code, data, dfn, em, i, kbd, mark, q, s, samp,
+small, span, strong, sub, sup, time, u, var, wbr {
+  display: inline;
+}
+
+b, strong { font-weight: bold; }
+i, em, cite, var, dfn { font-style: italic; }
+code, kbd, samp, pre { font-family: monospace; }
+
+/* Ruby. */
+ruby { display: ruby; }
+rt { display: ruby-text; }
+
+/* Lists. The nested-bullet cascade (disc -> circle -> square) is the HTML
+ * rendering spec's; `list-style-type` inherits, so the depth is expressed as
+ * descendant selectors on the list, not on the item. */
+ul, ol { padding-left: 40px; }
+li { display: list-item; }
+ul { list-style-type: disc; }
+ol { list-style-type: decimal; }
+ol ul, ul ul { list-style-type: circle; }
+ol ol ul, ol ul ul, ul ol ul, ul ul ul { list-style-type: square; }
+
+/* Tables. */
+table { display: table; border-collapse: separate; border-spacing: 2px; }
+caption { display: table-caption; text-align: center; }
+thead { display: table-header-group; }
+tbody { display: table-row-group; }
+tfoot { display: table-footer-group; }
+tr { display: table-row; }
+td, th { display: table-cell; padding: 1px; }
+th { font-weight: bold; text-align: center; }
+colgroup { display: table-column-group; }
+col { display: table-column; }
+
+/* Default margins for flow content. */
+body { margin: 8px; }
+p, blockquote, figure, dl, ul, ol, pre { margin-top: 1em; margin-bottom: 1em; }
+/* ...but a list nested in a list gets none, or every level would be spaced
+ * apart from the item that introduces it (HTML rendering spec §15.3.8). */
+ol ol, ol ul, ul ol, ul ul { margin-top: 0; margin-bottom: 0; }
+h1 { margin-top: 0.67em; margin-bottom: 0.67em; }
+h2 { margin-top: 0.83em; margin-bottom: 0.83em; }
+h3 { margin-top: 1em; margin-bottom: 1em; }
+h4 { margin-top: 1.33em; margin-bottom: 1.33em; }
+h5 { margin-top: 1.67em; margin-bottom: 1.67em; }
+h6 { margin-top: 2.33em; margin-bottom: 2.33em; }
+blockquote { margin-left: 40px; margin-right: 40px; }
+figure { margin-left: 40px; margin-right: 40px; }
+
+/* Hyperlinks. */
+a[href] { color: #0000ee; text-decoration: underline; }
+
+/* The `hidden` attribute and `<template>` never render. */
+[hidden] { display: none; }
+
+/* A slot generates no box; its assigned (flat-tree) children inline into
+   the parent (HTML rendering section). */
+slot { display: contents; }
+
+/* Root/replaced sizing hints. */
+img, iframe { display: inline-block; }

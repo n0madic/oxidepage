@@ -1,0 +1,14 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "GlyphRun", "font": 0, "face": 0, "size": 40.00, "color": "#000000ff", "coords": [], "glyphs": [{ "id": 3, "x": 0.00, "y": 36.00 }, { "id": 4, "x": 24.00, "y": 36.00 }, { "id": 2, "x": 52.00, "y": 36.00 }], "text": "FOA" }
+  ],
+  "resources": {
+    "fonts": [
+      { "face": 0 }
+    ],
+    "images": []
+  }
+}

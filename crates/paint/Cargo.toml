@@ -1,0 +1,36 @@
+[package]
+name = "oxidepage-paint"
+description = "Layout tree to display list"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-base.workspace = true
+oxidepage-dom.workspace = true
+oxidepage-style.workspace = true
+oxidepage-layout.workspace = true
+style.workspace = true
+servo_arc.workspace = true
+euclid.workspace = true
+parley.workspace = true
+taffy.workspace = true
+skrifa.workspace = true
+image.workspace = true
+resvg = { workspace = true, optional = true }
+
+[features]
+# On by default: a page whose logos are SVG and whose photos are WebP renders
+# with holes without them, which is the common case on the real web. Embedders
+# that want a smaller build can opt out with `default-features = false`.
+default = ["svg", "webp"]
+# SVG decoding via resvg (rasterized at the image's intrinsic size).
+svg = ["dep:resvg"]
+# WebP decoding via the `image` crate.
+webp = ["image/webp"]
+
+[lints]
+workspace = true

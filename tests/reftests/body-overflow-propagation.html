@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><link rel="match" href="body-overflow-propagation-ref.html"></head>
+<!-- The root is `overflow: visible`, so the body's `overflow` propagates to the
+     viewport and the body's own used overflow becomes `visible` (CSS Overflow
+     §3.3). The body box is one line tall but its second line must still paint:
+     `overflow-y` no longer clips (propagated away) while `overflow-x: hidden`
+     clips only the x axis. Before the fix the whole box was clipped and "BB"
+     vanished. -->
+<body style="margin:0;height:20px;overflow-x:hidden;overflow-y:auto;font:20px/20px Ahem;color:#008000"><div>AA</div><div>BB</div></body></html>

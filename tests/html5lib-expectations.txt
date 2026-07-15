@@ -1,0 +1,27 @@
+# Known failures in the html5lib-tests tree-construction suite
+# (vendored at html5lib/html5lib-tests@9329e64, see xtask).
+#
+# Format: <file>.dat:<test-index>:<script-on|script-off>
+# The runner fails on regressions AND on unexpected passes, so entries must
+# be removed in the same PR that fixes them.
+#
+# All entries below are upstream html5ever 0.39 parser gaps relative to the
+# pinned suite revision (html5ever's own CI pins an older revision):
+# - tests_innerHTML_1.dat:75, webkit02.dat:44-47: 2024+ spec changes to
+#   <select> content model parsing (customizable select) not yet in html5ever.
+# - tricky01.dat:8: whitespace handling after </body></html>; our dump is
+#   byte-identical to html5ever's own rcdom on this input (verified), so the
+#   divergence is upstream, not in our TreeSink.
+
+tests_innerHTML_1.dat:75:script-off
+tests_innerHTML_1.dat:75:script-on
+tricky01.dat:8:script-off
+tricky01.dat:8:script-on
+webkit02.dat:44:script-off
+webkit02.dat:44:script-on
+webkit02.dat:45:script-off
+webkit02.dat:45:script-on
+webkit02.dat:46:script-off
+webkit02.dat:46:script-on
+webkit02.dat:47:script-off
+webkit02.dat:47:script-on

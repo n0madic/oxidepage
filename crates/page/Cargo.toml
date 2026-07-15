@@ -1,0 +1,38 @@
+[package]
+name = "oxidepage-page"
+description = "Event loop, document lifecycle, navigation, Page API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-base = { workspace = true }
+oxidepage-bindings = { workspace = true }
+oxidepage-dom = { workspace = true }
+oxidepage-js = { workspace = true }
+oxidepage-net = { workspace = true }
+oxidepage-style = { workspace = true }
+oxidepage-layout = { workspace = true }
+oxidepage-paint = { workspace = true }
+oxidepage-raster-skia = { workspace = true }
+oxidepage-export-pdf = { workspace = true }
+style = { workspace = true }
+crossbeam-channel = { workspace = true }
+encoding_rs = { workspace = true }
+url = { workspace = true }
+percent-encoding = "2"
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros"] }
+image = { workspace = true }
+
+[[bench]]
+name = "geometry_rmw"
+harness = false
+
+[lints]
+workspace = true

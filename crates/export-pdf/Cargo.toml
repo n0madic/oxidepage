@@ -1,0 +1,25 @@
+[package]
+name = "oxidepage-export-pdf"
+description = "DisplayList to PDF export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-base.workspace = true
+oxidepage-paint.workspace = true
+pdf-writer.workspace = true
+subsetter.workspace = true
+skrifa.workspace = true
+# `FlateDecode` compression for embedded PDF image streams (default miniz_oxide
+# backend — pure Rust, already in the tree via wuff/pdf-writer).
+flate2 = "1"
+
+[dev-dependencies]
+parley.workspace = true
+
+[lints]
+workspace = true

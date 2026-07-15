@@ -1,0 +1,14 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 200.00, 100.00], "radii": null, "brush": { "linear": { "start": [0.00, 50.00], "end": [200.00, 50.00], "extend": "pad", "stops": [{ "offset": 0.00, "color": "#ff0000ff" }, { "offset": 1.00, "color": "#0000ffff" }] } } },
+    { "type": "Fill", "rect": [0.00, 100.00, 150.00, 150.00], "radii": null, "brush": { "radial": { "center": [75.00, 175.00], "radius": [106.07, 106.07], "extend": "pad", "stops": [{ "offset": 0.00, "color": "#00ff00ff" }, { "offset": 1.00, "color": "#000000ff" }] } } },
+    { "type": "Fill", "rect": [0.00, 250.00, 100.00, 100.00], "radii": null, "brush": { "linear": { "start": [0.00, 350.00], "end": [100.00, 250.00], "extend": "pad", "stops": [{ "offset": 0.00, "color": "#ffff00ff" }, { "offset": 0.50, "color": "#ff00ffff" }, { "offset": 1.00, "color": "#00ffffff" }] } } }
+  ],
+  "resources": {
+    "fonts": [],
+    "images": []
+  }
+}

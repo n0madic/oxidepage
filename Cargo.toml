@@ -1,0 +1,193 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/n0madic/oxidepage"
+authors = ["n0madic", "Claude"]
+
+[workspace.dependencies]
+# Internal crates
+oxidepage-base = { path = "crates/base" }
+oxidepage-net = { path = "crates/net" }
+oxidepage-dom = { path = "crates/dom" }
+oxidepage-js = { path = "crates/js" }
+oxidepage-idl = { path = "crates/idl" }
+oxidepage-bindings = { path = "crates/bindings" }
+oxidepage-style = { path = "crates/style" }
+oxidepage-layout = { path = "crates/layout" }
+oxidepage-paint = { path = "crates/paint" }
+oxidepage-raster-skia = { path = "crates/raster-skia" }
+oxidepage-raster-vello = { path = "crates/raster-vello" }
+oxidepage-export-pdf = { path = "crates/export-pdf" }
+oxidepage-page = { path = "crates/page" }
+oxidepage-engine = { path = "crates/engine" }
+
+# External dependencies
+# Pinned: the nested-module `meta()` path (import.meta.url for statically
+# imported modules) depends on a 0.12.0 implementation detail (design ADR-0004).
+rquickjs = "=0.12.0"
+weedle2 = "5"
+selectors = "0.39"
+cssparser = "0.37"
+precomputed-hash = "0.1"
+html5ever = "0.39"
+
+# Style engine (Phase 4): Servo's stylo, pinned `=0.19.0` to match the existing
+# selectors 0.39 / cssparser 0.37 / web_atoms 0.2.5 / servo_arc 0.4.3 pins
+# without bumping any transitive dependency (design ADR-0005). Building stylo
+# requires `python3` on PATH (mako codegen). Default feature is `servo`.
+style = { package = "stylo", version = "=0.19.0" }
+style_dom = { package = "stylo_dom", version = "=0.19.0" }
+style_traits = { package = "stylo_traits", version = "=0.19.0" }
+style_config = { package = "stylo_static_prefs", version = "=0.19.0" }
+servo_arc = "0.4.3"
+euclid = "0.22"
+app_units = "0.7.8"
+markup5ever = "0.39"
+web_atoms = "0.2"
+tendril = "0.5"
+encoding_rs = "0.8"
+thiserror = "2"
+bitflags = "2"
+smallvec = "1"
+
+# Layout engine (Phase 5): Blitz's stylo↔taffy interop crate must match our
+# stylo pin, and it pins taffy exactly; all three move in lockstep (ADR-0006).
+# No `stylo_taffy` release yet targets stylo 0.19, so it comes from the Blitz
+# revision that does. Feature set keeps CSS float layout for legacy grid systems.
+taffy = { version = "=0.12.1", default-features = false, features = [
+    "std",
+    "flexbox",
+    "grid",
+    "block_layout",
+    "float_layout",
+    "content_size",
+    "calc",
+    "detailed_layout_info",
+] }
+stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "406a571491523d69d52c396f240b14edd1a1974f", default-features = false, features = ["std", "block", "flexbox", "floats", "grid"] }
+# Hard-pinned below `0.11` (which would otherwise satisfy the unpinned range
+# the crate used before): parley 0.11's `TreeStyleBuilder` — the
+# `push_style_modification_span`/`pop_style_span` pair used for whitespace
+# trimming at style-span boundaries — feeds taffy's iterative flex-basis
+# measurement unstable intermediate widths, and the two don't converge: a
+# genuine infinite loop (99% CPU, not a slow test), not a flake. Confirmed by
+# `git bisect` in an isolated worktree across the whole WPT corpus — at least
+# 14 files hung outright. `=0.10.0` is exact, not just `<0.11`, because that's
+# the specific version the bisect verified clean; bump only after re-running
+# the full `xtask wpt` run and confirming no HANG/CRASH. As a side effect this
+# also collapses two skrifa versions in the lockfile back to one (0.11 pulled
+# skrifa 0.43.2 transitively, alongside our own `0.42` pin below).
+parley = { version = "=0.10.0", default-features = false, features = ["std"] }
+skrifa = { version = "0.42", default-features = false, features = ["std"] }
+# Web fonts (Phase 7, ADR-0008): `wuff` is nicoburns' pure-Rust WOFF/WOFF2 →
+# sfnt decoder (same author whose font patterns `layout/fonts.rs` mirrors); its
+# decompressors are `brotli-decompressor` (WOFF2) + `flate2` (WOFF1), both
+# already in the tree. `subsetter` (typst/pdf-writer ecosystem) subsets TrueType
+# fonts for PDF embedding.
+wuff = "0.2"
+subsetter = { version = "0.2", default-features = false }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# Paint / raster / PDF (Phase 6, ADR-0007). tiny-skia is the CPU rasterizer;
+# `image` decodes raster formats (SVG behind the optional `resvg` dep, gated by
+# the paint crate's `svg` feature); pdf-writer emits the PDF byte stream.
+tiny-skia = "0.12"
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+resvg = { version = "0.47", default-features = false }
+pdf-writer = "0.15"
+
+# Network stack (Phase 3): async runtime, HTTP client, TLS, cookies, cache.
+# TLS provider is `ring` with bundled Mozilla roots (`webpki-roots`) to avoid
+# the aws-lc-rs C/NASM toolchain that breaks Windows CI (design ADR-0004).
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+tower-service = "0.3"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+crossbeam-channel = "0.5"
+async-compression = { version = "0.4", features = ["tokio", "gzip", "brotli", "zstd", "deflate"] }
+url = "2"
+psl = "2"
+http-cache-semantics = "2"
+
+# Dev dependencies
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Size-optimized build: `cargo build --profile min-size -p oxidepage-cli`.
+#
+# Measured against `release` on a 3000-node reflow-thrash page (macOS/arm64,
+# 8 interleaved runs each, medians): 19.6 MiB -> 13.6 MiB (-31%) for +0.67%
+# wall-clock (12.045s vs 11.965s) — inside the run-to-run spread. PNG output is
+# byte-identical.
+#
+# `opt-level` stays at 3. A whole-binary `opt-level = "s"` was measured at **2x
+# slower** end-to-end: this engine is compute-bound in raster, shaping, cascade
+# and the JS interpreter, and "s" costs those inner loops far more than it saves
+# in bytes. The size therefore comes from fat LTO + one codegen unit, plus
+# `opt-level = "s"` on the few crates measured to be indifferent to it.
+#
+# `panic` deliberately stays `unwind`. `layout::webfont` is a trust boundary: it
+# contains panics from the `wuff` decompressor on attacker-controlled fonts with
+# `catch_unwind` and turns them into a clean `font-display` fallback. Under
+# `panic = "abort"` a hostile web font becomes a process kill — a remote DoS
+# against the very threat model in design §8. Those bytes are not for sale.
+[profile.min-size]
+inherits = "release"
+opt-level = 3
+lto = "fat"       # whole-program: beats release's `thin` on both size and speed.
+codegen-units = 1 # no cross-unit duplication; also lets LLVM inline more.
+strip = "symbols"
+panic = "unwind"
+
+# Per-crate size opt, each entry measured — not guessed.
+#
+# `stylo` is the single biggest crate in the binary (~2.5 MiB of .text, 23% of
+# the total) and almost all of it is mako-generated per-property code. At "s" it
+# gives back 561 KiB — the largest single win here — with no measurable cost to
+# the cascade.
+#
+# The rest are I/O- or serialization-bound and never show up in a CPU profile of
+# parse -> cascade -> layout -> raster.
+#
+# Deliberately NOT listed:
+#   * oxidepage-bindings — "s" saves 82 KiB but costs ~1.2%; it is on the hot
+#     path of every DOM call from script.
+#   * psl — 815 KiB, and "s" changes it by 0 bytes: it is the compiled Public
+#     Suffix List, a data table an optimizer cannot shrink.
+#   * image/font codecs, tiny-skia, harfrust, taffy, rquickjs — hot by nature.
+[profile.min-size.package]
+stylo = { opt-level = "s" }
+hyper = { opt-level = "s" }
+hyper-util = { opt-level = "s" }
+hyper-rustls = { opt-level = "s" }
+h2 = { opt-level = "s" }
+rustls = { opt-level = "s" }
+tokio = { opt-level = "s" }
+http = { opt-level = "s" }
+http-body-util = { opt-level = "s" }
+pdf-writer = { opt-level = "s" }
+subsetter = { opt-level = "s" }

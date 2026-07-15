@@ -1,0 +1,42 @@
+[package]
+name = "oxidepage-layout"
+description = "Box tree, taffy driver, parley IFCs, fragment tree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["system_fonts"]
+# System font discovery. Cargo unifies features across a build, so this stays on
+# for `cargo test --workspace` no matter what a member declares; the runners that
+# need platform-independent metrics call `layout::disable_system_fonts()` at
+# startup instead, which leaves only Ahem plus explicitly registered fonts.
+system_fonts = ["parley/system"]
+
+[dependencies]
+oxidepage-base.workspace = true
+oxidepage-dom.workspace = true
+oxidepage-style.workspace = true
+style.workspace = true
+servo_arc.workspace = true
+taffy.workspace = true
+stylo_taffy.workspace = true
+parley.workspace = true
+skrifa.workspace = true
+wuff.workspace = true
+app_units.workspace = true
+html5ever.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "reflow"
+harness = false
+
+[lints]
+workspace = true

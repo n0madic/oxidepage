@@ -1,0 +1,21 @@
+[package]
+name = "oxidepage-cli"
+description = "Command-line interface: render, dump-display-list, eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "oxidepage"
+path = "src/main.rs"
+
+[dependencies]
+oxidepage-bindings = { workspace = true }
+oxidepage-dom = { workspace = true }
+oxidepage-page = { workspace = true }
+
+[lints]
+workspace = true

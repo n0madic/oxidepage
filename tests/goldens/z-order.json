@@ -1,0 +1,15 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 100.00, 100.00], "radii": null, "brush": { "solid": "#ff0000ff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 200.00, 150.00], "radii": null, "brush": { "solid": "#00ff00ff" } },
+    { "type": "Fill", "rect": [80.00, 80.00, 60.00, 60.00], "radii": null, "brush": { "solid": "#ffff00ff" } },
+    { "type": "Fill", "rect": [50.00, 50.00, 100.00, 100.00], "radii": null, "brush": { "solid": "#0000ffff" } }
+  ],
+  "resources": {
+    "fonts": [],
+    "images": []
+  }
+}

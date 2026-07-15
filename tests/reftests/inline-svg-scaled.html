@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="fuzzy" content="4;400"><link rel="match" href="inline-svg-scaled-ref.html"></head>
+<body style="margin:0">
+  <!-- A vector image is rasterized at the size it paints at, not upscaled from
+       its intrinsic size. This 2x2 viewBox is shown at 100x100, a 50x upscale:
+       rasterized at the device size the boundary between the halves is one hard
+       edge at x=50, exactly like the two divs in the reference. Blitting a 2x2
+       bitmap would spread it into a 50px-wide gradient instead. -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:block" width="100" height="100" viewBox="0 0 2 2">
+    <rect x="0" y="0" width="1" height="2" fill="#008000"/>
+    <rect x="1" y="0" width="1" height="2" fill="#0000ff"/>
+  </svg>
+</body></html>

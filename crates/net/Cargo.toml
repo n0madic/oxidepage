@@ -1,0 +1,40 @@
+[package]
+name = "oxidepage-net"
+description = "Fetch stack: HTTP, cookies, cache, policy, SSRF guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-base = { workspace = true }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+tower-service = { workspace = true }
+hyper-rustls = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+crossbeam-channel = { workspace = true }
+async-compression = { workspace = true }
+url = { workspace = true }
+psl = { workspace = true }
+http-cache-semantics = { workspace = true }
+encoding_rs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+async-compression = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

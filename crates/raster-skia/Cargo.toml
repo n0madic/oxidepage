@@ -1,0 +1,23 @@
+[package]
+name = "oxidepage-raster-skia"
+description = "DisplayList to tiny-skia CPU raster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-base.workspace = true
+oxidepage-paint.workspace = true
+tiny-skia.workspace = true
+png.workspace = true
+
+[dev-dependencies]
+# Tests build a font resource (Blob) directly from Ahem to exercise glyph
+# rasterization without a full page.
+parley.workspace = true
+
+[lints]
+workspace = true

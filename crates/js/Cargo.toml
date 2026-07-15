@@ -1,0 +1,17 @@
+[package]
+name = "oxidepage-js"
+description = "JsEngine trait and engine backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# `loader` enables the ES module resolver/loader used for `import` (Phase 3).
+rquickjs = { workspace = true, features = ["loader"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

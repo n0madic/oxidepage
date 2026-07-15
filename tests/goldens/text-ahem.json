@@ -1,0 +1,15 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "GlyphRun", "font": 0, "face": 0, "size": 20.00, "color": "#ff0000ff", "coords": [], "glyphs": [{ "id": 58, "x": 0.00, "y": 16.00 }, { "id": 58, "x": 20.00, "y": 16.00 }], "text": "XX" },
+    { "type": "GlyphRun", "font": 0, "face": 0, "size": 20.00, "color": "#0000ffff", "coords": [], "glyphs": [{ "id": 58, "x": 0.00, "y": 36.00 }, { "id": 58, "x": 20.00, "y": 36.00 }, { "id": 58, "x": 40.00, "y": 36.00 }, { "id": 58, "x": 60.00, "y": 36.00 }], "text": "XXXX" }
+  ],
+  "resources": {
+    "fonts": [
+      { "face": 0 }
+    ],
+    "images": []
+  }
+}

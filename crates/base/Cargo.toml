@@ -1,0 +1,16 @@
+[package]
+name = "oxidepage-base"
+description = "Shared primitives: ids, geometry, error types, atom re-exports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+web_atoms = { workspace = true }
+
+[lints]
+workspace = true

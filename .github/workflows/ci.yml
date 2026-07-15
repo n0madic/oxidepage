@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: Format & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # stylo's build.rs runs a mako code generator (needs python3 on PATH).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # The optional decoders are off by default, so nothing else in CI compiles
+      # them — including the untrusted-SVG parse options.
+      - name: clippy (optional paint features)
+        run: cargo clippy -p oxidepage-paint --all-targets --features svg,webp -- -D warnings
+      - name: WebIDL codegen freshness
+        run: cargo xtask codegen --check
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # stylo's build.rs runs a mako code generator (needs python3 on PATH).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+      # Guards the SVG/WebP decode paths (local-file href refusal, size caps),
+      # which the default feature set never builds.
+      - name: Test (optional paint features)
+        run: cargo test -p oxidepage-paint --features svg,webp
+      - name: Display-list goldens
+        run: cargo xtask golden
+      - name: Reftests
+        run: cargo xtask reftest
+
+  wpt:
+    name: Web Platform Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # stylo's build.rs runs a mako code generator (needs python3 on PATH).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: Swatinem/rust-cache@v2
+      # Release build: each test runs in its own subprocess (via current_exe),
+      # so a release xtask runs the JS/style engine at full speed, and the
+      # runner fans the subprocesses out across all cores.
+      - name: Run WPT subsets against expectations
+        run: cargo run --release -p xtask -- wpt

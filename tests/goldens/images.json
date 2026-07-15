@@ -1,0 +1,17 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Image", "dst": [0.00, 0.00, 60.00, 40.00], "image": 0, "tile": "stretch", "radii": null },
+    { "type": "PushClip", "rect": [0.00, 40.00, 100.00, 100.00], "radii": null },
+    { "type": "Image", "dst": [0.00, 40.00, 50.00, 50.00], "image": 0, "tile": "stretch", "radii": null },
+    { "type": "PopClip" }
+  ],
+  "resources": {
+    "fonts": [],
+    "images": [
+      { "size": [50, 50] }
+    ]
+  }
+}

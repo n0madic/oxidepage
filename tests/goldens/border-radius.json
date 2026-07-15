@@ -1,0 +1,14 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 120.00, 120.00], "radii": [60.00, 60.00, 60.00, 60.00, 60.00, 60.00, 60.00, 60.00], "brush": { "solid": "#ff0000ff" } },
+    { "type": "Fill", "rect": [0.00, 120.00, 208.00, 88.00], "radii": [20.00, 20.00, 40.00, 40.00, 20.00, 20.00, 40.00, 40.00], "brush": { "solid": "#0000ffff" } },
+    { "type": "Border", "rect": [0.00, 120.00, 208.00, 88.00], "radii": [20.00, 20.00, 40.00, 40.00, 20.00, 20.00, 40.00, 40.00], "edges": [{ "width": 4.00, "color": "#00ff00ff", "style": "solid" }, { "width": 4.00, "color": "#00ff00ff", "style": "solid" }, { "width": 4.00, "color": "#00ff00ff", "style": "solid" }, { "width": 4.00, "color": "#00ff00ff", "style": "solid" }] }
+  ],
+  "resources": {
+    "fonts": [],
+    "images": []
+  }
+}

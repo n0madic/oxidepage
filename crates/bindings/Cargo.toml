@@ -1,0 +1,25 @@
+[package]
+name = "oxidepage-bindings"
+description = "Generated and hand-written JS bindings glue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-base = { workspace = true }
+oxidepage-dom = { workspace = true }
+oxidepage-js = { workspace = true }
+oxidepage-layout = { workspace = true }
+oxidepage-net = { workspace = true }
+oxidepage-style = { workspace = true }
+style = { workspace = true }
+servo_arc = { workspace = true }
+html5ever = { workspace = true }
+url = { workspace = true }
+getrandom = "0.4"
+
+[lints]
+workspace = true

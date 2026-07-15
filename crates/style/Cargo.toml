@@ -1,0 +1,24 @@
+[package]
+name = "oxidepage-style"
+description = "Stylo integration: stylesheet set, computed-style access"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxidepage-dom = { workspace = true }
+style = { workspace = true }
+style_traits = { workspace = true }
+style_config = { workspace = true }
+servo_arc = { workspace = true }
+euclid = { workspace = true }
+app_units = { workspace = true }
+url = { workspace = true }
+encoding_rs = { workspace = true }
+cssparser = { workspace = true }
+
+[lints]
+workspace = true

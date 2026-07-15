@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><link rel="match" href="abs-containing-block-ref.html"></head>
+<body style="margin:0">
+  <!-- The containing block is the nearest *positioned* ancestor, not the parent:
+       the red box hangs off the relative wrapper, ignoring the static div. -->
+  <div style="position:relative;margin:50px;width:300px;height:200px;background:#dddddd">
+    <div style="margin:40px;padding:20px">
+      <div style="position:absolute;top:0;left:0;width:60px;height:30px;background:#ff0000"></div>
+      <div style="position:absolute;bottom:0;right:0;width:60px;height:30px;background:#0000ff"></div>
+      <!-- All-auto insets keep the static position: the padding box of the parent. -->
+      <div style="position:absolute;width:60px;height:30px;background:#00aa00"></div>
+    </div>
+  </div>
+  <!-- `fixed` is positioned against the viewport. -->
+  <div style="position:fixed;top:0;right:0;width:40px;height:40px;background:#ff00ff"></div>
+</body></html>

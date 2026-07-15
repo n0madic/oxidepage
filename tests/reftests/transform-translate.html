@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><link rel="match" href="transform-translate-ref.html"></head>
+<body style="margin:0">
+  <!-- A `transform` moves the painted box without moving its layout box. -->
+  <div style="width:100px;height:50px;background:#ff0000;transform:translate(120px,40px)"></div>
+  <!-- Percentages resolve against the border box; the origin defaults to the centre. -->
+  <div style="width:80px;height:80px;background:#0000ff;transform:translateX(-100%) scale(2)"></div>
+</body></html>

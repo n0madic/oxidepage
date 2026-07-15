@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><link rel="match" href="positioned-inline-stacking-ref.html"></head>
+<body style="margin:0">
+  <!-- The heading's absolutely positioned ::before bar paints above the in-flow
+       inline content, but the text is inside a `position: relative` span, which
+       makes it a positioned descendant — so it paints on top of the bar. -->
+  <style>
+    h2 { position:relative; margin:0; padding:20px; font:40px/1 Ahem; color:#000000; }
+    h2::before { content:""; position:absolute; left:20px; top:30px; width:200px; height:20px; background:#ff0000; }
+    h2 span { position:relative; }
+  </style>
+  <h2><span>XX</span></h2>
+</body></html>

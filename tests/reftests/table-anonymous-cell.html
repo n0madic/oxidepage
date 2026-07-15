@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><link rel="match" href="table-anonymous-cell-ref.html"></head>
+<body style="margin:0;font:20px/20px Ahem;color:#008000">
+  <!-- Stray block content in a `display: table` must be wrapped in an anonymous
+       cell (CSS 2.1 §17.2.1), not dropped: the text below has to render and give
+       the table its height, exactly as a plain block container would. -->
+  <div style="display:table"><div>AA<br>AA<br>AA</div></div>
+</body></html>
