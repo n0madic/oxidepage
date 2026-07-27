@@ -384,7 +384,10 @@ v1 limits.
   `maxLength`/`minLength` are implemented; a control without text entry reports
   `null` rather than 0. `Element.scrollIntoView()` walks every scrollable
   ancestor, which un-skipped 38 vendored WPT files.
-  **Not implemented:** wheel events, touch and gesture events,
+  `Page::dispatch_wheel` fires a cancelable `wheel` and scrolls the nearest
+  ancestor that can move; `document.hasFocus()` is real (false for a document
+  with no browsing context).
+  **Not implemented:** touch and gesture events,
   `Selection`/`Range` over arbitrary DOM, `contenteditable`, drag-and-drop,
   clipboard, IME composition *generation* (the interface exists), smooth
   scrolling (`scrollIntoView` treats it as instant), and `:focus-visible`.

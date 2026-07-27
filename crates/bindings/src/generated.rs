@@ -737,6 +737,7 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "activeElement",
         gen_document_get_active_element,
     )?;
+    cx.define_method(&proto_document, "hasFocus", 0, gen_document_has_focus)?;
     cx.define_method(
         &proto_document,
         "getElementsByTagName",
@@ -6609,6 +6610,11 @@ fn gen_document_get_active_element(cx: &BindCx<'_>, call: &HostCall) -> Result<J
     let this = cx.this_document(&call.this)?;
     let ret = imp::document::active_element(cx, this)?;
     cx.opt_node_to_js(ret)
+}
+
+fn gen_document_has_focus(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_document(&call.this)?;
+    Ok(JsValue::Bool(imp::document::has_focus(cx, this)?))
 }
 
 fn gen_document_get_elements_by_tag_name(

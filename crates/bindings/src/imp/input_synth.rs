@@ -23,7 +23,7 @@ use oxidepage_js::JsThrow;
 use crate::cx::BindCx;
 use crate::events::{
     EventData, EventTargetKey, InputFields, KeyboardFields, Modifiers, MouseFields, UiKind,
-    UiPayload,
+    UiPayload, WheelFields,
 };
 use crate::imp::keys;
 
@@ -611,4 +611,96 @@ fn move_sequential_focus(cx: &BindCx<'_>, backward: bool) -> Result<(), JsThrow>
         (None, true) => order[order.len() - 1],
     };
     crate::imp::interaction::set_focus_from_input(cx, Some(next))
+}
+
+// === Wheel ===
+
+/// A synthesized wheel tick. Deltas are in CSS pixels (`DOM_DELTA_PIXEL`),
+/// positive meaning content moves up/left — the direction a browser reports for
+/// scrolling down/right.
+#[derive(Clone, Copy, Debug)]
+pub struct WheelInput {
+    pub x: f32,
+    pub y: f32,
+    pub delta_x: f64,
+    pub delta_y: f64,
+    pub modifiers: Modifiers,
+}
+
+/// Fires a cancelable `wheel` at the element under the pointer and, unless a
+/// listener cancels it, scrolls the nearest scrollable ancestor.
+///
+/// Cancelling matters: a carousel or a modal that calls `preventDefault()` on
+/// `wheel` to trap scrolling must actually trap it, and a driver that ignored
+/// the return would scroll the page out from under such a widget.
+pub fn dispatch_wheel(cx: &BindCx<'_>, input: WheelInput) -> Result<(), JsThrow> {
+    let Some(target) = hit_test(cx, input.x, input.y) else {
+        return Ok(());
+    };
+
+    let mouse = MouseInput {
+        kind: MouseEventKind::Move,
+        x: input.x,
+        y: input.y,
+        button: 0,
+        buttons: 0,
+        modifiers: input.modifiers,
+        click_count: 0,
+    };
+    let mut payload = mouse_payload(cx, &mouse, Some(target), None, false);
+    if let UiKind::Mouse(fields) = &mut payload.kind {
+        fields.wheel = Some(WheelFields {
+            delta_x: input.delta_x,
+            delta_y: input.delta_y,
+            delta_z: 0.0,
+            // `DOM_DELTA_PIXEL`: the deltas are CSS pixels.
+            delta_mode: 0,
+        });
+    }
+    // `detail` is 0 for a wheel event, not a click count.
+    payload.detail = 0;
+    if !fire_at(cx, target, "WheelEvent", "wheel", true, true, payload)? {
+        return Ok(());
+    }
+
+    scroll_nearest(cx, target, input.delta_x as f32, input.delta_y as f32);
+    Ok(())
+}
+
+/// Scrolls the nearest scrollable ancestor of `node` by a delta, walking
+/// outwards past any container that cannot move in that direction — which is
+/// what makes a wheel over an already-bottomed-out inner panel scroll the page.
+fn scroll_nearest(cx: &BindCx<'_>, node: NodeId, dx: f32, dy: f32) {
+    let mut current = node;
+    loop {
+        let parent = {
+            let dom = cx.state.dom.borrow();
+            let layout = cx.state.layout.borrow();
+            layout.scroll_parent(&dom, current)
+        };
+        let (target, changed) = match parent {
+            oxidepage_layout::ScrollParent::None => return,
+            oxidepage_layout::ScrollParent::Element(container) => {
+                let mut layout = cx.state.layout.borrow_mut();
+                let offset = layout.scroll_offset(container);
+                let result = layout.set_scroll_offset(container, offset.x + dx, offset.y + dy);
+                (Some(container), result.changed)
+            }
+            oxidepage_layout::ScrollParent::DocumentScrollingElement => {
+                let mut layout = cx.state.layout.borrow_mut();
+                let offset = layout.viewport_scroll();
+                let result = layout.set_viewport_scroll(offset.x + dx, offset.y + dy);
+                (None, result.changed)
+            }
+        };
+        if changed {
+            crate::imp::geometry_support::note_scroll(cx, target, true);
+            return;
+        }
+        // This container could not move; try the next one out.
+        match target {
+            Some(container) => current = container,
+            None => return,
+        }
+    }
 }

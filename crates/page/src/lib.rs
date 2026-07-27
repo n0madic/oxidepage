@@ -1147,6 +1147,22 @@ impl Page {
         self.run_until_stalled();
     }
 
+    /// Synthesizes a wheel tick at viewport CSS coordinates `(x, y)`.
+    ///
+    /// The `wheel` event is cancelable and is respected: a carousel or modal
+    /// that calls `preventDefault()` to trap scrolling actually traps it.
+    /// Otherwise the nearest scrollable ancestor that *can* move in that
+    /// direction scrolls, so a wheel over a bottomed-out inner panel scrolls
+    /// the page.
+    pub fn dispatch_wheel(&self, input: oxidepage_bindings::WheelInput) {
+        self.flush_layout();
+        let result = self.with_cx(|cx| oxidepage_bindings::imp_dispatch_wheel(cx, input));
+        if let Err(throw) = result {
+            report_throw(&self.hooks, throw);
+        }
+        self.run_until_stalled();
+    }
+
     /// Drains the navigation milestone stream (see [`NavigationEvent`]).
     #[must_use]
     pub fn drain_navigation_events(&self) -> Vec<NavigationEvent> {

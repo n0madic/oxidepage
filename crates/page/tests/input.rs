@@ -5,7 +5,9 @@
 //! These tests assert the ordering and the state changes, which is where the
 //! bugs live.
 
-use oxidepage_bindings::{KeyEventKind, KeyInput, Modifiers, MouseEventKind, MouseInput};
+use oxidepage_bindings::{
+    KeyEventKind, KeyInput, Modifiers, MouseEventKind, MouseInput, WheelInput,
+};
 use oxidepage_page::{Page, PageOptions, load_html_page};
 
 /// A press-and-release at one point, the way an automation driver spells a
@@ -725,5 +727,161 @@ fn max_length_reflects() {
             "(() => { try { t.maxLength = -1; return 'no throw' } catch (e) { return e.name } })()"
         ),
         "IndexSizeError"
+    );
+}
+
+// === Wheel and scrollIntoView ===
+
+fn wheel(page: &Page, x: f32, y: f32, dx: f64, dy: f64) {
+    page.dispatch_wheel(WheelInput {
+        x,
+        y,
+        delta_x: dx,
+        delta_y: dy,
+        modifiers: Modifiers::default(),
+    });
+}
+
+/// A wheel tick fires a cancelable `wheel` and scrolls the nearest scrollable
+/// ancestor.
+#[test]
+fn wheel_scrolls_the_nearest_container() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #box { position: absolute; left: 0; top: 0; width: 200px; height: 200px;
+                    overflow: scroll }
+             #tall { width: 100px; height: 2000px }
+           </style>
+           <div id=box><div id=tall></div></div>
+           <script>
+             window.deltas = "";
+             document.getElementById("box").addEventListener("wheel", e => {
+               deltas = [e.deltaX, e.deltaY, e.deltaMode].join(",");
+             });
+           </script>"##,
+    );
+    wheel(&page, 50.0, 50.0, 0.0, 120.0);
+    assert_eq!(
+        eval_string(&page, "window.deltas"),
+        "0,120,0",
+        "the wheel event carries its deltas in pixel mode"
+    );
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)"),
+        "120",
+        "the nearest scrollable ancestor scrolls"
+    );
+}
+
+/// `preventDefault()` on `wheel` traps the scroll — what every carousel and
+/// modal relies on.
+#[test]
+fn wheel_can_be_canceled() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #box { position: absolute; left: 0; top: 0; width: 200px; height: 200px;
+                    overflow: scroll }
+             #tall { width: 100px; height: 2000px }
+           </style>
+           <div id=box><div id=tall></div></div>
+           <script>
+             document.getElementById("box")
+               .addEventListener("wheel", e => e.preventDefault());
+           </script>"##,
+    );
+    wheel(&page, 50.0, 50.0, 0.0, 120.0);
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)"),
+        "0",
+        "a canceled wheel must not scroll"
+    );
+}
+
+/// `scrollIntoView` brings an element into the viewport, and a second call on
+/// something already visible is a no-op (the `nearest` default).
+#[test]
+fn scroll_into_view_reveals_and_is_idempotent() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #spacer { height: 3000px }
+             #target { height: 50px }
+           </style>
+           <div id=spacer></div><div id=target></div>"##,
+    );
+    assert_eq!(eval_string(&page, "String(window.scrollY)"), "0");
+
+    page.eval("document.getElementById('target').scrollIntoView()")
+        .unwrap();
+    // `block: start` asks for the element's top at the viewport top; the
+    // document cannot scroll past its own end, so the assertion is that the
+    // element is *visible*, which is what the method promises.
+    assert_eq!(
+        eval_string(
+            &page,
+            "(() => { const r = document.getElementById('target').getBoundingClientRect();
+                      return r.top >= 0 && r.bottom <= innerHeight })()"
+        ),
+        "true",
+        "the target is inside the viewport after scrollIntoView"
+    );
+    assert!(
+        eval_string(&page, "String(window.scrollY)") != "0",
+        "the document actually scrolled"
+    );
+
+    // Already visible, and `nearest` scrolls the minimum — so nothing moves.
+    let before = eval_string(&page, "String(window.scrollY)");
+    page.eval("document.getElementById('target').scrollIntoView({block: 'nearest'})")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "String(window.scrollY)"),
+        before,
+        "scrollIntoView on an already-visible element is a no-op under `nearest`"
+    );
+}
+
+/// The element ends up visible in *both* a nested scroll container and the
+/// viewport — scrolling only the innermost one leaves it off-screen.
+#[test]
+fn scroll_into_view_walks_every_ancestor() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #pad { height: 2000px }
+             #box { height: 200px; overflow: scroll }
+             #inner { height: 3000px }
+             #target { position: relative; top: 2500px; height: 50px }
+           </style>
+           <div id=pad></div>
+           <div id=box><div id=inner><div id=target></div></div></div>"##,
+    );
+    page.eval("document.getElementById('target').scrollIntoView()")
+        .unwrap();
+    assert!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)") != "0",
+        "the inner container scrolled"
+    );
+    assert!(
+        eval_string(&page, "String(window.scrollY)") != "0",
+        "and so did the document"
+    );
+}
+
+/// `document.hasFocus()` is true for the rendered document and false for one
+/// with no browsing context.
+#[test]
+fn has_focus_reflects_the_browsing_context() {
+    let page = page_with(r##"<!doctype html><p>x</p>"##);
+    assert_eq!(eval_string(&page, "String(document.hasFocus())"), "true");
+    assert_eq!(
+        eval_string(
+            &page,
+            "String(new DOMParser().parseFromString('<p>', 'text/html').hasFocus())"
+        ),
+        "false",
+        "a document with no browsing context does not have focus"
     );
 }

@@ -217,6 +217,20 @@ DOM and partially-visible cases.
 equal to `pageX` — and `pageX` tracks the document scroll at read time, so it
 cannot be precomputed. `mouseEvent.html` pins exactly this.
 
+### Wheel
+
+`Page::dispatch_wheel` fires a **cancelable** `wheel` and respects the answer: a
+carousel or modal that calls `preventDefault()` to trap scrolling actually traps
+it, and a driver that ignored the return would scroll the page out from under
+such a widget. Otherwise the nearest scrollable ancestor scrolls — walking
+outwards past any container that cannot move in that direction, which is what
+makes a wheel over a bottomed-out inner panel scroll the page instead.
+
+`document.hasFocus()` answers `true` for the rendered document — one browsing
+context, never backgrounded — and `false` for a document with none
+(`DOMParser`, `createHTMLDocument`). Real code gates polling loops, autosave and
+focus traps on it and would idle forever against a constant `false`.
+
 ### Focus events are real `FocusEvent`s
 
 `blur`/`focus`/`focusout`/`focusin` now carry `relatedTarget` — the element on

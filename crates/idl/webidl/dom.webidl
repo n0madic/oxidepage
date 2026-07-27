@@ -304,6 +304,10 @@ interface Document : Node {
   readonly attribute DocumentType? doctype;
   readonly attribute Element? documentElement;
   readonly attribute Element? activeElement;
+  // Always true: a headless page has exactly one browsing context and it is
+  // never backgrounded. A great deal of real code gates work on this — polling
+  // loops, autosave, focus traps — and would idle forever against a `false`.
+  boolean hasFocus();
   HTMLCollection getElementsByTagName(DOMString qualifiedName);
   HTMLCollection getElementsByTagNameNS(DOMString? namespace, DOMString localName);
   HTMLCollection getElementsByClassName(DOMString classNames);

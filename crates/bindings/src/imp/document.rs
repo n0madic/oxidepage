@@ -527,6 +527,14 @@ pub(crate) fn body(cx: &BindCx<'_>, this: NodeId) -> Result<Option<NodeId>, JsTh
     Ok(html_child_of_root(cx, this, &["body", "frameset"]))
 }
 
+/// `document.hasFocus()`. Always `true` for the rendered document: there is one
+/// browsing context and it is never backgrounded. A second document (from
+/// `DOMParser`/`createHTMLDocument`) has no browsing context and reports
+/// `false`, which is what makes the answer honest rather than a constant.
+pub(crate) fn has_focus(cx: &BindCx<'_>, this: NodeId) -> Result<bool, JsThrow> {
+    Ok(is_page_document(cx, this))
+}
+
 pub(crate) fn head(cx: &BindCx<'_>, this: NodeId) -> Result<Option<NodeId>, JsThrow> {
     Ok(html_child_of_root(cx, this, &["head"]))
 }
