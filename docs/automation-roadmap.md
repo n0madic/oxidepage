@@ -150,7 +150,7 @@ verification gap above.)*
 
 ---
 
-## Stage 2 — Trusted input: UI events, focus, typing
+## Stage 2 — Trusted input: UI events, focus, typing — **landed (ADR-0023)**
 
 **Why here.** The single biggest engine gap. No `UIEvent`, `MouseEvent`,
 `KeyboardEvent`, `PointerEvent`, `WheelEvent`, `FocusEvent` or `InputEvent`
@@ -176,7 +176,9 @@ coordinate to a dispatched event. `Input.dispatchMouseEvent` has nothing to call
 - `:hover` and `:active` element state. **Trap:** a new state bit needs
   `note_subtree_mutation`, not just a restyle hint, and `select.rs` must defer to
   stylo's `state_flag()` — the same shape as the `:checked`/`:disabled` work in
-  ADR-0019.
+  ADR-0019. *(The trap was already disarmed: `select.rs` defers generically, so
+  no change was needed there. `set_hovered`/`set_active` mirror `set_focused`
+  and re-derive whole ancestor chains, because `:hover` matches ancestors.)*
 - Keyboard pipeline: `keydown` → default action → `beforeinput` → value mutation
   → `input` → `keyup`. `Enter` submits a form, `Tab` moves sequential focus in
   DOM order honoring `tabindex`, `Escape` blurs. A US key table (key, code,
@@ -190,6 +192,8 @@ coordinate to a dispatched event. `Input.dispatchMouseEvent` has nothing to call
 - `Element.scrollIntoView(options)`; wheel scrolls the nearest scrollable
   ancestor through the existing clamped offsets.
 - `document.hasFocus()` → always true; a headless page is always focused.
+  *(Landed as true for the rendered document and false for one with no browsing
+  context, which keeps it honest rather than constant.)*
 
 **Non-goals.** Touch and gesture events, `Selection`/`Range` over arbitrary DOM
 (only the form-control selection model), `contenteditable`, IME/composition,
@@ -198,6 +202,28 @@ drag-and-drop, clipboard, pointer coalescing/prediction, `:focus-visible`.
 **Touch points.** New `crates/idl/webidl/uievents.webidl`, new `imp/` modules,
 `crates/dom/src/event.rs`, `crates/dom/src/select.rs` + stylo state bits,
 `crates/layout/src/geometry.rs` (hit testing), `crates/page/src/lib.rs`.
+
+**What landed beyond the plan.** Three things the work forced rather than chose:
+
+- **Event handler IDL attributes fired only in the target phase**, so `onclick`
+  delegation on a container — and `onclick="…"` on any ancestor — never worked.
+  A pre-existing bug far larger than this stage, and the single biggest source
+  of the +179 subtests.
+- **Activation moved into `dispatch_event`** rather than being reused from
+  `interaction::click` as the plan said. Triggering on the spec's real condition
+  (a `click` carrying a mouse payload) gives one path for `.click()`,
+  `dispatchEvent(new MouseEvent(...))` and synthesis, instead of two that agree
+  by inspection.
+- **`javascript:` URLs**, which ADR-0022 had left warn-and-skip. Once activation
+  reached a link that gap became a hang, so it had to close.
+
+**Deviations.** `behavior: "smooth"` is instant (no animation timeline).
+`:hover` is verified with `getComputedStyle` after a synthesized move rather
+than as an Ahem reftest — the reftest runner has no way to synthesize input, and
+extending it for one test was not worth it. Six subtests of
+`Event-dispatch-single-activation-behavior.html` are knowingly accepted failures
+in a nested-form shape the parser cannot produce; the Chrome behavior they
+depend on is recorded in ADR-0023 rather than guessed at.
 
 **Verification.** WPT `uievents/` and `html/user-interaction/focus/` subsets;
 `crates/page/tests/input.rs`; an Ahem reftest for `:hover` styling.
