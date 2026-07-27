@@ -5,7 +5,7 @@
 //! These tests assert the ordering and the state changes, which is where the
 //! bugs live.
 
-use oxidepage_bindings::{Modifiers, MouseEventKind, MouseInput};
+use oxidepage_bindings::{KeyEventKind, KeyInput, Modifiers, MouseEventKind, MouseInput};
 use oxidepage_page::{Page, PageOptions, load_html_page};
 
 /// A press-and-release at one point, the way an automation driver spells a
@@ -351,5 +351,297 @@ fn javascript_url_returning_a_string_replaces_the_document() {
         eval_string(&page, "document.getElementById('fresh').textContent"),
         "replaced",
         "a string result replaces the document with it"
+    );
+}
+
+// === Keyboard and text editing ===
+
+/// Types one key: down (which runs the default action) then up.
+fn press(page: &Page, key: &str) {
+    press_with(page, key, Modifiers::default());
+}
+
+fn press_with(page: &Page, key: &str, modifiers: Modifiers) {
+    for kind in [KeyEventKind::Down, KeyEventKind::Up] {
+        page.dispatch_key(KeyInput {
+            kind,
+            key,
+            modifiers,
+            repeat: false,
+        });
+    }
+}
+
+fn type_text(page: &Page, text: &str) {
+    for ch in text.chars() {
+        press(page, &ch.to_string());
+    }
+}
+
+/// The event sequence typing produces, and the rule that `change` waits for
+/// blur. This is the timing every real form depends on and that end-state
+/// assertions hide.
+#[test]
+fn typing_fires_input_but_change_only_on_blur() {
+    let page = page_with(
+        r##"<!doctype html>
+           <input id=t><button id=other>x</button>
+           <script>
+             window.log = [];
+             const t = document.getElementById("t");
+             for (const type of ["keydown", "keypress", "beforeinput", "input", "change", "keyup"]) {
+               t.addEventListener(type, e => {
+                 log.push(type + (e.inputType ? ":" + e.inputType : ""));
+               });
+             }
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    press(&page, "a");
+
+    assert_eq!(
+        eval_string(&page, "window.log.join(',')"),
+        "keydown,keypress,beforeinput:insertText,input:insertText,keyup",
+        "typing fires beforeinput/input around the mutation, and no change"
+    );
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "a"
+    );
+
+    page.eval("window.log = []; document.getElementById('other').focus()")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "window.log.join(',')"),
+        "change",
+        "change fires on blur, once, because the value differs from focus time"
+    );
+}
+
+/// Blur without an edit owes no `change` — the comparison is against the value
+/// at focus time, not against the default value.
+#[test]
+fn blur_without_an_edit_fires_no_change() {
+    let page = page_with(
+        r##"<!doctype html>
+           <input id=t value=hello><button id=other>x</button>
+           <script>
+             window.changes = 0;
+             document.getElementById("t").addEventListener("change", () => changes++);
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    page.eval("document.getElementById('other').focus()")
+        .unwrap();
+    assert_eq!(eval_string(&page, "String(window.changes)"), "0");
+
+    // And a round trip back to the same value also owes nothing.
+    page.eval("document.getElementById('t').focus()").unwrap();
+    type_text(&page, "x");
+    press(&page, "Backspace");
+    page.eval("document.getElementById('other').focus()")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "String(window.changes)"),
+        "0",
+        "an edit that restores the original value owes no change"
+    );
+}
+
+/// Text accumulates, `Backspace` deletes, and the caret tracks it.
+#[test]
+fn typing_edits_the_value() {
+    let page = page_with(r##"<!doctype html><input id=t>"##);
+    page.eval("document.getElementById('t').focus()").unwrap();
+    type_text(&page, "abc");
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "abc"
+    );
+
+    press(&page, "Backspace");
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "ab"
+    );
+}
+
+/// `maxlength` caps user input.
+#[test]
+fn maxlength_caps_typing() {
+    let page = page_with(r##"<!doctype html><input id=t maxlength=3>"##);
+    page.eval("document.getElementById('t').focus()").unwrap();
+    type_text(&page, "abcdef");
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "abc",
+        "maxlength truncates user edits"
+    );
+}
+
+/// A `readonly` control refuses edits but still fires key events.
+#[test]
+fn readonly_refuses_edits() {
+    let page = page_with(
+        r##"<!doctype html><input id=t readonly value=fixed>
+           <script>
+             window.keys = 0;
+             document.getElementById("t").addEventListener("keydown", () => keys++);
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    type_text(&page, "abc");
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "fixed"
+    );
+    assert_eq!(
+        eval_string(&page, "String(window.keys)"),
+        "3",
+        "the key events still fire — only the edit is refused"
+    );
+}
+
+/// `preventDefault()` on `keydown` suppresses the edit but not the events.
+#[test]
+fn preventdefault_on_keydown_suppresses_the_edit() {
+    let page = page_with(
+        r##"<!doctype html><input id=t>
+           <script>
+             document.getElementById("t")
+               .addEventListener("keydown", e => e.preventDefault());
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    type_text(&page, "abc");
+    assert_eq!(eval_string(&page, "document.getElementById('t').value"), "");
+}
+
+/// A modifier-held key is a shortcut, not text.
+#[test]
+fn ctrl_key_does_not_type() {
+    let page = page_with(r##"<!doctype html><input id=t>"##);
+    page.eval("document.getElementById('t').focus()").unwrap();
+    press_with(
+        &page,
+        "a",
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "",
+        "Ctrl+A must not insert an 'a'"
+    );
+}
+
+/// Enter in a text control submits its form.
+#[test]
+fn enter_submits_the_form() {
+    let page = page_with(
+        r##"<!doctype html>
+           <form id=f onsubmit="window.submitted = true; return false">
+             <input id=t>
+           </form>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    press(&page, "Enter");
+    assert_eq!(eval_string(&page, "String(window.submitted)"), "true");
+}
+
+/// The sequential focus order: positive `tabindex` ascending first, then
+/// document order over the natively focusable and `tabindex="0"`.
+#[test]
+fn tab_follows_the_sequential_focus_order() {
+    let page = page_with(
+        r##"<!doctype html>
+           <input id=a>
+           <input id=b tabindex=2>
+           <input id=c tabindex=1>
+           <input id=d tabindex=-1>
+           <input id=e>"##,
+    );
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        press(&page, "Tab");
+        seen.push(eval_string(&page, "document.activeElement.id"));
+    }
+    assert_eq!(
+        seen,
+        ["c", "b", "a", "e"],
+        "positive tabindex first (ascending), then document order; tabindex=-1 is skipped"
+    );
+}
+
+/// Shift+Tab walks the order backwards.
+#[test]
+fn shift_tab_walks_backwards() {
+    let page = page_with(r##"<!doctype html><input id=a><input id=b><input id=c>"##);
+    page.eval("document.getElementById('c').focus()").unwrap();
+    press_with(
+        &page,
+        "Tab",
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(eval_string(&page, "document.activeElement.id"), "b");
+}
+
+/// `insert_text` is the paste path: one mutation, one `beforeinput`/`input`
+/// pair, and no key events at all.
+#[test]
+fn insert_text_is_a_single_edit() {
+    let page = page_with(
+        r##"<!doctype html><input id=t>
+           <script>
+             window.log = [];
+             for (const type of ["keydown", "beforeinput", "input"]) {
+               document.getElementById("t")
+                 .addEventListener(type, () => log.push(type));
+             }
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    page.insert_text("pasted");
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "pasted"
+    );
+    assert_eq!(
+        eval_string(&page, "window.log.join(',')"),
+        "beforeinput,input",
+        "insert_text produces no key events"
+    );
+}
+
+/// The legacy `keyCode`/`which`/`code` members every hotkey library reads.
+#[test]
+fn keyboard_event_members_are_populated() {
+    let page = page_with(
+        r##"<!doctype html><input id=t>
+           <script>
+             window.seen = "";
+             document.getElementById("t").addEventListener("keydown", e => {
+               seen = [e.key, e.code, e.keyCode, e.which, e.shiftKey].join(",");
+             });
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    press_with(
+        &page,
+        "A",
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(
+        eval_string(&page, "window.seen"),
+        "A,KeyA,65,65,true",
+        "an uppercase A is the physical KeyA with shift held"
     );
 }

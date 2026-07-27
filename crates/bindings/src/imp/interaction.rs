@@ -431,6 +431,45 @@ fn move_focus(cx: &BindCx<'_>, to: Option<NodeId>) -> Result<(), JsThrow> {
     // `:focus`/`:focus-within` on both ancestor chains. The borrow is released
     // before any event fires — listeners will re-enter the DOM.
     let (blurred, focused) = cx.state.dom.borrow_mut().set_focused(to);
+
+    // A text control fires `change` on **blur**, and only when the value
+    // actually differs from the one it had when focus arrived — which is why
+    // the snapshot is taken below rather than derived. Getting this wrong is
+    // invisible to a unit test that only checks the final value, and breaks
+    // every form that validates on `change`.
+    //
+    // It fires before `blur`, as the spec's "user agent must... fire change,
+    // then unfocus" orders it.
+    if let Some(old) = blurred {
+        let owed = {
+            let dom = cx.state.dom.borrow();
+            dom.is_text_entry(old)
+                .then(|| dom.value_at_focus(old))
+                .flatten()
+                .is_some_and(|before| before != dom.form_value(old))
+        };
+        cx.state.dom.borrow_mut().set_value_at_focus(old, None);
+        if owed {
+            fire(cx, old, "change", true, false)?;
+        }
+    }
+    if let Some(new) = focused {
+        let value = {
+            let dom = cx.state.dom.borrow();
+            dom.is_text_entry(new).then(|| dom.form_value(new))
+        };
+        if let Some(value) = value {
+            cx.state
+                .dom
+                .borrow_mut()
+                .set_value_at_focus(new, Some(value));
+            // Focus places a collapsed caret at the end of the value, which is
+            // where typing continues from.
+            let end = cx.state.dom.borrow().form_value(new).encode_utf16().count();
+            cx.state.dom.borrow_mut().collapse_selection_to(new, end);
+        }
+    }
+
     // Each half names the other as `relatedTarget`: on `blur` that is the
     // element gaining focus, on `focus` the one that lost it. A focus manager
     // reads it to decide whether focus left its subtree at all.

@@ -30,7 +30,10 @@ use oxidepage_style::Viewport;
 
 pub use cx::BindCx;
 pub use events::{EventTargetKey, Modifiers, dispatch_event, fire_pop_state, fire_simple_event};
-pub use imp::input_synth::{MouseEventKind, MouseInput, dispatch_mouse as imp_dispatch_mouse};
+pub use imp::input_synth::{
+    KeyEventKind, KeyInput, MouseEventKind, MouseInput, dispatch_key as imp_dispatch_key,
+    dispatch_mouse as imp_dispatch_mouse, insert_text as imp_insert_text,
+};
 pub use script::is_classic_script_type;
 pub use state::{
     ConsoleLevel, HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState,

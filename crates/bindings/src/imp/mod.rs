@@ -66,6 +66,7 @@ pub(crate) mod interaction;
 pub(crate) mod intersection_observer;
 pub(crate) mod intersection_observer_entry;
 pub(crate) mod keyboard_event;
+pub(crate) mod keys;
 pub(crate) mod location;
 pub(crate) mod media_query_list;
 pub(crate) mod mime_type_array;

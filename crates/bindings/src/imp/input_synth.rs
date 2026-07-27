@@ -21,7 +21,11 @@ use oxidepage_base::NodeId;
 use oxidepage_js::JsThrow;
 
 use crate::cx::BindCx;
-use crate::events::{EventData, EventTargetKey, Modifiers, MouseFields, UiKind, UiPayload};
+use crate::events::{
+    EventData, EventTargetKey, InputFields, KeyboardFields, Modifiers, MouseFields, UiKind,
+    UiPayload,
+};
+use crate::imp::keys;
 
 /// Which mouse event a [`dispatch_mouse`] call stands for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -350,4 +354,266 @@ fn common_ancestor(cx: &BindCx<'_>, a: Option<NodeId>, b: Option<NodeId>) -> Opt
     chain(cx, Some(b))
         .into_iter()
         .find(|id| a_chain.contains(id))
+}
+
+// === Keyboard ===
+
+/// Which keyboard event a [`dispatch_key`] call stands for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyEventKind {
+    Down,
+    Up,
+}
+
+/// A synthesized key press.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyInput<'a> {
+    pub kind: KeyEventKind,
+    /// The `KeyboardEvent.key` value: `"a"`, `"A"`, `"Enter"`, `"ArrowLeft"`.
+    pub key: &'a str,
+    pub modifiers: Modifiers,
+    pub repeat: bool,
+}
+
+/// The element a key goes to: the focused element, or the body when nothing
+/// holds focus — which is what a browser does and what makes a global hotkey
+/// listener on `document` work.
+fn key_target(cx: &BindCx<'_>) -> Option<NodeId> {
+    if let Some(focused) = cx.state.dom.borrow().focused() {
+        return Some(focused);
+    }
+    let document = cx.state.dom.borrow().document();
+    crate::imp::document::body(cx, document).ok().flatten()
+}
+
+fn keyboard_payload(
+    resolved: &keys::ResolvedKey,
+    input: &KeyInput<'_>,
+    char_code: u32,
+) -> UiPayload {
+    let mut payload = UiPayload::new(UiKind::Keyboard(Box::new(KeyboardFields {
+        key: resolved.key.clone(),
+        code: resolved.code.clone(),
+        location: 0,
+        repeat: input.repeat,
+        is_composing: false,
+        char_code,
+        key_code: resolved.key_code,
+    })));
+    payload.has_view = true;
+    payload.modifiers = input.modifiers;
+    payload
+}
+
+/// Fires one trusted `beforeinput`/`input` at `target`.
+fn fire_input_event(
+    cx: &BindCx<'_>,
+    target: NodeId,
+    event_type: &str,
+    cancelable: bool,
+    input_type: &str,
+    data: Option<String>,
+) -> Result<bool, JsThrow> {
+    let mut payload = UiPayload::new(UiKind::Input(Box::new(InputFields {
+        data,
+        is_composing: false,
+        input_type: input_type.to_owned(),
+    })));
+    payload.has_view = true;
+    fire_at(
+        cx,
+        target,
+        "InputEvent",
+        event_type,
+        /* bubbles */ true,
+        cancelable,
+        payload,
+    )
+}
+
+/// Runs one synthesized key event and, for a key that edits text, the
+/// `beforeinput` → mutate → `input` sequence its default action produces.
+pub fn dispatch_key(cx: &BindCx<'_>, input: KeyInput<'_>) -> Result<(), JsThrow> {
+    let Some(target) = key_target(cx) else {
+        return Ok(());
+    };
+    let resolved = keys::lookup(input.key);
+
+    if input.kind == KeyEventKind::Up {
+        let payload = keyboard_payload(&resolved, &input, 0);
+        fire_at(cx, target, "KeyboardEvent", "keyup", true, true, payload)?;
+        return Ok(());
+    }
+
+    let payload = keyboard_payload(&resolved, &input, 0);
+    let proceed = fire_at(cx, target, "KeyboardEvent", "keydown", true, true, payload)?;
+
+    // `keypress` is deprecated and still listened for by jQuery and every
+    // hotkey library, so a printable key fires one. It carries `charCode`,
+    // which is what `which` reports for it.
+    if proceed && let Some(text) = resolved.text.as_deref() {
+        let char_code = text.chars().next().map_or(0, |c| c as u32);
+        let payload = keyboard_payload(&resolved, &input, char_code);
+        fire_at(cx, target, "KeyboardEvent", "keypress", true, true, payload)?;
+    }
+
+    // The default action, suppressed when `keydown` was cancelled — that is
+    // what `preventDefault()` on `keydown` means and why forms use it.
+    if proceed {
+        run_key_default_action(cx, target, &resolved, &input)?;
+    }
+    Ok(())
+}
+
+/// The default action of a key: insert text, edit, submit, blur, or move focus.
+fn run_key_default_action(
+    cx: &BindCx<'_>,
+    target: NodeId,
+    resolved: &keys::ResolvedKey,
+    input: &KeyInput<'_>,
+) -> Result<(), JsThrow> {
+    // A modifier-held key is a shortcut, not text: `Ctrl+A` must not type "a".
+    let shortcut = input.modifiers.ctrl || input.modifiers.meta || input.modifiers.alt;
+
+    match resolved.key.as_str() {
+        "Enter" => {
+            // Implicit submission: Enter in a text control submits its form.
+            if cx.state.dom.borrow().is_text_entry(target) {
+                let form = cx.state.dom.borrow().form_owner(target);
+                if let Some(form) = form {
+                    crate::imp::form_submit::submit(cx, form, None, /* fire_event */ true)?;
+                }
+            }
+            Ok(())
+        }
+        "Escape" => {
+            if cx.state.dom.borrow().focused() == Some(target) {
+                crate::imp::interaction::set_focus_from_input(cx, None)?;
+            }
+            Ok(())
+        }
+        "Tab" => move_sequential_focus(cx, input.modifiers.shift),
+        "Backspace" | "Delete" if !shortcut => {
+            let forward = resolved.key == "Delete";
+            edit_text(cx, target, None, forward)
+        }
+        _ if !shortcut => match resolved.text.as_deref() {
+            Some(text) => edit_text(cx, target, Some(text.to_owned()), false),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// Applies one text edit to a text control: replace the selection with `data`,
+/// or — when `data` is `None` — delete either the selection or one character.
+///
+/// Fires `beforeinput` (cancelable), mutates, then `input`. `change` is **not**
+/// fired here: a text control fires it on blur, and only if the value differs
+/// from the one it had when focus arrived.
+fn edit_text(
+    cx: &BindCx<'_>,
+    target: NodeId,
+    data: Option<String>,
+    forward: bool,
+) -> Result<(), JsThrow> {
+    {
+        let dom = cx.state.dom.borrow();
+        if !dom.is_text_entry(target) || dom.is_edit_blocked(target) {
+            return Ok(());
+        }
+    }
+
+    let input_type = match (&data, forward) {
+        (Some(_), _) => "insertText",
+        (None, false) => "deleteContentBackward",
+        (None, true) => "deleteContentForward",
+    };
+    if !fire_input_event(cx, target, "beforeinput", true, input_type, data.clone())? {
+        return Ok(());
+    }
+
+    // Re-read everything after the dispatch: a `beforeinput` listener may have
+    // changed the value or the selection out from under us.
+    let applied = {
+        let mut dom = cx.state.dom.borrow_mut();
+        if !dom.get(target).is_some_and(|n| n.is_connected()) {
+            return Ok(());
+        }
+        let value: Vec<u16> = dom.form_value(target).encode_utf16().collect();
+        let (mut start, end, _) = dom.selection(target);
+        let mut end = end;
+
+        if data.is_none() && start == end {
+            // A collapsed caret deletes one character in the given direction.
+            if forward {
+                end = (end + 1).min(value.len());
+            } else {
+                start = start.saturating_sub(1);
+            }
+        }
+        if start == end && data.is_none() {
+            return Ok(());
+        }
+
+        let inserted: Vec<u16> = data.as_deref().unwrap_or("").encode_utf16().collect();
+        let mut next: Vec<u16> = Vec::with_capacity(value.len() - (end - start) + inserted.len());
+        next.extend_from_slice(&value[..start]);
+        next.extend_from_slice(&inserted);
+        next.extend_from_slice(&value[end..]);
+
+        // `maxlength` caps *user* edits only — assigning `value` from script
+        // bypasses it, which is why the check lives here and not in the DOM.
+        let mut caret = start + inserted.len();
+        if let Some(max) = dom.max_length(target)
+            && next.len() > max
+            && !inserted.is_empty()
+        {
+            next.truncate(max);
+            caret = caret.min(next.len());
+        }
+
+        let Ok(text) = String::from_utf16(&next) else {
+            return Ok(());
+        };
+        dom.set_form_value(target, text);
+        dom.collapse_selection_to(target, caret);
+        true
+    };
+
+    if applied {
+        fire_input_event(cx, target, "input", false, input_type, data)?;
+    }
+    Ok(())
+}
+
+/// `Input.insertText`: one mutation with one `beforeinput`/`input` pair and no
+/// key events at all — a paste, or an IME commit, not typing.
+pub fn insert_text(cx: &BindCx<'_>, text: &str) -> Result<(), JsThrow> {
+    let Some(target) = key_target(cx) else {
+        return Ok(());
+    };
+    edit_text(cx, target, Some(text.to_owned()), false)
+}
+
+/// Moves focus to the next (or previous) element in the sequential focus order.
+fn move_sequential_focus(cx: &BindCx<'_>, backward: bool) -> Result<(), JsThrow> {
+    let order = {
+        let dom = cx.state.dom.borrow();
+        dom.sequential_focus_order()
+    };
+    if order.is_empty() {
+        return Ok(());
+    }
+    let current = cx.state.dom.borrow().focused();
+    let index = current.and_then(|id| order.iter().position(|&x| x == id));
+    let next = match (index, backward) {
+        // Wrapping is what a single browsing context does: there is no chrome
+        // to hand focus back to.
+        (Some(i), false) => order[(i + 1) % order.len()],
+        (Some(i), true) => order[(i + order.len() - 1) % order.len()],
+        (None, false) => order[0],
+        (None, true) => order[order.len() - 1],
+    };
+    crate::imp::interaction::set_focus_from_input(cx, Some(next))
 }

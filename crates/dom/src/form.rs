@@ -41,6 +41,51 @@ pub struct FormState {
     /// `input.indeterminate`. Purely an IDL/`:indeterminate` concern — it has
     /// no content attribute and no dirty flag.
     pub(crate) indeterminate: bool,
+    /// The text entry cursor, as UTF-16 offsets into the value — the units
+    /// `selectionStart`/`selectionEnd` are defined in, and the units script
+    /// will compare against `value.length`. Equal start and end is a collapsed
+    /// caret, which is the overwhelmingly common case.
+    pub(crate) selection_start: usize,
+    pub(crate) selection_end: usize,
+    /// `"forward"`, `"backward"` or `"none"`.
+    pub(crate) selection_direction: SelectionDirection,
+    /// The value at the moment the control took focus, kept so that blur can
+    /// decide whether to fire `change`. `None` when the control is not focused.
+    ///
+    /// A text control fires `input` on every mutation but `change` **only on
+    /// blur, and only if the value actually differs from what it was when
+    /// focus arrived**. Recomputing that from the current value is impossible;
+    /// it has to be snapshotted at focus time.
+    pub(crate) value_at_focus: Option<String>,
+}
+
+/// `HTMLInputElement.selectionDirection`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SelectionDirection {
+    #[default]
+    None,
+    Forward,
+    Backward,
+}
+
+impl SelectionDirection {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Forward => "forward",
+            Self::Backward => "backward",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "forward" => Self::Forward,
+            "backward" => Self::Backward,
+            _ => Self::None,
+        }
+    }
 }
 
 /// What a click's legacy-pre-activation behavior changed, so that a cancelled
@@ -225,6 +270,111 @@ impl DomTree {
         el.form_state_mut().value = Some(value);
         // `:placeholder-shown` and (later) validity depend on the value.
         self.update_element_state(id);
+    }
+
+    /// Whether the element is a text entry control — one that has a caret, a
+    /// selection and an editable value. `<input type=checkbox>` has a value but
+    /// no text entry; `<textarea>` has both.
+    #[must_use]
+    pub fn is_text_entry(&self, id: NodeId) -> bool {
+        let Some(el) = self.get(id).and_then(|n| n.as_element()) else {
+            return false;
+        };
+        if !el.is_html_element() {
+            return false;
+        }
+        match &**el.local_name() {
+            "textarea" => true,
+            "input" => matches!(
+                crate::input_type(el),
+                "text" | "search" | "url" | "tel" | "password" | "email" | "number"
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether the control refuses edits: `readonly` or disabled.
+    #[must_use]
+    pub fn is_edit_blocked(&self, id: NodeId) -> bool {
+        let Some(el) = self.get(id).and_then(|n| n.as_element()) else {
+            return true;
+        };
+        el.attr(&crate::node::attr_name("readonly".into()))
+            .is_some()
+            || self.is_actually_disabled(id)
+    }
+
+    /// `maxlength`, when present and valid. Enforced only against *user* edits,
+    /// per HTML: setting `value` from script bypasses it.
+    #[must_use]
+    pub fn max_length(&self, id: NodeId) -> Option<usize> {
+        let el = self.get(id).and_then(|n| n.as_element())?;
+        el.attr(&crate::node::attr_name("maxlength".into()))?
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|&n| n >= 0)
+            .map(|n| n as usize)
+    }
+
+    /// The selection as `(start, end, direction)` in UTF-16 offsets, clamped to
+    /// the current value — the value can change under a stale selection (script
+    /// assigning `value`, or a `maxlength` truncation).
+    #[must_use]
+    pub fn selection(&self, id: NodeId) -> (usize, usize, SelectionDirection) {
+        let len = self.form_value(id).encode_utf16().count();
+        let Some(state) = self
+            .get(id)
+            .and_then(|n| n.as_element())
+            .and_then(ElementData::form_state)
+        else {
+            return (len, len, SelectionDirection::None);
+        };
+        let start = state.selection_start.min(len);
+        let end = state.selection_end.min(len).max(start);
+        (start, end, state.selection_direction)
+    }
+
+    /// `setSelectionRange()`. `end` is clamped to be at least `start`, which is
+    /// what the spec's "if end is less than start then set end to start" says.
+    pub fn set_selection(
+        &mut self,
+        id: NodeId,
+        start: usize,
+        end: usize,
+        direction: SelectionDirection,
+    ) {
+        let len = self.form_value(id).encode_utf16().count();
+        let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) else {
+            return;
+        };
+        let state = el.form_state_mut();
+        state.selection_start = start.min(len);
+        state.selection_end = end.min(len).max(state.selection_start);
+        state.selection_direction = direction;
+    }
+
+    /// Places a collapsed caret at the end of the value — what a control gets
+    /// when focus arrives and what an insertion leaves behind.
+    pub fn collapse_selection_to(&mut self, id: NodeId, offset: usize) {
+        self.set_selection(id, offset, offset, SelectionDirection::None);
+    }
+
+    /// Snapshots the value as focus arrives, so blur can decide whether the
+    /// `change` event is owed. Clearing it (`None`) is what a blur does.
+    pub fn set_value_at_focus(&mut self, id: NodeId, value: Option<String>) {
+        if let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) {
+            el.form_state_mut().value_at_focus = value;
+        }
+    }
+
+    /// The value this control had when it took focus, if it is focused.
+    #[must_use]
+    pub fn value_at_focus(&self, id: NodeId) -> Option<String> {
+        self.get(id)
+            .and_then(|n| n.as_element())
+            .and_then(ElementData::form_state)
+            .and_then(|f| f.value_at_focus.clone())
     }
 
     /// The default value: the `value` content attribute (or child text for a
@@ -866,6 +1016,33 @@ impl DomTree {
             }
         }
         self.is_focusable(id).then_some(0)
+    }
+
+    /// The sequential focus order: the elements `Tab` visits, in order.
+    ///
+    /// HTML's rule, and the ordering real pages depend on: **positive
+    /// `tabindex` first, ascending**, ties broken by document order; then
+    /// everything with `tabindex="0"` or a native default, in document order.
+    /// `tabindex="-1"` is focusable but absent here — that is exactly what the
+    /// negative value means.
+    #[must_use]
+    pub fn sequential_focus_order(&self) -> Vec<NodeId> {
+        let Some(root) = self.document_element() else {
+            return Vec::new();
+        };
+        let mut ordered: Vec<(i32, usize, NodeId)> = Vec::new();
+        for (position, id) in self.inclusive_descendants(root).enumerate() {
+            if let Some(index) = self.tab_index(id) {
+                ordered.push((index, position, id));
+            }
+        }
+        // Positive indices sort before the zero/native group, ascending; within
+        // a group, document order.
+        ordered.sort_by_key(|&(index, position, _)| {
+            let group = if index > 0 { 0 } else { 1 };
+            (group, if index > 0 { index } else { 0 }, position)
+        });
+        ordered.into_iter().map(|(_, _, id)| id).collect()
     }
 
     /// The element the pointer is over (`:hover`), or `None`.

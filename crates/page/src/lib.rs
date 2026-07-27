@@ -1118,6 +1118,35 @@ impl Page {
         self.run_until_stalled();
     }
 
+    /// Synthesizes one trusted key event at the focused element (or the body).
+    ///
+    /// A `keydown` that is not cancelled runs the key's default action, which
+    /// is where typing actually happens: `beforeinput` → mutate the value →
+    /// `input`. `change` is deliberately **not** fired here — a text control
+    /// fires it on blur, and only when the value differs from the one it had
+    /// when focus arrived.
+    ///
+    /// `Enter` submits the form, `Escape` blurs, `Tab` moves sequential focus.
+    pub fn dispatch_key(&self, input: oxidepage_bindings::KeyInput<'_>) {
+        self.flush_layout();
+        let result = self.with_cx(|cx| oxidepage_bindings::imp_dispatch_key(cx, input));
+        if let Err(throw) = result {
+            report_throw(&self.hooks, throw);
+        }
+        self.run_until_stalled();
+    }
+
+    /// Inserts text at the caret as a single edit, with no key events — a paste
+    /// or an IME commit, which is what CDP's `Input.insertText` means.
+    pub fn insert_text(&self, text: &str) {
+        self.flush_layout();
+        let result = self.with_cx(|cx| oxidepage_bindings::imp_insert_text(cx, text));
+        if let Err(throw) = result {
+            report_throw(&self.hooks, throw);
+        }
+        self.run_until_stalled();
+    }
+
     /// Drains the navigation milestone stream (see [`NavigationEvent`]).
     #[must_use]
     pub fn drain_navigation_events(&self) -> Vec<NavigationEvent> {
