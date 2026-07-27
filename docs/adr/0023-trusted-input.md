@@ -154,6 +154,69 @@ string result replaces the document**. `javascript:void 0` and every
 exactly as it was. Queued as a `PendingNavigation`, not run inline, for the same
 reason every other navigation is.
 
+### Typing, and why `change` waits for blur
+
+`dispatch_key` fires `keydown` → `keypress` (printable keys only — deprecated,
+and still what jQuery and every hotkey library listen for) → the default action
+→ `keyup`. The default action is where editing happens: `beforeinput`
+(cancelable) → mutate → `input`. A `keydown` that a listener cancels suppresses
+the edit and nothing else.
+
+**`change` is not fired there.** A text control fires it on **blur**, and only
+when the value differs from the one it had when focus *arrived*. That cannot be
+recomputed after the fact, so `move_focus` snapshots the value as focus lands
+and compares on the way out. Getting this wrong is invisible to a test that
+checks only the final value, and breaks every form that validates on `change`.
+
+`maxlength` caps **user** edits only — assigning `value` from script bypasses
+it — so the check lives in the synthesis path, not in the DOM layer.
+
+Selection offsets are UTF-16 code units, the units script compares against
+`value.length`. `selectionStart`/`selectionEnd` are typed `any` in the IDL
+rather than `unsigned long?`, because the generator has no nullable-number
+return and the distinction is load-bearing: a control without text entry must
+report **null**, since 0 is a valid caret position and feature detection reads
+the null.
+
+`sequential_focus_order` implements HTML's rule — positive `tabindex` first in
+ascending order, ties by document order, then everything with `tabindex="0"` or
+a native default. `tabindex="-1"` is focusable but absent from the order, which
+is exactly what the negative value means. Tab wraps, because a single browsing
+context has no chrome to hand focus back to.
+
+### `scrollIntoView`, and un-skipping its corpus
+
+`Element.scrollIntoView(arg)` is implemented over the existing `scroll_parent`
+chain, walking **every** scrollable ancestor innermost-first — an element nested
+in a scroll container inside the document has to end up visible in both, and
+scrolling only the nearest one leaves it off-screen, which is the first thing an
+automation driver hits. Each step re-reads the element's rect, because the
+previous scroll moved it.
+
+`behavior: "smooth"` is treated as **instant**, and that is a documented limit:
+there is no animation timeline here, and a driver wants the final position.
+
+ADR-0006 §8 skipped the whole vendored `scrollIntoView` corpus as "out of
+scope". That reason is gone, so the skips are gone: 38 files now run, and
+`mouseEvent.html` with them. Two are skipped **by name**, with the reason
+recorded, because they can only ever hang rather than fail:
+`scrollIntoView-container.html` (asserts propagation to outer frames) and
+`mouseEvent-offsetXY-svg.html` (drives the pointer through WPT's `test_driver`
+protocol, which the runner does not implement).
+
+Everything else is left running and its failures are **tracked**, not
+suppressed — a FAIL belongs in the expectations file, which is the repo's
+standing contract. The bulk of them (~90) are the vertical and sideways
+writing-mode files: the engine lays out `horizontal-tb` only, an orthogonal
+pre-existing limit that has nothing to do with `scrollIntoView`. Core behavior
+passes — `scrollIntoView-horizontal-tb-writing-mode.html` 9/9, plus the shadow
+DOM and partially-visible cases.
+
+`MouseEvent.offsetX/offsetY` are stored as an `Option`: `None` for a
+*constructed* event, which has no target and whose `offsetX` the spec makes
+equal to `pageX` — and `pageX` tracks the document scroll at read time, so it
+cannot be precomputed. `mouseEvent.html` pins exactly this.
+
 ### Focus events are real `FocusEvent`s
 
 `blur`/`focus`/`focusout`/`focusin` now carry `relatedTarget` — the element on
@@ -162,8 +225,10 @@ left its subtree at all.
 
 ## Consequences
 
-WPT went from 16129 to 16246 passing subtests; 123 tracked non-PASS entries were
-removed and 6 added.
+WPT went from 16129 to 16303 passing subtests. 123 tracked non-PASS entries were
+removed by the event and activation work and 6 added (below); un-skipping the
+`scrollIntoView`/`mouseEvent` corpus then added 201 subtests to the run, of
+which 57 pass.
 
 **The 6 additions are a knowingly accepted divergence**, and the reasoning is
 recorded here rather than buried in a rebaseline. They are all of
@@ -198,6 +263,9 @@ interface exists and is constructible — `Event-subclasses-constructors.html`
 checks it — but nothing fires one, because there is no IME in a headless
 process); drag-and-drop; `DataTransfer`; clipboard; pointer coalescing and
 prediction; `:focus-visible`.
+
+Smooth scrolling stays out (`smooth-scroll` remains skipped: its async tests
+wait on an animation that never runs).
 
 `:hover` is verified with `getComputedStyle` after a synthesized move, **not**
 as a reftest: `xtask/src/reftest.rs` renders a file with `load_html` + `settle`

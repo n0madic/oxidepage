@@ -374,8 +374,19 @@ v1 limits.
   `FocusEvent`s with `relatedTarget`. **Fixed along the way, and bigger than the
   stage that found it:** event handler IDL attributes (`onclick` and friends)
   fired only in the target phase, so delegation on a container never worked.
-  **Not implemented:** keyboard synthesis, the text-editing/selection model,
-  `scrollIntoView`, wheel, touch and gesture events, `contenteditable`,
-  drag-and-drop, clipboard, IME composition *generation* (the interface exists),
-  and `:focus-visible`. Decisions and the one accepted WPT divergence: ADR-0023.
+  `Page::dispatch_key` and `Page::insert_text` type: `keydown` → `keypress` →
+  the default action (`beforeinput` → mutate → `input`) → `keyup`, with `Enter`
+  submitting, `Escape` blurring and `Tab` walking HTML's sequential focus order
+  (positive `tabindex` ascending, then document order). **`change` fires on
+  blur**, and only when the value differs from the one the control had when
+  focus arrived — so `move_focus` snapshots it on the way in. `selectionStart`/
+  `selectionEnd`/`selectionDirection`/`setSelectionRange()`/`select()` and
+  `maxLength`/`minLength` are implemented; a control without text entry reports
+  `null` rather than 0. `Element.scrollIntoView()` walks every scrollable
+  ancestor, which un-skipped 38 vendored WPT files.
+  **Not implemented:** wheel events, touch and gesture events,
+  `Selection`/`Range` over arbitrary DOM, `contenteditable`, drag-and-drop,
+  clipboard, IME composition *generation* (the interface exists), smooth
+  scrolling (`scrollIntoView` treats it as instant), and `:focus-visible`.
+  Decisions and the one accepted WPT divergence: ADR-0023.
 - Phases 8+ (GPU raster, C ABI, CDP, …): not started.

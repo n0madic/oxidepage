@@ -118,17 +118,27 @@ const SKIP_SUBSTRINGS: &[&str] = &[
     "iframe",
     "Frame",
     "frameElement",
-    // scrollIntoView / smooth scrolling / visualViewport are out of scope
-    // (ADR-0006 §8); their async tests wait for scroll animations forever.
-    "scrollIntoView",
-    "scrollintoview",
+    // Smooth scrolling is out of scope (ADR-0023): there is no animation
+    // timeline, so these async tests wait for a scroll animation forever.
+    // `scrollIntoView` itself is implemented and no longer skipped — it treats
+    // `behavior: "smooth"` as instant.
     "smooth-scroll",
     "scrollBy-scrollTo-arguments",
     "visualViewport",
     // Requires window.open / multiple browsing contexts.
     "window-open",
-    "mouseEvent",
     "elementsFromPoint-iframes",
+    // `scrollIntoView` is implemented (ADR-0023) and its files run. This one
+    // is the exception: it asserts propagation to *outer frames*, so it waits
+    // on a subdocument load that never happens and can only time out. The
+    // writing-mode and smooth-scroll files are left running — they FAIL
+    // honestly against the engine's vertical-writing-mode and animation
+    // limits, and a FAIL belongs in the expectations, not in this list.
+    "scrollIntoView-container",
+    // Drives the pointer through WPT's `test_driver` protocol, which needs a
+    // browser-side driver the runner does not implement — so it waits forever.
+    // `mouseEvent.html` itself needs no driver and runs.
+    "mouseEvent-offsetXY-svg",
 ];
 
 /// Wall-clock budget per test before the runner records `TIMEOUT`. Generous

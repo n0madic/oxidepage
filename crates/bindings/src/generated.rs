@@ -1636,6 +1636,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         0,
         gen_element_check_visibility,
     )?;
+    cx.define_method(
+        &proto_element,
+        "scrollIntoView",
+        0,
+        gen_element_scroll_into_view,
+    )?;
     cx.define_method(&proto_element, "scrollParent", 0, gen_element_scroll_parent)?;
     cx.define_accessor_ce(
         &proto_element,
@@ -8327,6 +8333,13 @@ fn gen_element_check_visibility(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
     let this = cx.this_element(&call.this)?;
     let a0 = call.arg(0);
     Ok(JsValue::Bool(imp::element::check_visibility(cx, this, a0)?))
+}
+
+fn gen_element_scroll_into_view(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = call.arg(0);
+    imp::element::scroll_into_view(cx, this, a0)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_element_scroll_parent(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

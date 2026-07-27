@@ -885,3 +885,171 @@ pub(crate) fn set_part(cx: &BindCx<'_>, this: NodeId, value: JsValue) -> Result<
         .set_attribute(this, attr_name(LocalName::from("part")), text.into());
     Ok(())
 }
+
+/// `Element.scrollIntoView(arg)`, where `arg` is the legacy boolean or a
+/// `ScrollIntoViewOptions`.
+///
+/// Scrolls every scrollable ancestor, innermost first, so an element nested in
+/// a scroll container inside the document ends up visible in both — scrolling
+/// only the nearest one leaves it off-screen, which is the bug an automation
+/// driver hits immediately.
+///
+/// **`behavior: "smooth"` is treated as instant** and that is a documented
+/// limit: there is no animation timeline here, and a driver wants the final
+/// position anyway.
+pub(crate) fn scroll_into_view(cx: &BindCx<'_>, this: NodeId, arg: JsValue) -> Result<(), JsThrow> {
+    let (block, inline) = scroll_alignment(cx, &arg);
+
+    // Every scrollable ancestor, innermost first: an element nested in a scroll
+    // container inside the document has to end up visible in *both*. Each step
+    // re-reads the element's rect, because the previous scroll moved it.
+    //
+    // `node` walks up the chain; the element being revealed stays `this`.
+    let mut node = this;
+    loop {
+        let parent = flush_layout(cx, |dom, layout| layout.scroll_parent(dom, node));
+        match parent {
+            oxidepage_layout::ScrollParent::None => return Ok(()),
+            oxidepage_layout::ScrollParent::DocumentScrollingElement => {
+                return scroll_into_view_document(cx, this, block, inline);
+            }
+            oxidepage_layout::ScrollParent::Element(container) => {
+                let (target, changed) = flush_layout_mut(cx, |_dom, layout| {
+                    let (Some(rect), Some(view)) =
+                        (layout.border_box(this), layout.padding_box(container))
+                    else {
+                        return (Some(container), false);
+                    };
+                    let offset = layout.scroll_offset(container);
+                    let (x, y) = aligned_offset(
+                        rect.origin.x - view.origin.x + offset.x,
+                        rect.origin.y - view.origin.y + offset.y,
+                        rect.size.width,
+                        rect.size.height,
+                        view.size.width,
+                        view.size.height,
+                        offset.x,
+                        offset.y,
+                        block,
+                        inline,
+                    );
+                    (
+                        Some(container),
+                        layout.set_scroll_offset(container, x, y).changed,
+                    )
+                });
+                note_scroll(cx, target, changed);
+                node = container;
+            }
+        }
+    }
+}
+
+/// The viewport half of [`scroll_into_view`].
+fn scroll_into_view_document(
+    cx: &BindCx<'_>,
+    this: NodeId,
+    block: Align,
+    inline: Align,
+) -> Result<(), JsThrow> {
+    let (target, changed) = flush_layout_mut(cx, |_dom, layout| {
+        let Some(rect) = layout.border_box(this) else {
+            return (None, false);
+        };
+        let viewport = layout.viewport();
+        let offset = layout.viewport_scroll();
+        let (x, y) = aligned_offset(
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+            viewport.width,
+            viewport.height,
+            offset.x,
+            offset.y,
+            block,
+            inline,
+        );
+        (None, layout.set_viewport_scroll(x, y).changed)
+    });
+    note_scroll(cx, target, changed);
+    Ok(())
+}
+
+/// `block`/`inline` alignment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Align {
+    Start,
+    Center,
+    End,
+    /// Scroll the minimum needed — and nothing at all if the element is already
+    /// fully visible. This is the default for both axes, and the reason a
+    /// `scrollIntoView()` on something already on screen is a no-op.
+    Nearest,
+}
+
+/// Reads the argument: `true`/absent means `start`, `false` means `end`, and an
+/// options dictionary names each axis.
+fn scroll_alignment(cx: &BindCx<'_>, arg: &JsValue) -> (Align, Align) {
+    match arg {
+        // `scrollIntoView()` and `scrollIntoView(true)`: align to the start.
+        JsValue::Undefined => (Align::Start, Align::Nearest),
+        JsValue::Bool(true) => (Align::Start, Align::Nearest),
+        JsValue::Bool(false) => (Align::End, Align::Nearest),
+        JsValue::Object(_) => {
+            let read = |name: &str, default: Align| {
+                crate::imp::ui_event::member(cx, arg, name)
+                    .and_then(|v| cx.scope.coerce_string(&v).ok())
+                    .map_or(default, |s| match s.as_str() {
+                        "start" => Align::Start,
+                        "center" => Align::Center,
+                        "end" => Align::End,
+                        _ => Align::Nearest,
+                    })
+            };
+            (read("block", Align::Start), read("inline", Align::Nearest))
+        }
+        _ => (Align::Start, Align::Nearest),
+    }
+}
+
+/// The scroll offset that brings a box into view under the requested alignment.
+#[allow(clippy::too_many_arguments)]
+fn aligned_offset(
+    rect_x: f32,
+    rect_y: f32,
+    rect_w: f32,
+    rect_h: f32,
+    view_w: f32,
+    view_h: f32,
+    current_x: f32,
+    current_y: f32,
+    block: Align,
+    inline: Align,
+) -> (f32, f32) {
+    // The block axis is vertical and the inline axis horizontal for the
+    // horizontal-tb writing mode, which is the only one laid out here.
+    let y = axis_offset(rect_y, rect_h, view_h, current_y, block);
+    let x = axis_offset(rect_x, rect_w, view_w, current_x, inline);
+    (x, y)
+}
+
+fn axis_offset(start: f32, size: f32, view: f32, current: f32, align: Align) -> f32 {
+    match align {
+        Align::Start => current + start,
+        Align::Center => current + start - (view - size) / 2.0,
+        Align::End => current + start - (view - size),
+        Align::Nearest => {
+            if start < 0.0 {
+                // Off the near edge: bring that edge into view.
+                current + start
+            } else if start + size > view {
+                // Off the far edge: scroll the minimum that shows it, but never
+                // past the near edge for a box taller than the viewport.
+                current + (start + size - view).min(start)
+            } else {
+                current
+            }
+        }
+    }
+}

@@ -77,10 +77,13 @@ pub struct MouseFields {
     pub screen_y: f64,
     pub client_x: f64,
     pub client_y: f64,
-    /// Resolved at construction, not at read: `offsetX/Y` are relative to the
-    /// target's padding box, and the target is fixed once dispatch starts.
-    pub offset_x: f64,
-    pub offset_y: f64,
+    /// `offsetX`/`offsetY`, relative to the target's padding-box origin,
+    /// resolved when the event is synthesized because the target is fixed then.
+    ///
+    /// `None` for a *constructed* event, which has no target: the spec makes
+    /// `offsetX` equal `pageX` in that case, and `pageX` tracks the document
+    /// scroll at read time — so it cannot be precomputed.
+    pub offset: Option<(f64, f64)>,
     pub button: i16,
     pub buttons: u16,
     /// The `relatedTarget` as a node id, not a wrapper: it is always a node

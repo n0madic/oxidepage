@@ -59,22 +59,18 @@ fn hit_test(cx: &BindCx<'_>, x: f32, y: f32) -> Option<NodeId> {
 }
 
 /// `offsetX`/`offsetY`: the point relative to the target's padding-box origin.
-/// Falls back to the client coordinates for a target with no box (a hit on a
-/// display-less element cannot happen, but a listener may have detached it).
-fn offset_in(cx: &BindCx<'_>, target: Option<NodeId>, x: f32, y: f32) -> (f64, f64) {
-    let Some(target) = target else {
-        return (f64::from(x), f64::from(y));
-    };
+/// `None` when there is no target or no box, which makes the getters fall back
+/// to `pageX`/`pageY` exactly as the spec does for a targetless event.
+fn offset_in(cx: &BindCx<'_>, target: Option<NodeId>, x: f32, y: f32) -> Option<(f64, f64)> {
+    let target = target?;
     let layout = cx.state.layout.borrow();
     let scroll = layout.viewport_scroll();
-    let Some(rect) = layout.padding_box(target) else {
-        return (f64::from(x), f64::from(y));
-    };
+    let rect = layout.padding_box(target)?;
     // `padding_box` is in document coordinates; the input is in viewport ones.
-    (
+    Some((
         f64::from(x + scroll.x - rect.origin.x),
         f64::from(y + scroll.y - rect.origin.y),
-    )
+    ))
 }
 
 /// Builds the payload for one synthesized mouse event.
@@ -85,15 +81,14 @@ fn mouse_payload(
     related: Option<NodeId>,
     pointer: bool,
 ) -> UiPayload {
-    let (offset_x, offset_y) = offset_in(cx, target, input.x, input.y);
+    let offset = offset_in(cx, target, input.x, input.y);
     let mut payload = UiPayload::new(UiKind::Mouse(Box::new(MouseFields {
         // A headless page has no screen origin, so screen == client.
         screen_x: f64::from(input.x),
         screen_y: f64::from(input.y),
         client_x: f64::from(input.x),
         client_y: f64::from(input.y),
-        offset_x,
-        offset_y,
+        offset,
         button: input.button,
         buttons: input.buttons,
         related,

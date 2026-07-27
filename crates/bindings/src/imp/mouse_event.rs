@@ -34,10 +34,8 @@ pub(crate) fn parse_mouse_init(cx: &BindCx<'_>, init: &JsValue) -> MouseFields {
         screen_y: member_f64(cx, init, "screenY"),
         client_x: member_f64(cx, init, "clientX"),
         client_y: member_f64(cx, init, "clientY"),
-        // A constructed event has no hit-tested target, so `offsetX/Y` are the
-        // client coordinates until synthesis fills them in.
-        offset_x: member_f64(cx, init, "clientX"),
-        offset_y: member_f64(cx, init, "clientY"),
+        // A constructed event has no target; `offsetX/Y` then track `pageX/Y`.
+        offset: None,
         button: member_i32(cx, init, "button") as i16,
         buttons: member_u32(cx, init, "buttons") as u16,
         related: member_node(cx, init, "relatedTarget"),
@@ -70,12 +68,27 @@ mouse_f64!(screen_x, screen_x);
 mouse_f64!(screen_y, screen_y);
 mouse_f64!(client_x, client_x);
 mouse_f64!(client_y, client_y);
-mouse_f64!(offset_x, offset_x);
-mouse_f64!(offset_y, offset_y);
 
 // `x`/`y` are aliases of `clientX`/`clientY`.
 mouse_f64!(x, client_x);
 mouse_f64!(y, client_y);
+
+/// `offsetX`/`offsetY`: relative to the target's padding box when the event was
+/// synthesized at one, and equal to `pageX`/`pageY` when it was constructed and
+/// has no target.
+pub(crate) fn offset_x(cx: &BindCx<'_>, this: EventRef) -> Result<f64, JsThrow> {
+    match fields(&this, "MouseEvent", |m| m.offset)? {
+        Some((x, _)) => Ok(x),
+        None => page_x(cx, this),
+    }
+}
+
+pub(crate) fn offset_y(cx: &BindCx<'_>, this: EventRef) -> Result<f64, JsThrow> {
+    match fields(&this, "MouseEvent", |m| m.offset)? {
+        Some((_, y)) => Ok(y),
+        None => page_y(cx, this),
+    }
+}
 
 /// `pageX`/`pageY` are client coordinates plus the document scroll — computed
 /// at read time, because a listener may have scrolled the page since dispatch

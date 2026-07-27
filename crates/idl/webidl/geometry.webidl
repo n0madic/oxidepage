@@ -73,6 +73,12 @@ partial interface Element {
 
   boolean checkVisibility(optional CheckVisibilityOptions options = {});
 
+  // `arg` is `(boolean or ScrollIntoViewOptions)` in the spec. The codegen has
+  // no union argument, so it is `any` and `imp::scroll_into_view` reads it —
+  // both forms are in wide use (`scrollIntoView(false)` predates the options
+  // dictionary by a decade).
+  undefined scrollIntoView(optional any arg);
+
   // `scrollParent` is declared as a *method* here, not the `readonly
   // attribute Element? scrollParent` the current editor's draft shows —
   // every vendored WPT file (tests/wpt/vendor/css/cssom-view/scrollParent*)

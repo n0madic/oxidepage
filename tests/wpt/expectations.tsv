@@ -780,7 +780,6 @@ css/cssom-view/elementFromPoint.html	Fieldsets	FAIL
 css/cssom-view/elementFromPoint.html	First element to get mouse events with pointer-events css	FAIL
 css/cssom-view/elementFromPoint.html	Image Maps	FAIL
 css/cssom-view/elementFromPoint.html	Return first element that is the target for hit testing	FAIL
-css/cssom-view/elementFromPoint.html	SVG element at x,y	FAIL
 css/cssom-view/elementFromPoint.html	__harness__	OK
 css/cssom-view/elementFromPoint.html	co-ordinates larger than the viewport from in iframe	FAIL
 css/cssom-view/elementFromPoint.html	no hit target at x,y	FAIL
@@ -913,6 +912,7 @@ css/cssom-view/matchMedia.html	iframe.matchMedia("(min-aspect-ratio: 1/1)") matc
 css/cssom-view/matchMedia.html	iframe.matchMedia("(min-width: 150px)") matches	FAIL
 css/cssom-view/matchMedia.html	iframe.matchMedia("(width: 200px)") matches	FAIL
 css/cssom-view/matchMedia.html	media query with syntax error is serialized as "not all"	FAIL
+css/cssom-view/mouseEvent.html	__harness__	OK
 css/cssom-view/negativeMargins.html	__harness__	OK
 css/cssom-view/negativeMargins.html	cssom-view - elementFromPoint and elementsFromPoint dealing with negative margins	FAIL
 css/cssom-view/offsetParent-block-in-inline.html	__harness__	OK
@@ -989,9 +989,6 @@ css/cssom-view/scroll-behavior-element.html	Set scrollTop to element with smooth
 css/cssom-view/scroll-behavior-element.html	__harness__	OK
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scroll() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scrollBy() with smooth behavior	FAIL
-css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scrollIntoView() with auto behavior	FAIL
-css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scrollIntoView() with default behavior	FAIL
-css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scrollIntoView() with instant behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scrollIntoView() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with auto scroll-behavior ; scrollTo() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scroll() with auto behavior	FAIL
@@ -1002,7 +999,6 @@ css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scrol
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollBy() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollIntoView() with auto behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollIntoView() with default behavior	FAIL
-css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollIntoView() with instant behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollIntoView() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollTo() with auto behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-root.html	Main frame with smooth scroll-behavior ; scrollTo() with default behavior	FAIL
@@ -1025,6 +1021,9 @@ css/cssom-view/scroll-behavior-main-frame-window.html	Main frame with smooth scr
 css/cssom-view/scroll-behavior-main-frame-window.html	Main frame with smooth scroll-behavior ; scrollTo() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-window.html	Make sure the page is ready for animation.	FAIL
 css/cssom-view/scroll-behavior-main-frame-window.html	__harness__	OK
+css/cssom-view/scroll-behavior-scrollintoview-nested.html	Make sure the page is ready for animation.	FAIL
+css/cssom-view/scroll-behavior-scrollintoview-nested.html	__harness__	OK
+css/cssom-view/scroll-behavior-scrollintoview-nested.html	scrollIntoView with nested elements with different scroll-behavior	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	Instant scrolling while doing history navigation.	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	Make sure the page is ready for animation.	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	Smooth scrolling while doing history navigation.	FAIL
@@ -1049,6 +1048,133 @@ css/cssom-view/scroll-overflow-clip-quirks-001.html	__harness__	OK
 css/cssom-view/scroll-overflow-clip-quirks-002.html	__harness__	OK
 css/cssom-view/scroll-zoom.html	__harness__	OK
 css/cssom-view/scroll-zoom.html	scroll{Width, Height}	FAIL
+css/cssom-view/scrollIntoView-align-scrollport-covering-child.html	__harness__	OK
+css/cssom-view/scrollIntoView-align-scrollport-covering-child.html	scrollIntoView scrolls scrollport-covering child in both axes	FAIL
+css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	Element.scrollIntoView doesn't scroll a position:fixed element outside of the layout viewport	FAIL
+css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	__harness__	OK
+css/cssom-view/scrollIntoView-fixed.html	[Box A] scrollIntoView from unscrollable position:fixed	FAIL
+css/cssom-view/scrollIntoView-fixed.html	[Box B] scrollIntoView from unscrollable position:fixed in iframe	FAIL
+css/cssom-view/scrollIntoView-fixed.html	[Box C] scrollIntoView from scrollable position:fixed	FAIL
+css/cssom-view/scrollIntoView-fixed.html	[Box D] scrollIntoView from scrollable position:fixed in iframe	FAIL
+css/cssom-view/scrollIntoView-fixed.html	__harness__	OK
+css/cssom-view/scrollIntoView-horizontal-partially-visible.html	__harness__	OK
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	__harness__	OK
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-horizontal-tb-writing-mode.html	__harness__	OK
+css/cssom-view/scrollIntoView-inline-image.html	__harness__	OK
+css/cssom-view/scrollIntoView-multiple-nested.html	Simultaneous instant scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple-nested.html	Simultaneous instant,smooth scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple-nested.html	Simultaneous smooth scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple-nested.html	Simultaneous smooth,instant scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple-nested.html	__harness__	OK
+css/cssom-view/scrollIntoView-multiple.html	Simultaneous instant scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple.html	Simultaneous instant,smooth scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple.html	Simultaneous smooth scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple.html	Simultaneous smooth,instant scrollIntoViews run to completion	FAIL
+css/cssom-view/scrollIntoView-multiple.html	__harness__	OK
+css/cssom-view/scrollIntoView-nearest-oversized-element.html	__harness__	OK
+css/cssom-view/scrollIntoView-nearest-oversized-element.html	scrollIntoView nearest aligns an oversized target before the scrollport to its closest (right/bottom) edge	FAIL
+css/cssom-view/scrollIntoView-nearest-visible-element.html	__harness__	OK
+css/cssom-view/scrollIntoView-nearest-visible-element.html	scrollIntoView with `nearest` block and inline option shouldn't scroll a completely visible element	FAIL
+css/cssom-view/scrollIntoView-root-overflow-clip.html	__harness__	OK
+css/cssom-view/scrollIntoView-root-overflow-clip.html	scrollIntoView scrolls the viewport when overflow-x: clip is applied to the root element	FAIL
+css/cssom-view/scrollIntoView-root-overflow-clip.html	scrollIntoView scrolls the viewport when overflow-y: clip is applied to the root element	FAIL
+css/cssom-view/scrollIntoView-scrollMargin.html	__harness__	OK
+css/cssom-view/scrollIntoView-scrollMargin.html	scrollIntoView({block: "center", inline: "center"})	FAIL
+css/cssom-view/scrollIntoView-scrollMargin.html	scrollIntoView({block: "end", inline: "end"})	FAIL
+css/cssom-view/scrollIntoView-scrollMargin.html	scrollIntoView({block: "start", inline: "start"})	FAIL
+css/cssom-view/scrollIntoView-scrollPadding.html	__harness__	OK
+css/cssom-view/scrollIntoView-scrollPadding.html	scrollIntoView({block: "center", inline: "center"})	FAIL
+css/cssom-view/scrollIntoView-scrollPadding.html	scrollIntoView({block: "end", inline: "end"})	FAIL
+css/cssom-view/scrollIntoView-scrollPadding.html	scrollIntoView({block: "start", inline: "start"})	FAIL
+css/cssom-view/scrollIntoView-scrolling-box-with-large-border.html	__harness__	OK
+css/cssom-view/scrollIntoView-scrolling-container.html	__harness__	OK
+css/cssom-view/scrollIntoView-scrolling-container.html	scrollIntoView on a scrolling container should scroll its outer scrollers into view but not scroll itself.	FAIL
+css/cssom-view/scrollIntoView-shadow.html	__harness__	OK
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	__harness__	OK
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	__harness__	OK
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-lr-writing-mode.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	__harness__	OK
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	__harness__	OK
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-sideways-rl-writing-mode.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-smooth.html	Smooth scrollIntoView should scroll the element to the 'center' position	FAIL
+css/cssom-view/scrollIntoView-smooth.html	Smooth scrollIntoView should scroll the element to the 'end' position	FAIL
+css/cssom-view/scrollIntoView-smooth.html	Smooth scrollIntoView should scroll the element to the 'nearest' position	FAIL
+css/cssom-view/scrollIntoView-smooth.html	Smooth scrollIntoView should scroll the element to the 'start' position	FAIL
+css/cssom-view/scrollIntoView-smooth.html	__harness__	OK
+css/cssom-view/scrollIntoView-svg-shape.html	__harness__	OK
+css/cssom-view/scrollIntoView-svg-shape.html	scrollIntoView on an SVG shape element, geometry	FAIL
+css/cssom-view/scrollIntoView-svg-shape.html	scrollIntoView on an SVG shape element, rotated	FAIL
+css/cssom-view/scrollIntoView-svg-shape.html	scrollIntoView on an SVG shape element, translated	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	__harness__	OK
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	__harness__	OK
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-lr-writing-mode.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	__harness__	OK
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"center","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"center","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"center","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"end","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"end","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"end","inline":"start"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"start","inline":"center"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
+css/cssom-view/scrollIntoView-vertical-rl-writing-mode.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
 css/cssom-view/scrollLeft-of-scroller-with-wider-scrollbar.html	Test the maxmium value of scrollLeft	FAIL
 css/cssom-view/scrollLeft-of-scroller-with-wider-scrollbar.html	__harness__	OK
 css/cssom-view/scrollLeftTop.html	__harness__	OK
@@ -1077,6 +1203,18 @@ css/cssom-view/scrollingElement.html	scrollingElement in quirks mode	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in quirks mode (body table)	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in quirks mode (root table)	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in quirks mode (root table, body table)	FAIL
+css/cssom-view/scrollintoview-containingblock-chain.html	__harness__	OK
+css/cssom-view/scrollintoview-zero-height-item.html	__harness__	OK
+css/cssom-view/scrollintoview-zero-height-item.html	scrollIntoView on zero height item	FAIL
+css/cssom-view/scrollintoview.html	__harness__	OK
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at left,bottom	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at left,top	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at right,bottom	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at right,top	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at left,bottom	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at left,top	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at right,bottom	FAIL
+css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at right,top	FAIL
 css/cssom-view/table-border-collapse-client-width-height.html	__harness__	OK
 css/cssom-view/table-border-separate-client-width-height.html	__harness__	OK
 css/cssom-view/table-client-props.html	Flex-level table with collapsed border	FAIL
@@ -1101,6 +1239,12 @@ css/cssom-view/table-scroll-props.html	__harness__	OK
 css/cssom-view/table-with-border-client-width-height.html	Table's clientWidth/Height and OffsetWidth/Height should be the same	FAIL
 css/cssom-view/table-with-border-client-width-height.html	__harness__	OK
 css/cssom-view/ttwf-js-cssomview-getclientrects-length.html	__harness__	OK
+css/cssom-view/visual-scrollIntoView-001.html	Element.scrollIntoView scrolls visually	FAIL
+css/cssom-view/visual-scrollIntoView-001.html	__harness__	OK
+css/cssom-view/visual-scrollIntoView-002.html	Element.scrollIntoView scrolls visually to a position: fixed element with non-zero layout scroll offset	FAIL
+css/cssom-view/visual-scrollIntoView-002.html	__harness__	OK
+css/cssom-view/visual-scrollIntoView-003.html	Element.scrollIntoView scrolls visually to an element in nested position: fixed elements	FAIL
+css/cssom-view/visual-scrollIntoView-003.html	__harness__	OK
 css/cssom-view/window-screen-height-immutable.html	__harness__	OK
 css/cssom-view/window-screen-height.html	__harness__	OK
 css/cssom-view/window-screen-width-immutable.html	__harness__	OK
