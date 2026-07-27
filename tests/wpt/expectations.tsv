@@ -2658,32 +2658,8 @@ dom/events/Event-dispatch-bubbles-false.html	__harness__	OK
 dom/events/Event-dispatch-bubbles-true.html	In window.document.cloneNode(true)	FAIL
 dom/events/Event-dispatch-bubbles-true.html	__harness__	OK
 dom/events/Event-dispatch-click.html	__harness__	OK
-dom/events/Event-dispatch-click.html	basic with dispatchEvent()	FAIL
-dom/events/Event-dispatch-click.html	disabled checkbox should be checked from dispatchEvent(new MouseEvent("click"))	FAIL
-dom/events/Event-dispatch-click.html	disabled checkbox should fire onclick	FAIL
-dom/events/Event-dispatch-click.html	disabled checkbox should get legacy-canceled-activation behavior	FAIL
-dom/events/Event-dispatch-click.html	disabled checkbox should get legacy-canceled-activation behavior 2	FAIL
-dom/events/Event-dispatch-click.html	disabled radio should be checked from dispatchEvent(new MouseEvent("click"))	FAIL
-dom/events/Event-dispatch-click.html	disabled radio should fire onclick	FAIL
-dom/events/Event-dispatch-click.html	disabled radio should get legacy-canceled-activation behavior	FAIL
-dom/events/Event-dispatch-click.html	disabled radio should get legacy-canceled-activation behavior 2	FAIL
-dom/events/Event-dispatch-click.html	disabled submit button should not activate	FAIL
-dom/events/Event-dispatch-click.html	disconnected checkbox should be checked from dispatchEvent(new MouseEvent('click'))	FAIL
-dom/events/Event-dispatch-click.html	disconnected radio should be checked from dispatchEvent(new MouseEvent('click'))	FAIL
-dom/events/Event-dispatch-click.html	event state during post-click handling	FAIL
-dom/events/Event-dispatch-click.html	look at parents only when event bubbles	FAIL
-dom/events/Event-dispatch-click.html	look at parents when event bubbles	FAIL
-dom/events/Event-dispatch-click.html	pick the first with activation behavior <a href>	FAIL
-dom/events/Event-dispatch-click.html	pick the first with activation behavior <input type=checkbox>	FAIL
-dom/events/Event-dispatch-click.html	pick the first with activation behavior <input type=radio>	FAIL
-dom/events/Event-dispatch-click.html	redispatch during post-click handling	FAIL
-dom/events/Event-dispatch-click.html	submit button should not activate if the event listener disables it	FAIL
 dom/events/Event-dispatch-detached-click.html	__harness__	OK
 dom/events/Event-dispatch-detached-input-and-change.html	__harness__	OK
-dom/events/Event-dispatch-detached-input-and-change.html	attached checkbox should emit input and change events on dispatchEvent(new MouseEvent('click')).	FAIL
-dom/events/Event-dispatch-detached-input-and-change.html	attached radio should emit input and change events on dispatchEvent(new MouseEvent('click')).	FAIL
-dom/events/Event-dispatch-detached-input-and-change.html	attached to shadow dom checkbox should emit input and change events on dispatchEvent(new MouseEvent('click')).	FAIL
-dom/events/Event-dispatch-detached-input-and-change.html	attached to shadow dom radio should emit input and change events on dispatchEvent(new MouseEvent('click')).	FAIL
 dom/events/Event-dispatch-detached-input-and-change.html	detached checkbox should not emit input or change events on click().	FAIL
 dom/events/Event-dispatch-detached-input-and-change.html	detached checkbox should not emit input or change events on dispatchEvent(new MouseEvent('click')).	FAIL
 dom/events/Event-dispatch-detached-input-and-change.html	detached radio should not emit input or change events on click().	FAIL
@@ -2738,6 +2714,9 @@ dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <D
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <DETAILS><SUMMARY></SUMMARY></DETAILS> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <DETAILS><SUMMARY></SUMMARY></DETAILS> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <DETAILS><SUMMARY></SUMMARY></DETAILS> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
+dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <FORM><INPUT type=reset></INPUT></FORM>, only child should be activated.	FAIL
+dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
+dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <FORM><INPUT type=submit></INPUT></FORM>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <A></A>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <AREA></AREA>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
@@ -2749,6 +2728,9 @@ dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <F
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
+dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <FORM><BUTTON type=reset></BUTTON></FORM>, only child should be activated.	FAIL
+dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <FORM><BUTTON type=submit></BUTTON></FORM>, only child should be activated.	FAIL
+dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	__harness__	OK
 dom/events/Event-dispatch-target-moved.html	__harness__	OK
 dom/events/Event-dispatch-target-removed.html	__harness__	OK
@@ -2760,7 +2742,6 @@ dom/events/Event-dispatch-throwing.html	Throwing in event listener with multiple
 dom/events/Event-dispatch-throwing.html	__harness__	OK
 dom/events/Event-init-while-dispatching.html	Calling initKeyboardEvent while dispatching.	FAIL
 dom/events/Event-init-while-dispatching.html	Calling initMouseEvent while dispatching.	FAIL
-dom/events/Event-init-while-dispatching.html	Calling initUIEvent while dispatching.	FAIL
 dom/events/Event-init-while-dispatching.html	__harness__	OK
 dom/events/Event-initEvent.html	First parameter to initEvent should be mandatory.	FAIL
 dom/events/Event-initEvent.html	__harness__	OK
@@ -2771,50 +2752,9 @@ dom/events/Event-returnValue.html	__harness__	OK
 dom/events/Event-stopImmediatePropagation.html	__harness__	OK
 dom/events/Event-stopPropagation-cancel-bubbling.html	Event-stopPropagation-cancel-bubbling	FAIL
 dom/events/Event-stopPropagation-cancel-bubbling.html	__harness__	OK
-dom/events/Event-subclasses-constructors.html	CompositionEvent constructor (argument with default values)	FAIL
-dom/events/Event-subclasses-constructors.html	CompositionEvent constructor (argument with non-default values)	FAIL
-dom/events/Event-subclasses-constructors.html	CompositionEvent constructor (empty argument)	FAIL
-dom/events/Event-subclasses-constructors.html	CompositionEvent constructor (no argument)	FAIL
-dom/events/Event-subclasses-constructors.html	CompositionEvent constructor (null argument)	FAIL
-dom/events/Event-subclasses-constructors.html	CompositionEvent constructor (undefined argument)	FAIL
-dom/events/Event-subclasses-constructors.html	FocusEvent constructor (argument with default values)	FAIL
-dom/events/Event-subclasses-constructors.html	FocusEvent constructor (argument with non-default values)	FAIL
-dom/events/Event-subclasses-constructors.html	FocusEvent constructor (empty argument)	FAIL
-dom/events/Event-subclasses-constructors.html	FocusEvent constructor (no argument)	FAIL
-dom/events/Event-subclasses-constructors.html	FocusEvent constructor (null argument)	FAIL
-dom/events/Event-subclasses-constructors.html	FocusEvent constructor (undefined argument)	FAIL
-dom/events/Event-subclasses-constructors.html	KeyboardEvent constructor (argument with default values)	FAIL
-dom/events/Event-subclasses-constructors.html	KeyboardEvent constructor (argument with non-default values)	FAIL
-dom/events/Event-subclasses-constructors.html	KeyboardEvent constructor (empty argument)	FAIL
-dom/events/Event-subclasses-constructors.html	KeyboardEvent constructor (no argument)	FAIL
-dom/events/Event-subclasses-constructors.html	KeyboardEvent constructor (null argument)	FAIL
-dom/events/Event-subclasses-constructors.html	KeyboardEvent constructor (undefined argument)	FAIL
-dom/events/Event-subclasses-constructors.html	MouseEvent constructor (argument with default values)	FAIL
-dom/events/Event-subclasses-constructors.html	MouseEvent constructor (argument with non-default values)	FAIL
-dom/events/Event-subclasses-constructors.html	MouseEvent constructor (empty argument)	FAIL
-dom/events/Event-subclasses-constructors.html	MouseEvent constructor (no argument)	FAIL
-dom/events/Event-subclasses-constructors.html	MouseEvent constructor (null argument)	FAIL
-dom/events/Event-subclasses-constructors.html	MouseEvent constructor (undefined argument)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (argument with default values)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (argument with non-default values)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (empty argument)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (no argument)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (null argument)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (undefined argument)	FAIL
-dom/events/Event-subclasses-constructors.html	UIEvent constructor (view argument with wrong type)	FAIL
-dom/events/Event-subclasses-constructors.html	WheelEvent constructor (argument with default values)	FAIL
-dom/events/Event-subclasses-constructors.html	WheelEvent constructor (argument with non-default values)	FAIL
-dom/events/Event-subclasses-constructors.html	WheelEvent constructor (empty argument)	FAIL
-dom/events/Event-subclasses-constructors.html	WheelEvent constructor (no argument)	FAIL
-dom/events/Event-subclasses-constructors.html	WheelEvent constructor (null argument)	FAIL
-dom/events/Event-subclasses-constructors.html	WheelEvent constructor (undefined argument)	FAIL
 dom/events/Event-subclasses-constructors.html	__harness__	OK
 dom/events/Event-timestamp-cross-realm-getter.html	__harness__	TIMEOUT
 dom/events/Event-timestamp-cross-realm-getter.html	event.timeStamp is initialized using event's relevant global object	TIMEOUT
-dom/events/Event-timestamp-high-resolution.html	Constructed FocusEvent timestamp should be high resolution and have the same time origin as performance.now()	FAIL
-dom/events/Event-timestamp-high-resolution.html	Constructed KeyboardEvent timestamp should be high resolution and have the same time origin as performance.now()	FAIL
-dom/events/Event-timestamp-high-resolution.html	Constructed MouseEvent timestamp should be high resolution and have the same time origin as performance.now()	FAIL
-dom/events/Event-timestamp-high-resolution.html	Constructed WheelEvent timestamp should be high resolution and have the same time origin as performance.now()	FAIL
 dom/events/Event-timestamp-high-resolution.html	__harness__	OK
 dom/events/Event-timestamp-high-resolution.https.html	Constructed GamepadEvent timestamp should be high resolution and have the same time origin as performance.now()	FAIL
 dom/events/Event-timestamp-high-resolution.https.html	__harness__	OK
@@ -2845,26 +2785,15 @@ dom/events/EventTarget-constructible.any.js	__harness__	OK
 dom/events/EventTarget-dispatchEvent-returnvalue.html	__harness__	OK
 dom/events/EventTarget-dispatchEvent.html	Capturing event listeners should be called before non-capturing ones	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (BeforeUnloadEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (CompositionEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (DeviceMotionEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (DeviceOrientationEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (DragEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (FocusEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (HashChangeEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (KeyboardEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (MessageEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (MouseEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (MouseEvents).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (StorageEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (TextEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (UIEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (UIEvents).	FAIL
 dom/events/EventTarget-dispatchEvent.html	__harness__	OK
 dom/events/EventTarget-removeEventListener.any.js	__harness__	OK
 dom/events/EventTarget-this-of-listener.html	__harness__	OK
-dom/events/KeyEvent-initKeyEvent.html	KeyboardEvent.initKeyEvent shouldn't be defined (created by constructor)	FAIL
-dom/events/KeyEvent-initKeyEvent.html	KeyboardEvent.initKeyEvent shouldn't be defined (created by createEvent("KeyboardEvent")	FAIL
-dom/events/KeyEvent-initKeyEvent.html	KeyboardEvent.prototype.initKeyEvent shouldn't be defined	FAIL
 dom/events/KeyEvent-initKeyEvent.html	__harness__	OK
 dom/events/click-on-absolute-pseudo.html	Click on pseudo-element that disappears on mousedown	FAIL
 dom/events/click-on-absolute-pseudo.html	__harness__	OK
@@ -2889,7 +2818,6 @@ dom/events/event-src-element-nullable.html	__harness__	OK
 dom/events/focus-event-document-move.html	Moving a node during mousedown should not crash	TIMEOUT
 dom/events/focus-event-document-move.html	__harness__	TIMEOUT
 dom/events/label-default-action.html	__harness__	OK
-dom/events/legacy-pre-activation-behavior.window.js	Use NONE phase during legacy-pre-activation behavior	FAIL
 dom/events/legacy-pre-activation-behavior.window.js	__harness__	OK
 dom/events/mouse-event-retarget.html	__harness__	OK
 dom/events/mouse-event-retarget.html	offsetX is correctly adjusted	FAIL
@@ -4266,101 +4194,56 @@ dom/nodes/Document-createElementNS.html	createElementNS test in XML document: un
 dom/nodes/Document-createEvent-touchevent.window.js	__harness__	OK
 dom/nodes/Document-createEvent.https.html	BEFOREUNLOADEVENT should be an alias for BeforeUnloadEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	BeforeUnloadEvent should be an alias for BeforeUnloadEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	COMPOSITIONEVENT should be an alias for CompositionEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	CompositionEvent should be an alias for CompositionEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	DEVICEMOTIONEVENT should be an alias for DeviceMotionEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	DEVICEORIENTATIONEVENT should be an alias for DeviceOrientationEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	DRAGEVENT should be an alias for DragEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	DeviceMotionEvent should be an alias for DeviceMotionEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	DeviceOrientationEvent should be an alias for DeviceOrientationEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	DragEvent should be an alias for DragEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	FOCUSEVENT should be an alias for FocusEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	FocusEvent should be an alias for FocusEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	HASHCHANGEEVENT should be an alias for HashChangeEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	HashChangeEvent should be an alias for HashChangeEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	KEYBOARDEVENT should be an alias for KeyboardEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	KeyboardEvent should be an alias for KeyboardEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	MESSAGEEVENT should be an alias for MessageEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	MOUSEEVENT should be an alias for MouseEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	MOUSEEVENTS should be an alias for MouseEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	MessageEvent should be an alias for MessageEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	MouseEvent should be an alias for MouseEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	MouseEvents should be an alias for MouseEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	STORAGEEVENT should be an alias for StorageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	StorageEvent should be an alias for StorageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	TEXTEVENT should be an alias for TextEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	TOUCHEVENT should be an alias for TouchEvent.	PRECONDITION_FAILED
 dom/nodes/Document-createEvent.https.html	TextEvent should be an alias for TextEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	TouchEvent should be an alias for TouchEvent.	PRECONDITION_FAILED
-dom/nodes/Document-createEvent.https.html	UIEVENT should be an alias for UIEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	UIEVENTS should be an alias for UIEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	UIEvent should be an alias for UIEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	UIEvents should be an alias for UIEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	__harness__	OK
 dom/nodes/Document-createEvent.https.html	beforeunloadevent should be an alias for BeforeUnloadEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	compositionevent should be an alias for CompositionEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('BEFOREUNLOADEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('BeforeUnloadEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('COMPOSITIONEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('CompositionEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('DEVICEMOTIONEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('DEVICEORIENTATIONEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('DRAGEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('DeviceMotionEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('DeviceOrientationEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('DragEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('FOCUSEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('FocusEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('HASHCHANGEEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('HashChangeEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('KEYBOARDEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('KeyboardEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('MESSAGEEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('MOUSEEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('MOUSEEVENTS') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('MessageEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('MouseEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('MouseEvents') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('STORAGEEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('StorageEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('TEXTEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('TOUCHEVENT') should be initialized correctly.	PRECONDITION_FAILED
-dom/nodes/Document-createEvent.https.html	createEvent('TextEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('TouchEvent') should be initialized correctly.	PRECONDITION_FAILED
-dom/nodes/Document-createEvent.https.html	createEvent('UIEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('UIEVENTS') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('UIEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('UIEvents') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('beforeunloadevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('compositionevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('devicemotionevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('deviceorientationevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('dragevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('focusevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('hashchangeevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('keyboardevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('messageevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('mouseevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('mouseevents') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('storageevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('textevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('touchevent') should be initialized correctly.	PRECONDITION_FAILED
-dom/nodes/Document-createEvent.https.html	createEvent('uievent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('uievents') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	devicemotionevent should be an alias for DeviceMotionEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	deviceorientationevent should be an alias for DeviceOrientationEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	dragevent should be an alias for DragEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	focusevent should be an alias for FocusEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	hashchangeevent should be an alias for HashChangeEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	keyboardevent should be an alias for KeyboardEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	messageevent should be an alias for MessageEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	mouseevent should be an alias for MouseEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	mouseevents should be an alias for MouseEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	storageevent should be an alias for StorageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	textevent should be an alias for TextEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	touchevent should be an alias for TouchEvent.	PRECONDITION_FAILED
-dom/nodes/Document-createEvent.https.html	uievent should be an alias for UIEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	uievents should be an alias for UIEvent.	FAIL
 dom/nodes/Document-createProcessingInstruction.html	__harness__	OK
 dom/nodes/Document-createTextNode.html	__harness__	OK
 dom/nodes/Document-createTreeWalker.html	__harness__	OK

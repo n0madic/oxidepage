@@ -5130,6 +5130,237 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         CtorSpec::Illegal,
     )?;
 
+    let proto_ui_event = cx.begin_interface("UIEvent", Some("Event"))?;
+    cx.define_getter(&proto_ui_event, "view", gen_ui_event_get_view)?;
+    cx.define_getter(&proto_ui_event, "detail", gen_ui_event_get_detail)?;
+    cx.define_method(
+        &proto_ui_event,
+        "initUIEvent",
+        1,
+        gen_ui_event_init_ui_event,
+    )?;
+    cx.finish_interface(
+        "UIEvent",
+        &proto_ui_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_ui_event_constructor,
+        },
+    )?;
+
+    let proto_mouse_event = cx.begin_interface("MouseEvent", Some("UIEvent"))?;
+    cx.define_getter(&proto_mouse_event, "screenX", gen_mouse_event_get_screen_x)?;
+    cx.define_getter(&proto_mouse_event, "screenY", gen_mouse_event_get_screen_y)?;
+    cx.define_getter(&proto_mouse_event, "clientX", gen_mouse_event_get_client_x)?;
+    cx.define_getter(&proto_mouse_event, "clientY", gen_mouse_event_get_client_y)?;
+    cx.define_getter(&proto_mouse_event, "pageX", gen_mouse_event_get_page_x)?;
+    cx.define_getter(&proto_mouse_event, "pageY", gen_mouse_event_get_page_y)?;
+    cx.define_getter(&proto_mouse_event, "offsetX", gen_mouse_event_get_offset_x)?;
+    cx.define_getter(&proto_mouse_event, "offsetY", gen_mouse_event_get_offset_y)?;
+    cx.define_getter(&proto_mouse_event, "x", gen_mouse_event_get_x)?;
+    cx.define_getter(&proto_mouse_event, "y", gen_mouse_event_get_y)?;
+    cx.define_getter(&proto_mouse_event, "ctrlKey", gen_mouse_event_get_ctrl_key)?;
+    cx.define_getter(
+        &proto_mouse_event,
+        "shiftKey",
+        gen_mouse_event_get_shift_key,
+    )?;
+    cx.define_getter(&proto_mouse_event, "altKey", gen_mouse_event_get_alt_key)?;
+    cx.define_getter(&proto_mouse_event, "metaKey", gen_mouse_event_get_meta_key)?;
+    cx.define_getter(&proto_mouse_event, "button", gen_mouse_event_get_button)?;
+    cx.define_getter(&proto_mouse_event, "buttons", gen_mouse_event_get_buttons)?;
+    cx.define_getter(
+        &proto_mouse_event,
+        "relatedTarget",
+        gen_mouse_event_get_related_target,
+    )?;
+    cx.define_method(
+        &proto_mouse_event,
+        "getModifierState",
+        1,
+        gen_mouse_event_get_modifier_state,
+    )?;
+    cx.finish_interface(
+        "MouseEvent",
+        &proto_mouse_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_mouse_event_constructor,
+        },
+    )?;
+
+    let proto_wheel_event = cx.begin_interface("WheelEvent", Some("MouseEvent"))?;
+    cx.define_constant(&proto_wheel_event, "DOM_DELTA_PIXEL", 0f64)?;
+    cx.define_constant(&proto_wheel_event, "DOM_DELTA_LINE", 1f64)?;
+    cx.define_constant(&proto_wheel_event, "DOM_DELTA_PAGE", 2f64)?;
+    cx.define_getter(&proto_wheel_event, "deltaX", gen_wheel_event_get_delta_x)?;
+    cx.define_getter(&proto_wheel_event, "deltaY", gen_wheel_event_get_delta_y)?;
+    cx.define_getter(&proto_wheel_event, "deltaZ", gen_wheel_event_get_delta_z)?;
+    cx.define_getter(
+        &proto_wheel_event,
+        "deltaMode",
+        gen_wheel_event_get_delta_mode,
+    )?;
+    cx.finish_interface(
+        "WheelEvent",
+        &proto_wheel_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_wheel_event_constructor,
+        },
+    )?;
+
+    let proto_pointer_event = cx.begin_interface("PointerEvent", Some("MouseEvent"))?;
+    cx.define_getter(
+        &proto_pointer_event,
+        "pointerId",
+        gen_pointer_event_get_pointer_id,
+    )?;
+    cx.define_getter(&proto_pointer_event, "width", gen_pointer_event_get_width)?;
+    cx.define_getter(&proto_pointer_event, "height", gen_pointer_event_get_height)?;
+    cx.define_getter(
+        &proto_pointer_event,
+        "pressure",
+        gen_pointer_event_get_pressure,
+    )?;
+    cx.define_getter(
+        &proto_pointer_event,
+        "pointerType",
+        gen_pointer_event_get_pointer_type,
+    )?;
+    cx.define_getter(
+        &proto_pointer_event,
+        "isPrimary",
+        gen_pointer_event_get_is_primary,
+    )?;
+    cx.finish_interface(
+        "PointerEvent",
+        &proto_pointer_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_pointer_event_constructor,
+        },
+    )?;
+
+    let proto_keyboard_event = cx.begin_interface("KeyboardEvent", Some("UIEvent"))?;
+    cx.define_constant(&proto_keyboard_event, "DOM_KEY_LOCATION_STANDARD", 0f64)?;
+    cx.define_constant(&proto_keyboard_event, "DOM_KEY_LOCATION_LEFT", 1f64)?;
+    cx.define_constant(&proto_keyboard_event, "DOM_KEY_LOCATION_RIGHT", 2f64)?;
+    cx.define_constant(&proto_keyboard_event, "DOM_KEY_LOCATION_NUMPAD", 3f64)?;
+    cx.define_getter(&proto_keyboard_event, "key", gen_keyboard_event_get_key)?;
+    cx.define_getter(&proto_keyboard_event, "code", gen_keyboard_event_get_code)?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "location",
+        gen_keyboard_event_get_location,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "ctrlKey",
+        gen_keyboard_event_get_ctrl_key,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "shiftKey",
+        gen_keyboard_event_get_shift_key,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "altKey",
+        gen_keyboard_event_get_alt_key,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "metaKey",
+        gen_keyboard_event_get_meta_key,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "repeat",
+        gen_keyboard_event_get_repeat,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "isComposing",
+        gen_keyboard_event_get_is_composing,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "charCode",
+        gen_keyboard_event_get_char_code,
+    )?;
+    cx.define_getter(
+        &proto_keyboard_event,
+        "keyCode",
+        gen_keyboard_event_get_key_code,
+    )?;
+    cx.define_getter(&proto_keyboard_event, "which", gen_keyboard_event_get_which)?;
+    cx.define_method(
+        &proto_keyboard_event,
+        "getModifierState",
+        1,
+        gen_keyboard_event_get_modifier_state,
+    )?;
+    cx.finish_interface(
+        "KeyboardEvent",
+        &proto_keyboard_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_keyboard_event_constructor,
+        },
+    )?;
+
+    let proto_focus_event = cx.begin_interface("FocusEvent", Some("UIEvent"))?;
+    cx.define_getter(
+        &proto_focus_event,
+        "relatedTarget",
+        gen_focus_event_get_related_target,
+    )?;
+    cx.finish_interface(
+        "FocusEvent",
+        &proto_focus_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_focus_event_constructor,
+        },
+    )?;
+
+    let proto_input_event = cx.begin_interface("InputEvent", Some("UIEvent"))?;
+    cx.define_getter(&proto_input_event, "data", gen_input_event_get_data)?;
+    cx.define_getter(
+        &proto_input_event,
+        "isComposing",
+        gen_input_event_get_is_composing,
+    )?;
+    cx.define_getter(
+        &proto_input_event,
+        "inputType",
+        gen_input_event_get_input_type,
+    )?;
+    cx.finish_interface(
+        "InputEvent",
+        &proto_input_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_input_event_constructor,
+        },
+    )?;
+
+    let proto_composition_event = cx.begin_interface("CompositionEvent", Some("UIEvent"))?;
+    cx.define_getter(
+        &proto_composition_event,
+        "data",
+        gen_composition_event_get_data,
+    )?;
+    cx.finish_interface(
+        "CompositionEvent",
+        &proto_composition_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_composition_event_constructor,
+        },
+    )?;
+
     let proto_url = cx.begin_interface("URL", None)?;
     cx.define_accessor(&proto_url, "href", gen_url_get_href, gen_url_set_href)?;
     cx.define_method(&proto_url, "toString", 0, gen_url_get_href)?;
@@ -14469,6 +14700,332 @@ fn gen_svg_animated_string_get_anim_val(
     Ok(JsValue::String(imp::svg_animated_string::anim_val(
         cx, this,
     )?))
+}
+
+fn gen_ui_event_get_view(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    imp::ui_event::view(cx, this)
+}
+
+fn gen_ui_event_get_detail(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::ui_event::detail(cx, this)?))
+}
+
+fn gen_ui_event_init_ui_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_bool_or(call, 1, false);
+    let a2 = cx.arg_bool_or(call, 2, false);
+    let a3 = call.arg(3);
+    let a4 = cx.arg_i32_or(call, 4, 0)?;
+    imp::ui_event::init_ui_event(cx, this, a0, a1, a2, a3, a4)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_ui_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::ui_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_mouse_event_get_screen_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::screen_x(cx, this)?))
+}
+
+fn gen_mouse_event_get_screen_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::screen_y(cx, this)?))
+}
+
+fn gen_mouse_event_get_client_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::client_x(cx, this)?))
+}
+
+fn gen_mouse_event_get_client_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::client_y(cx, this)?))
+}
+
+fn gen_mouse_event_get_page_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::page_x(cx, this)?))
+}
+
+fn gen_mouse_event_get_page_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::page_y(cx, this)?))
+}
+
+fn gen_mouse_event_get_offset_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::offset_x(cx, this)?))
+}
+
+fn gen_mouse_event_get_offset_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::offset_y(cx, this)?))
+}
+
+fn gen_mouse_event_get_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::x(cx, this)?))
+}
+
+fn gen_mouse_event_get_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::y(cx, this)?))
+}
+
+fn gen_mouse_event_get_ctrl_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::mouse_event::ctrl_key(cx, this)?))
+}
+
+fn gen_mouse_event_get_shift_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::mouse_event::shift_key(cx, this)?))
+}
+
+fn gen_mouse_event_get_alt_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::mouse_event::alt_key(cx, this)?))
+}
+
+fn gen_mouse_event_get_meta_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::mouse_event::meta_key(cx, this)?))
+}
+
+fn gen_mouse_event_get_button(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::button(cx, this)?))
+}
+
+fn gen_mouse_event_get_buttons(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::mouse_event::buttons(cx, this)?))
+}
+
+fn gen_mouse_event_get_related_target(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    imp::mouse_event::related_target(cx, this)
+}
+
+fn gen_mouse_event_get_modifier_state(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    Ok(JsValue::Bool(imp::mouse_event::get_modifier_state(
+        cx, this, a0,
+    )?))
+}
+
+fn gen_mouse_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::mouse_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_wheel_event_get_delta_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::wheel_event::delta_x(cx, this)?))
+}
+
+fn gen_wheel_event_get_delta_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::wheel_event::delta_y(cx, this)?))
+}
+
+fn gen_wheel_event_get_delta_z(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::wheel_event::delta_z(cx, this)?))
+}
+
+fn gen_wheel_event_get_delta_mode(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::wheel_event::delta_mode(cx, this)?))
+}
+
+fn gen_wheel_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::wheel_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_pointer_event_get_pointer_id(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::pointer_event::pointer_id(cx, this)?))
+}
+
+fn gen_pointer_event_get_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::pointer_event::width(cx, this)?))
+}
+
+fn gen_pointer_event_get_height(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::pointer_event::height(cx, this)?))
+}
+
+fn gen_pointer_event_get_pressure(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::pointer_event::pressure(cx, this)?))
+}
+
+fn gen_pointer_event_get_pointer_type(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::pointer_event::pointer_type(cx, this)?))
+}
+
+fn gen_pointer_event_get_is_primary(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::pointer_event::is_primary(cx, this)?))
+}
+
+fn gen_pointer_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::pointer_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_keyboard_event_get_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::keyboard_event::key(cx, this)?))
+}
+
+fn gen_keyboard_event_get_code(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::keyboard_event::code(cx, this)?))
+}
+
+fn gen_keyboard_event_get_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::keyboard_event::location(cx, this)?))
+}
+
+fn gen_keyboard_event_get_ctrl_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::keyboard_event::ctrl_key(cx, this)?))
+}
+
+fn gen_keyboard_event_get_shift_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::keyboard_event::shift_key(cx, this)?))
+}
+
+fn gen_keyboard_event_get_alt_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::keyboard_event::alt_key(cx, this)?))
+}
+
+fn gen_keyboard_event_get_meta_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::keyboard_event::meta_key(cx, this)?))
+}
+
+fn gen_keyboard_event_get_repeat(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::keyboard_event::repeat(cx, this)?))
+}
+
+fn gen_keyboard_event_get_is_composing(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::keyboard_event::is_composing(cx, this)?))
+}
+
+fn gen_keyboard_event_get_char_code(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::keyboard_event::char_code(cx, this)?))
+}
+
+fn gen_keyboard_event_get_key_code(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::keyboard_event::key_code(cx, this)?))
+}
+
+fn gen_keyboard_event_get_which(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::keyboard_event::which(cx, this)?))
+}
+
+fn gen_keyboard_event_get_modifier_state(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    Ok(JsValue::Bool(imp::keyboard_event::get_modifier_state(
+        cx, this, a0,
+    )?))
+}
+
+fn gen_keyboard_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::keyboard_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_focus_event_get_related_target(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    imp::focus_event::related_target(cx, this)
+}
+
+fn gen_focus_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::focus_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_input_event_get_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(match imp::input_event::data(cx, this)? {
+        Some(s) => JsValue::String(s),
+        None => JsValue::Null,
+    })
+}
+
+fn gen_input_event_get_is_composing(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::input_event::is_composing(cx, this)?))
+}
+
+fn gen_input_event_get_input_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::input_event::input_type(cx, this)?))
+}
+
+fn gen_input_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::input_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_composition_event_get_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::composition_event::data(cx, this)?))
+}
+
+fn gen_composition_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::composition_event::constructor(cx, call, a0, a1)
 }
 
 fn gen_url_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

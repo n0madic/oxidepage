@@ -246,6 +246,14 @@ pub struct DomTree {
     /// The focused element (`document.activeElement`), source of the `:focus`
     /// and `:focus-within` element states. See [`crate::form`].
     pub(crate) focused: Option<NodeId>,
+    /// The element the pointer is over, source of `:hover`. Like `focused`, the
+    /// state applies to the whole inclusive-ancestor chain — `:hover` matches
+    /// every ancestor of the hovered element, which is what makes a hover rule
+    /// on a menu container work.
+    pub(crate) hovered: Option<NodeId>,
+    /// The element being pressed, source of `:active`. Set between `mousedown`
+    /// and `mouseup`, and likewise inherited by ancestors.
+    pub(crate) active: Option<NodeId>,
 }
 
 fn hierarchy_error(message: &'static str) -> DomException {
@@ -306,6 +314,8 @@ impl DomTree {
             shadow_cascade: HashMap::new(),
             slot_cache: RefCell::new(HashMap::new()),
             focused: None,
+            hovered: None,
+            active: None,
         }
     }
 
@@ -2699,6 +2709,7 @@ impl DomTree {
         self.update_element_state_subtree(node);
         self.note_option_list_changed(parent);
         self.clear_focus_if_disconnected(parent);
+        self.clear_pointer_state_if_disconnected();
 
         if !suppress_observers {
             self.queue_child_list_record(

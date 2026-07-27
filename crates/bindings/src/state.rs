@@ -171,6 +171,11 @@ pub enum PendingNavigation {
     /// `history.go(delta)`. The entry list lives here in the bindings, but a
     /// traversal may need a document load, so the page performs the move.
     Traverse { delta: i32 },
+    /// A `javascript:` URL, already percent-decoded. Queued rather than run
+    /// inline for the same reason every other navigation is: the activation
+    /// that produced it runs under live borrows, and the script may replace the
+    /// document.
+    JavaScriptUrl { source: String },
 }
 
 /// The request body of a form submission that navigates.

@@ -166,7 +166,13 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         "CDATASection" => "this_cdata_section",
         "Comment" => "this_comment",
         "ProcessingInstruction" => "this_processing_instruction",
-        "Event" | "CustomEvent" | "PopStateEvent" | "SubmitEvent" => "this_event",
+        // Every event interface unwraps to the same shared `EventData`; the
+        // typed payload inside it is what distinguishes them, so a
+        // `MouseEvent` getter on a `KeyboardEvent` receiver fails on the
+        // payload shape rather than on the brand.
+        "Event" | "CustomEvent" | "PopStateEvent" | "SubmitEvent" | "UIEvent" | "MouseEvent"
+        | "WheelEvent" | "PointerEvent" | "KeyboardEvent" | "FocusEvent" | "InputEvent"
+        | "CompositionEvent" => "this_event",
         // Brands with no state of their own: a Location *is* the document URL,
         // and the session history lives in `PageState::history`.
         "Location" => "this_location",

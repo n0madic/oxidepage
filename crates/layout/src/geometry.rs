@@ -264,6 +264,22 @@ impl LayoutEngine {
         Some(Rect::from_xywh(origin.x, origin.y, size.width, size.height))
     }
 
+    /// The node's **padding box** in document coordinates — the origin
+    /// `MouseEvent.offsetX/offsetY` are measured from.
+    #[must_use]
+    pub fn padding_box(&self, node: NodeId) -> Option<Rect> {
+        let box_id = self.tree().box_for_node(node)?;
+        let origin = self.absolute_origin(box_id, true);
+        let layout = &self.tree().box_(box_id).final_layout;
+        let border = layout.border;
+        Some(Rect::from_xywh(
+            origin.x + border.left,
+            origin.y + border.top,
+            (layout.size.width - border.left - border.right).max(0.0),
+            (layout.size.height - border.top - border.bottom).max(0.0),
+        ))
+    }
+
     /// `getClientRects()`: one rect for box-generating elements, one rect
     /// per line fragment for inline elements inside an IFC.
     #[must_use]
@@ -679,8 +695,10 @@ impl LayoutEngine {
     }
 
     /// `document.elementsFromPoint(x, y)`: hit elements in approximate paint
-    /// order (topmost first), ending with the document element. Ignores
-    /// `pointer-events` and doesn't descend into iframes (ADR-0006 §6).
+    /// order (topmost first), ending with the document element. Boxes with
+    /// `pointer-events: none` are transparent to the test — the point falls
+    /// through to whatever is behind them. Doesn't descend into iframes
+    /// (ADR-0006 §6).
     #[must_use]
     pub fn elements_from_point(&self, dom: &DomTree, x: f32, y: f32) -> Vec<NodeId> {
         let viewport = self.viewport();
@@ -847,8 +865,14 @@ impl LayoutEngine {
                 None | Some(PseudoBox::Marker) => true,
                 Some(PseudoBox::Before | PseudoBox::After) => false,
             };
+            // `pointer-events: none` makes the box transparent to hit testing:
+            // the point falls through to whatever is behind it. Descendants are
+            // *not* excluded — the property is inherited, so a child that sets
+            // `pointer-events: auto` back is hit normally, and the recursion
+            // above has already visited them.
             if let Some(node) = b.dom_node
                 && reports_hit
+                && !b.pointer_events_none
                 && dom.node(node).data().kind() == NodeKind::Element
                 && out.last() != Some(&node)
             {

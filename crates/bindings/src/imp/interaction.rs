@@ -62,8 +62,18 @@ enum Activation {
 /// `<a>` activates the link — and a click inside a shadow tree resolves out
 /// through its host, which is the whole reason the flat tree is the one
 /// authoritative tree.
-fn activation_target(dom: &DomTree, node: NodeId) -> Option<(NodeId, Activation)> {
-    let mut current = Some(node);
+/// `bubbles` is the dispatched event's flag, and it gates the *ancestor* walk
+/// only: DOM's dispatch sets the activation target from an ancestor solely
+/// "if event's bubbles is true". A non-bubbling `click` at a text node inside a
+/// checkbox therefore activates nothing, while a bubbling one toggles the box.
+fn activation_target(dom: &DomTree, node: NodeId, bubbles: bool) -> Option<(NodeId, Activation)> {
+    if let Some(behavior) = activation_of(dom, node, node) {
+        return Some((node, behavior));
+    }
+    if !bubbles {
+        return None;
+    }
+    let mut current = dom.flat_tree_parent(node);
     while let Some(id) = current {
         if let Some(behavior) = activation_of(dom, id, node) {
             return Some((id, behavior));
@@ -81,13 +91,31 @@ fn activation_of(dom: &DomTree, id: NodeId, clicked: NodeId) -> Option<Activatio
     if !el.is_html_element() {
         return None;
     }
-    // A disabled control has no activation behavior at all — it is not that its
-    // behavior is suppressed, so the walk continues past it to an ancestor.
-    if dom.is_actually_disabled(id) {
-        return None;
-    }
     let local = el.local_name();
-    match &**local {
+    let behavior = activation_kind(dom, el, id, clicked, local);
+    // A disabled control has no activation behavior — so the walk continues
+    // past it to an ancestor, rather than finding a suppressed one.
+    //
+    // A checkbox or radio is the exception, and it is a real one: HTML's input
+    // activation behavior returns early only when the element is *neither* a
+    // checkbox nor a radio, so the legacy pre-activation toggles a disabled one
+    // and `preventDefault()` still undoes it. `Event-dispatch-click.html`
+    // asserts exactly that, four times.
+    match behavior {
+        Some(Activation::Checkable) => behavior,
+        Some(_) if dom.is_actually_disabled(id) => None,
+        other => other,
+    }
+}
+
+fn activation_kind(
+    dom: &DomTree,
+    el: &oxidepage_dom::node::ElementData,
+    id: NodeId,
+    clicked: NodeId,
+    local: &str,
+) -> Option<Activation> {
+    match local {
         "a" | "area" => el
             .attr(&oxidepage_dom::node::attr_name("href".into()))
             .is_some()
@@ -191,42 +219,90 @@ fn button_type(el: &oxidepage_dom::ElementData) -> &'static str {
 /// Toggling after the dispatch left that comparison equal, so `onChange` never
 /// fired at all.
 ///
-/// Activation is wired to `click()` and nothing else. `dispatchEvent(new
-/// Event("click"))` still does not activate, which is correct: the spec's
-/// activation trigger is a `MouseEvent`, and that interface does not exist yet.
+/// `click()` dispatches an untrusted-shaped plain `Event`; a synthesized mouse
+/// click (`imp::input_synth`) dispatches a real `MouseEvent`. Both run the same
+/// activation through [`activate_around`], which is the point: a second path
+/// is how `<label>`, submit and hyperlink activation drift apart.
 pub(crate) fn click(cx: &BindCx<'_>, this: NodeId) -> Result<(), JsThrow> {
     // HTML `click()` step 1: a disabled form control's click() does nothing —
     // not even fire the event.
     if cx.state.dom.borrow().is_actually_disabled(this) {
         return Ok(());
     }
+    activate_around(cx, this, |cx| {
+        fire(
+            cx, this, "click", /* bubbles */ true, /* cancelable */ true,
+        )
+    })?;
+    crate::microtask_checkpoint(cx);
+    Ok(())
+}
+
+/// Runs `dispatch` — which must dispatch the `click` event at `node` and report
+/// whether it went un-cancelled — wrapped in the activation protocol: resolve
+/// the activation target, run legacy pre-activation, and afterwards either run
+/// the activation behavior or undo the pre-activation.
+///
+/// The wrapping is what makes the order right, and the order is the whole
+/// point: the checkbox is toggled **before** the `click` event propagates
+/// (DOM §2.9), so a `click` listener reads the *new* checkedness. React depends
+/// on exactly this — its `onChange` for a checkbox or radio is synthesised from
+/// the native `click` event, and it decides whether anything changed by
+/// comparing `node.checked` against the value it recorded at mount. Toggling
+/// after the dispatch left that comparison equal, so `onChange` never fired.
+pub(crate) fn activate_around(
+    cx: &BindCx<'_>,
+    node: NodeId,
+    dispatch: impl FnOnce(&BindCx<'_>) -> Result<bool, JsThrow>,
+) -> Result<(), JsThrow> {
+    // `click()` fires a bubbling event, so ancestors are eligible.
+    let state = begin_activation(cx, node, /* bubbles */ true);
+    let proceed = dispatch(cx)?;
+    finish_activation(cx, state, proceed)
+}
+
+/// The activation state resolved before a `click` dispatch: the target that
+/// owns the behavior, and whatever the legacy pre-activation speculatively
+/// changed. Held across the dispatch by [`activate_around`] and by
+/// [`crate::events::dispatch_event`].
+pub(crate) struct ActivationState {
+    target: Option<(NodeId, Activation)>,
+    pre: Option<oxidepage_dom::ClickActivation>,
+}
+
+/// DOM dispatch step 5: resolve the activation target and run the legacy
+/// pre-activation behavior. Speculative — [`finish_activation`] either commits
+/// or undoes it once the dispatch reports whether a listener cancelled.
+pub(crate) fn begin_activation(cx: &BindCx<'_>, node: NodeId, bubbles: bool) -> ActivationState {
     let target = {
         let dom = cx.state.dom.borrow();
-        activation_target(&dom, this)
+        activation_target(&dom, node, bubbles)
     };
-    // Speculative until the dispatch comes back un-cancelled.
     let pre = match target {
         Some((node, Activation::Checkable)) => {
             cx.state.dom.borrow_mut().legacy_pre_activation(node)
         }
         _ => None,
     };
+    ActivationState { target, pre }
+}
 
-    let proceed = fire(
-        cx, this, "click", /* bubbles */ true, /* cancelable */ true,
-    )?;
-
+/// The other half of [`begin_activation`].
+pub(crate) fn finish_activation(
+    cx: &BindCx<'_>,
+    state: ActivationState,
+    proceed: bool,
+) -> Result<(), JsThrow> {
+    let ActivationState { target, pre } = state;
     if !proceed {
         if let Some(a) = pre {
             cx.state.dom.borrow_mut().legacy_canceled_activation(a);
         }
-        crate::microtask_checkpoint(cx);
         return Ok(());
     }
     if let Some((node, behavior)) = target {
         run_activation(cx, node, behavior, pre.is_some())?;
     }
-    crate::microtask_checkpoint(cx);
     Ok(())
 }
 
@@ -239,6 +315,16 @@ fn run_activation(
     behavior: Activation,
     toggled: bool,
 ) -> Result<(), JsThrow> {
+    // The activation target was resolved *before* the dispatch (that is when
+    // the spec picks it), so a listener has had a chance to disable it since.
+    // Re-check here: `Event-dispatch-click.html` disables a submit button from
+    // its own click listener and requires the form not to be submitted. The
+    // checkable behavior is exempt for the same reason it is exempt above.
+    if !matches!(behavior, Activation::Checkable)
+        && cx.state.dom.borrow().is_actually_disabled(node)
+    {
+        return Ok(());
+    }
     match behavior {
         Activation::Checkable => {
             if toggled {
@@ -295,8 +381,15 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
     if resolved.is_empty() {
         return;
     }
-    if resolved.starts_with("javascript:") {
-        cx.warn("link activation: `javascript:` URLs are not implemented");
+    // HTML "navigate to a javascript: URL": the payload is evaluated as a
+    // classic script, and only a *string* result replaces the document —
+    // `javascript:void 0` and every `javascript:doSomething()` handler return
+    // undefined and must leave the page alone.
+    if let Some(encoded) = resolved.strip_prefix("javascript:") {
+        cx.state
+            .request_navigation(PendingNavigation::JavaScriptUrl {
+                source: percent_decode(encoded),
+            });
         return;
     }
     if let Some(target) = target.filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("_self")) {
@@ -338,16 +431,55 @@ fn move_focus(cx: &BindCx<'_>, to: Option<NodeId>) -> Result<(), JsThrow> {
     // `:focus`/`:focus-within` on both ancestor chains. The borrow is released
     // before any event fires — listeners will re-enter the DOM.
     let (blurred, focused) = cx.state.dom.borrow_mut().set_focused(to);
+    // Each half names the other as `relatedTarget`: on `blur` that is the
+    // element gaining focus, on `focus` the one that lost it. A focus manager
+    // reads it to decide whether focus left its subtree at all.
     if let Some(old) = blurred {
-        fire(cx, old, "blur", false, false)?;
-        fire(cx, old, "focusout", true, false)?;
+        fire_focus(cx, old, "blur", false, focused)?;
+        fire_focus(cx, old, "focusout", true, focused)?;
     }
     if let Some(new) = focused {
-        fire(cx, new, "focus", false, false)?;
-        fire(cx, new, "focusin", true, false)?;
+        fire_focus(cx, new, "focus", false, blurred)?;
+        fire_focus(cx, new, "focusin", true, blurred)?;
     }
     crate::microtask_checkpoint(cx);
     Ok(())
+}
+
+/// Fires one half of a focus transfer as a real `FocusEvent`.
+fn fire_focus(
+    cx: &BindCx<'_>,
+    target: NodeId,
+    event_type: &str,
+    bubbles: bool,
+    related: Option<NodeId>,
+) -> Result<(), JsThrow> {
+    let mut data = crate::events::EventData::new(
+        event_type.to_owned(),
+        bubbles,
+        /* cancelable */ false,
+        /* composed */ true,
+    );
+    data.is_trusted = true;
+    data.time_stamp = cx.now_ms();
+    let mut payload = crate::events::UiPayload::new(crate::events::UiKind::Focus { related });
+    payload.has_view = true;
+    data.ui = Some(Box::new(payload));
+    let (value, data) = cx.new_event_object("FocusEvent", data)?;
+    crate::events::dispatch_event(
+        cx,
+        crate::events::EventTargetKey::Node(target),
+        &value,
+        &data,
+    )?;
+    Ok(())
+}
+
+/// Moves focus in response to synthesized input (a click, or Tab). Unlike
+/// `focus()` this accepts `None`, which blurs whatever holds focus — clicking
+/// on nothing focusable takes focus away from the current element.
+pub(crate) fn set_focus_from_input(cx: &BindCx<'_>, to: Option<NodeId>) -> Result<(), JsThrow> {
+    move_focus(cx, to)
 }
 
 /// `document.activeElement`: the focused element, or `<body>` when nothing has
@@ -365,4 +497,29 @@ pub(crate) fn active_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<Nod
     };
     // The borrow must be released: `html_child_of_root` takes its own.
     Ok(focused.or_else(|| super::document::html_child_of_root(cx, this, &["body", "frameset"])))
+}
+
+/// Percent-decodes a `javascript:` URL payload. `reflect_url` returns the
+/// serialized URL, in which the script text has been percent-encoded — running
+/// it verbatim would fail on the first `%20`.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

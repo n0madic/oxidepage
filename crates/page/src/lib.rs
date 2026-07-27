@@ -1097,6 +1097,27 @@ impl Page {
         )
     }
 
+    /// Synthesizes one trusted mouse event at viewport CSS coordinates
+    /// `(x, y)`, with everything a browser produces around it: the
+    /// `mouseover`/`mouseenter` chain on a move, the focus transfer and
+    /// `:active` state on a press, and the activation behavior — following a
+    /// link, submitting a form — on the resulting `click`.
+    ///
+    /// Layout is flushed first, because hit testing needs boxes. The whole
+    /// sequence runs inside one JS entry, then the event loop is drained: a
+    /// listener that navigates queues the navigation and the drain performs it,
+    /// which is the same contract [`Page::eval`] has.
+    ///
+    /// This is the shape CDP's `Input.dispatchMouseEvent` maps onto one-to-one.
+    pub fn dispatch_mouse(&self, input: oxidepage_bindings::MouseInput) {
+        self.flush_layout();
+        let result = self.with_cx(|cx| oxidepage_bindings::imp_dispatch_mouse(cx, input));
+        if let Err(throw) = result {
+            report_throw(&self.hooks, throw);
+        }
+        self.run_until_stalled();
+    }
+
     /// Drains the navigation milestone stream (see [`NavigationEvent`]).
     #[must_use]
     pub fn drain_navigation_events(&self) -> Vec<NavigationEvent> {
@@ -1184,9 +1205,58 @@ impl Page {
                 PendingNavigation::Traverse { delta } => {
                     self.commit_traversal(delta, wait_until, embedder)?;
                 }
+                PendingNavigation::JavaScriptUrl { source } => {
+                    self.run_javascript_url(&source, wait_until, embedder)?;
+                }
             }
             pending = self.state.take_pending_navigation();
         }
+        Ok(())
+    }
+
+    /// HTML's "navigate to a `javascript:` URL": evaluate the payload as a
+    /// classic script in the current realm, and replace the document **only**
+    /// when the result is a string.
+    ///
+    /// That conditional is the whole behavior. `javascript:void 0`,
+    /// `javascript:doThing()` and every `href="javascript:..."` handler on the
+    /// real web return `undefined`, and must leave the page exactly as it was —
+    /// treating the navigation as unconditional would blank the document on
+    /// every such link.
+    fn run_javascript_url(
+        &self,
+        source: &str,
+        wait_until: WaitUntil,
+        embedder: bool,
+    ) -> Result<(), JsError> {
+        let result = self.with_cx(|cx| {
+            let value = cx.scope.eval(source, "oxidepage:javascript-url");
+            oxidepage_bindings::microtask_checkpoint(cx);
+            match value {
+                // Only a string navigates; everything else is discarded.
+                Ok(JsValue::String(s)) => Ok(Some(s)),
+                Ok(_) => Ok(None),
+                Err(e) => Err(e),
+            }
+        });
+        self.process_finalized();
+        let html = match result {
+            Ok(html) => html,
+            Err(error) => {
+                // A throwing `javascript:` URL reports and navigates nowhere.
+                self.report_script_error(&error);
+                return Ok(());
+            }
+        };
+        let Some(html) = html else {
+            return Ok(());
+        };
+        // The replacement document keeps the current URL and replaces the
+        // history entry — a `javascript:` URL is never itself a history entry.
+        let url = self.state.dom.borrow().document_url().to_owned();
+        self.commit_history(url, HistoryTarget::Replace);
+        self.load_document(&html, wait_until)?;
+        let _ = embedder;
         Ok(())
     }
 

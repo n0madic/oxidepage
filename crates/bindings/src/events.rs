@@ -43,6 +43,135 @@ impl From<NodeId> for EventTargetKey {
     }
 }
 
+/// The four modifier keys, shared by mouse and keyboard events (WebIDL's
+/// `EventModifierInit`).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+impl Modifiers {
+    /// `getModifierState(key)`. Only the four keys this engine tracks answer
+    /// `true`; every other modifier name is honestly `false` rather than an
+    /// error, which is what the method is specified to do.
+    #[must_use]
+    pub fn state(self, key: &str) -> bool {
+        match key {
+            "Control" => self.ctrl,
+            "Shift" => self.shift,
+            "Alt" => self.alt,
+            "Meta" => self.meta,
+            _ => false,
+        }
+    }
+}
+
+/// `MouseEvent` state, shared by `WheelEvent` and `PointerEvent` — both *are*
+/// mouse events, so every mouse getter has to work on them.
+#[derive(Clone, Default)]
+pub struct MouseFields {
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub client_x: f64,
+    pub client_y: f64,
+    /// Resolved at construction, not at read: `offsetX/Y` are relative to the
+    /// target's padding box, and the target is fixed once dispatch starts.
+    pub offset_x: f64,
+    pub offset_y: f64,
+    pub button: i16,
+    pub buttons: u16,
+    /// The `relatedTarget` as a node id, not a wrapper: it is always a node
+    /// here, and holding the id keeps the generation check at the read
+    /// (`opt_node_to_js`) where every other node-valued member puts it.
+    pub related: Option<NodeId>,
+    pub wheel: Option<WheelFields>,
+    pub pointer: Option<PointerFields>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct WheelFields {
+    pub delta_x: f64,
+    pub delta_y: f64,
+    pub delta_z: f64,
+    pub delta_mode: u32,
+}
+
+#[derive(Clone)]
+pub struct PointerFields {
+    pub pointer_id: i32,
+    pub width: f64,
+    pub height: f64,
+    pub pressure: f64,
+    pub pointer_type: String,
+    pub is_primary: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct KeyboardFields {
+    pub key: String,
+    pub code: String,
+    pub location: u32,
+    pub repeat: bool,
+    pub is_composing: bool,
+    pub char_code: u32,
+    pub key_code: u32,
+}
+
+#[derive(Clone, Default)]
+pub struct InputFields {
+    /// `null` for a deletion, a string for an insertion — hence `Option`.
+    pub data: Option<String>,
+    pub is_composing: bool,
+    pub input_type: String,
+}
+
+/// Which subinterface a [`UiPayload`] belongs to. The variant *is* the brand:
+/// a `MouseEvent` getter on a `KeyboardEvent` receiver fails here rather than
+/// on the wrapper's prototype, which is what makes every interface's members
+/// reject a foreign receiver without a per-interface slab tag.
+#[derive(Clone)]
+pub enum UiKind {
+    /// A plain `UIEvent`.
+    Plain,
+    Mouse(Box<MouseFields>),
+    Keyboard(Box<KeyboardFields>),
+    /// `FocusEvent`, whose only extra member is `relatedTarget`.
+    Focus {
+        related: Option<NodeId>,
+    },
+    Input(Box<InputFields>),
+    Composition {
+        data: String,
+    },
+}
+
+/// The typed payload of a UI event.
+#[derive(Clone)]
+pub struct UiPayload {
+    /// `UIEvent.detail` — a *different* member from [`EventData::detail`],
+    /// which is `CustomEvent`'s `any`. Same name, different interfaces.
+    pub detail: i32,
+    /// Whether `view` is the Window (it is that or null; there is one Window).
+    pub has_view: bool,
+    pub modifiers: Modifiers,
+    pub kind: UiKind,
+}
+
+impl UiPayload {
+    #[must_use]
+    pub fn new(kind: UiKind) -> Self {
+        Self {
+            detail: 0,
+            has_view: false,
+            modifiers: Modifiers::default(),
+            kind,
+        }
+    }
+}
+
 /// State behind an `Event` wrapper.
 pub struct EventData {
     pub event_type: String,
@@ -65,6 +194,10 @@ pub struct EventData {
     /// wrapper — the node id is recovered from it). Three interfaces, one
     /// slot, because no event is more than one of them.
     pub detail: JsValue,
+    /// The typed payload of the UI event family, boxed and optional so that
+    /// every non-UI event — `DOMContentLoaded`, `load`, every mutation-driven
+    /// dispatch — pays one null pointer and no allocation for it.
+    pub ui: Option<Box<UiPayload>>,
     /// The propagation path of the current/last dispatch (for `composedPath`).
     pub path: Vec<EventTargetKey>,
     /// Spec "in passive listener flag" (§2.8): set for the duration of
@@ -92,9 +225,18 @@ impl EventData {
             is_trusted: false,
             time_stamp: 0.0,
             detail: JsValue::Null,
+            ui: None,
             path: Vec::new(),
             in_passive_listener: false,
         }
+    }
+
+    /// Attaches a UI payload, for the `imp` constructors and the synthesis
+    /// pipeline.
+    #[must_use]
+    pub fn with_ui(mut self, ui: UiPayload) -> Self {
+        self.ui = Some(Box::new(ui));
+        self
     }
 
     /// An uninitialized event, as `document.createEvent` returns.
@@ -347,6 +489,24 @@ pub fn dispatch_event(
         }
     }
 
+    // DOM dispatch step 5: a `click` **MouseEvent** (which a `PointerEvent`
+    // is) activates its target. This is the single activation trigger in the
+    // engine — `HTMLElement.click()`, `dispatchEvent(new MouseEvent("click"))`
+    // and a synthesized pointer click all reach activation through here, so
+    // hyperlinks, submit buttons and `<label>` cannot behave differently
+    // depending on which one drove them.
+    //
+    // A plain `Event` named "click" deliberately does not activate: the spec's
+    // trigger is the interface, not the type, and that is what keeps
+    // `dispatchEvent(new Event("click"))` inert.
+    let activation = match target {
+        EventTargetKey::Node(node) if is_activating_click(&event.borrow()) => {
+            let bubbles = event.borrow().bubbles;
+            Some(crate::imp::interaction::begin_activation(cx, node, bubbles))
+        }
+        _ => None,
+    };
+
     {
         let mut ev = event.borrow_mut();
         ev.dispatching = true;
@@ -388,7 +548,17 @@ pub fn dispatch_event(
         ev.path.clear();
         ev.canceled
     };
+
+    if let Some(state) = activation {
+        crate::imp::interaction::finish_activation(cx, state, !canceled)?;
+    }
     Ok(!canceled)
+}
+
+/// Whether this event is the one that triggers activation behavior: type
+/// `click`, carrying a mouse payload.
+fn is_activating_click(ev: &EventData) -> bool {
+    ev.event_type == "click" && matches!(ev.ui.as_deref().map(|p| &p.kind), Some(UiKind::Mouse(_)))
 }
 
 /// RAII guard for the spec "in passive listener flag" (§2.8). Sets
@@ -428,7 +598,12 @@ fn invoke_listeners(
         .listeners
         .borrow()
         .snapshot(key, &event.borrow().event_type);
-    let handler = if phase == PHASE_AT_TARGET && !event.borrow().stop_immediate_propagation {
+    // An event handler IDL attribute *is* an event listener — HTML registers it
+    // (non-capturing) when the handler is first set. So it participates at the
+    // target and while bubbling, and never while capturing. Restricting it to
+    // the target phase silently broke every `onclick` used for delegation on a
+    // container, which is one of the most common shapes on the real web.
+    let handler = if phase != PHASE_CAPTURING && !event.borrow().stop_immediate_propagation {
         let event_type = event.borrow().event_type.clone();
         // Resolves the handler assigned through the IDL attribute *or* declared
         // as a content attribute (`<body onload="…">`), compiling the latter on
@@ -504,9 +679,15 @@ fn invoke_listeners(
         }
     }
 
-    // Event-handler IDL attributes participate at the target. This practical
-    // layer stores them separately from addEventListener registrations while
-    // preserving the same receiver and exception-reporting behavior.
+    // Event-handler IDL attributes participate at the target and in the bubble
+    // phase. This practical layer stores them separately from addEventListener
+    // registrations while preserving the same receiver and exception-reporting
+    // behavior. Deliberate deviation: HTML puts the handler at the position in
+    // the listener list where it was *first assigned*, so an `onclick` set
+    // before an `addEventListener("click")` should run first; here it always
+    // runs last on its target. Ordering between the two on one element is not
+    // something real code depends on, and matching it would mean registering
+    // handlers as real listeners.
     if !event.borrow().stop_immediate_propagation
         && let Some(handler) = handler
         && cx.scope.is_function(&handler)

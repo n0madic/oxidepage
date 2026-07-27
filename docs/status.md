@@ -321,9 +321,9 @@ v1 limits.
   components. ADR-0020.
 - **Framework conformance**: Vue 3.5.39 and 2.7.16, React 19.2.7 and 18.3.1, Preact 10,
   Alpine 3 and lit-html 3 all run clean. **Not implemented**, and each leaves feature
-  detection honest: `MouseEvent` (no library constructs one, but test tooling like
-  React Testing Library's `fireEvent` does), and `MessageChannel` (React's scheduler
-  falls back to `setTimeout`; only `act()` needs it).
+  detection honest: `MessageChannel` (React's scheduler falls back to
+  `setTimeout`; only `act()` needs it). `MouseEvent` — which test tooling like
+  React Testing Library's `fireEvent` constructs — now exists; see below.
 - **Navigation & session history**: done — stage 1 of the automation roadmap. The
   page can now leave a document. `Location` and `History` are **real IDL
   interfaces** (replacing a getters-only object and a `bootstrap.js` closure):
@@ -349,10 +349,33 @@ v1 limits.
   innermost element with a behavior *at all*, so a label must shadow its
   ancestors or a click inside one activates the wrong element. **Not
   implemented:** `<input type=image>`, the `formdata` event, constraint
-  validation, `<details>`/`<summary>`, `javascript:` URLs,
+  validation, `<details>`/`<summary>`,
   `<meta http-equiv=refresh>`, `beforeunload`/`unload`, real
   popups for `target` (a `target` link navigates in place and warns), bfcache, and
   `HashChangeEvent` (so `hashchange` is a plain `Event` and `e.oldURL` is honestly
   `undefined`). History is capped at 50 entries, because an entry holds live JS
   state across navigations. Decisions and v1 limits: ADR-0022.
+- **Trusted input**: done — stage 2 of the automation roadmap. The page can now
+  be *driven*. `UIEvent`, `MouseEvent`, `WheelEvent`, `PointerEvent`,
+  `KeyboardEvent`, `FocusEvent`, `InputEvent` and `CompositionEvent` are real IDL
+  interfaces with constructors and init dictionaries, carried by one boxed
+  optional payload on `EventData` so a non-UI event pays a null pointer for them.
+  `document.createEvent` accepts the legacy names (`"MouseEvents"`, `"UIEvents"`,
+  `"textevent"`, …). **Activation moved into `dispatch_event`**, triggered by the
+  spec's real condition — a `click` carrying a mouse payload — so `.click()`,
+  `dispatchEvent(new MouseEvent("click"))` and a synthesized click share one
+  path; a plain `Event` named `"click"` still does not activate. `Page::dispatch_mouse`
+  turns a coordinate into the whole sequence: the `mouseover`/`mouseenter` chain
+  diff, `pointerdown` before `mousedown`, `:active`, the focus transfer (which
+  `preventDefault()` on `mousedown` suppresses), and a `click` on the nearest
+  common ancestor of press and release. `:hover`/`:active` restyle through whole
+  ancestor chains, hit testing honours `pointer-events`, and `javascript:` URLs
+  run (only a *string* result replaces the document). Focus events are real
+  `FocusEvent`s with `relatedTarget`. **Fixed along the way, and bigger than the
+  stage that found it:** event handler IDL attributes (`onclick` and friends)
+  fired only in the target phase, so delegation on a container never worked.
+  **Not implemented:** keyboard synthesis, the text-editing/selection model,
+  `scrollIntoView`, wheel, touch and gesture events, `contenteditable`,
+  drag-and-drop, clipboard, IME composition *generation* (the interface exists),
+  and `:focus-visible`. Decisions and the one accepted WPT divergence: ADR-0023.
 - Phases 8+ (GPU raster, C ABI, CDP, …): not started.

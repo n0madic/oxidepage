@@ -27,6 +27,7 @@ use oxidepage_dom::{DomTree, NodeData, NodeKind};
 use oxidepage_style::{StyleEngine, Viewport};
 use parley::{InlineBox, InlineBoxKind, TreeBuilder, WhiteSpaceCollapse};
 use servo_arc::Arc as ServoArc;
+use style::computed_values::pointer_events::T as PointerEvents;
 use style::computed_values::position::T as Position;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement as StyloPseudoElement;
@@ -1335,6 +1336,8 @@ pub(crate) fn capture_text_fields(layout_box: &mut LayoutBox, style: &ComputedVa
     layout_box.text_indent = style.clone_text_indent();
     layout_box.position = style.clone_position();
     layout_box.z_index = style.clone_z_index().integer_or(0);
+    layout_box.pointer_events_none =
+        style.get_inherited_ui().clone_pointer_events() == PointerEvents::None;
     layout_box.order = style.clone_order();
     layout_box.intrinsic_size_keywords = intrinsic_size_keywords_for(style);
 }

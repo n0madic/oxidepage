@@ -6,7 +6,7 @@ use oxidepage_dom::{LocalName, Namespace, NodeKind, Prefix, QualName, QuirksMode
 use oxidepage_js::{HostCall, JsThrow, JsValue};
 
 use crate::cx::BindCx;
-use crate::events::EventData;
+use crate::events::{EventData, UiKind, UiPayload};
 use crate::imp::names::{NameKind, validate, validate_and_extract, validate_xml_name};
 
 /// Whether `this` is the one *rendered* document.
@@ -412,9 +412,25 @@ pub(crate) fn create_event(
     _this: NodeId,
     interface: String,
 ) -> Result<JsValue, JsThrow> {
-    let (iface, custom) = match interface.to_ascii_lowercase().as_str() {
-        "event" | "events" | "htmlevents" | "svgevents" => ("Event", false),
-        "customevent" => ("CustomEvent", true),
+    // DOM's `createEvent` table, restricted to the interfaces this engine has.
+    // The legacy plural aliases are part of it — `"MouseEvents"` is what every
+    // pre-constructor test and library passes, and it is the only spelling some
+    // of them know.
+    let (iface, ui) = match interface.to_ascii_lowercase().as_str() {
+        "event" | "events" | "htmlevents" | "svgevents" => ("Event", None),
+        "customevent" => ("CustomEvent", None),
+        "uievent" | "uievents" => ("UIEvent", Some(UiKind::Plain)),
+        "mouseevent" | "mouseevents" => ("MouseEvent", Some(UiKind::Mouse(Box::default()))),
+        "keyboardevent" => ("KeyboardEvent", Some(UiKind::Keyboard(Box::default()))),
+        "focusevent" => ("FocusEvent", Some(UiKind::Focus { related: None })),
+        // The spec maps `"textevent"` to CompositionEvent, not to a `TextEvent`
+        // interface — there is none.
+        "compositionevent" | "textevent" => (
+            "CompositionEvent",
+            Some(UiKind::Composition {
+                data: String::new(),
+            }),
+        ),
         _ => {
             return Err(cx.dom_throw(
                 DomExceptionKind::NotSupportedError,
@@ -422,9 +438,14 @@ pub(crate) fn create_event(
             ));
         }
     };
-    let _ = custom;
     let mut data = EventData::uninitialized();
     data.time_stamp = cx.now_ms();
+    // A `createEvent` event is uninitialized but *not* payload-less: its
+    // getters must answer their defaults before `initUIEvent` is called, and a
+    // missing payload would make them throw instead.
+    if let Some(kind) = ui {
+        data.ui = Some(Box::new(UiPayload::new(kind)));
+    }
     let (value, _) = cx.new_event_object(iface, data)?;
     Ok(value)
 }

@@ -16,7 +16,7 @@ pub mod cx;
 pub mod events;
 mod generated;
 mod handlers;
-mod imp;
+pub mod imp;
 mod netdata;
 mod script;
 pub mod state;
@@ -29,7 +29,8 @@ use oxidepage_net::{Credentials, NetEvent, NetRequest, RequestMode, ResponseType
 use oxidepage_style::Viewport;
 
 pub use cx::BindCx;
-pub use events::{EventTargetKey, dispatch_event, fire_pop_state, fire_simple_event};
+pub use events::{EventTargetKey, Modifiers, dispatch_event, fire_pop_state, fire_simple_event};
+pub use imp::input_synth::{MouseEventKind, MouseInput, dispatch_mouse as imp_dispatch_mouse};
 pub use script::is_classic_script_type;
 pub use state::{
     ConsoleLevel, HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState,

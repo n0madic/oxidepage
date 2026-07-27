@@ -198,6 +198,11 @@ pub struct LayoutBox {
     /// Computed `z-index` (integer part; `auto` → 0) for approximate paint
     /// order in hit-testing.
     pub z_index: i32,
+    /// Computed `pointer-events: none`, which makes the box transparent to hit
+    /// testing: the point falls through to whatever is behind it. Overlays,
+    /// decorative gradients and "click-through" scrims all rely on it, and
+    /// without it a great many real pages have an unclickable body.
+    pub pointer_events_none: bool,
     /// Computed `order` (initial 0). Taffy has no `order` field — it expects
     /// the caller to pre-sort `children` by it, which
     /// `construct::collect_flex_grid_children` does for flex/grid containers
@@ -261,6 +266,7 @@ impl LayoutBox {
             force_bfc: false,
             position: style::computed_values::position::T::Static,
             z_index: 0,
+            pointer_events_none: false,
             order: 0,
             intrinsic_size_keywords: SmallVec::new(),
             text_align: parley::layout::Alignment::Start,

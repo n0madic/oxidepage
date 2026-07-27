@@ -816,6 +816,125 @@ impl DomTree {
         (old, new)
     }
 
+    /// Whether the element can take focus from a click or the Tab sequence.
+    ///
+    /// The set is deliberately the one this engine actually implements: form
+    /// controls that are not `actually_disabled`, hyperlinks with an `href`,
+    /// `<summary>`, and anything carrying a `tabindex` attribute. An element
+    /// with `tabindex="-1"` *is* focusable (script and clicks can focus it) but
+    /// is not in the sequential order — see [`DomTree::tab_index`].
+    #[must_use]
+    pub fn is_focusable(&self, id: NodeId) -> bool {
+        let Some(el) = self.get(id).and_then(|n| n.as_element()) else {
+            return false;
+        };
+        if !self.get(id).is_some_and(|n| n.is_connected()) {
+            return false;
+        }
+        if el
+            .attr(&crate::node::attr_name("tabindex".into()))
+            .is_some()
+        {
+            return !self.is_actually_disabled(id);
+        }
+        if !el.is_html_element() {
+            return false;
+        }
+        match &**el.local_name() {
+            "input" => {
+                // A hidden input has no box and cannot be focused; every other
+                // type can, unless disabled.
+                crate::input_type(el) != "hidden" && !self.is_actually_disabled(id)
+            }
+            "button" | "select" | "textarea" => !self.is_actually_disabled(id),
+            "a" | "area" => el.attr(&crate::node::attr_name("href".into())).is_some(),
+            "summary" => true,
+            _ => false,
+        }
+    }
+
+    /// The element's `tabindex` for sequential navigation: the parsed attribute,
+    /// or the default for a natively focusable element (0). `None` means the
+    /// element is not reachable by Tab at all.
+    #[must_use]
+    pub fn tab_index(&self, id: NodeId) -> Option<i32> {
+        let el = self.get(id).and_then(|n| n.as_element())?;
+        if let Some(attr) = el.attr(&crate::node::attr_name("tabindex".into())) {
+            // A malformed value is ignored, leaving the native default.
+            if let Ok(value) = attr.trim().parse::<i32>() {
+                return (value >= 0).then_some(value);
+            }
+        }
+        self.is_focusable(id).then_some(0)
+    }
+
+    /// The element the pointer is over (`:hover`), or `None`.
+    #[must_use]
+    pub fn hovered(&self) -> Option<NodeId> {
+        self.hovered
+            .filter(|&id| self.get(id).is_some_and(|n| n.is_connected()))
+    }
+
+    /// The element being pressed (`:active`), or `None`.
+    #[must_use]
+    pub fn active(&self) -> Option<NodeId> {
+        self.active
+            .filter(|&id| self.get(id).is_some_and(|n| n.is_connected()))
+    }
+
+    /// Moves the hover target. Returns `(left, entered)` — the old and new
+    /// elements — so the caller can fire the `mouseover`/`mouseout` pair.
+    ///
+    /// Exactly [`DomTree::set_focused`]'s shape, and for the same reason: the
+    /// state belongs to whole ancestor chains, so both of them are re-derived.
+    pub fn set_hovered(&mut self, id: Option<NodeId>) -> (Option<NodeId>, Option<NodeId>) {
+        let old = self.hovered();
+        let new = id.filter(|&id| self.get(id).is_some_and(|n| n.is_connected()));
+        if old == new {
+            return (None, None);
+        }
+        self.hovered = new;
+        self.restyle_state_chains(old, new);
+        (old, new)
+    }
+
+    /// Sets or clears the `:active` element (the one under a held button).
+    pub fn set_active(&mut self, id: Option<NodeId>) {
+        let old = self.active();
+        let new = id.filter(|&id| self.get(id).is_some_and(|n| n.is_connected()));
+        if old == new {
+            return;
+        }
+        self.active = new;
+        self.restyle_state_chains(old, new);
+    }
+
+    /// Re-derives element state along two inclusive-ancestor chains. Shared by
+    /// the hover and active setters, which change a state that ancestors carry.
+    fn restyle_state_chains(&mut self, old: Option<NodeId>, new: Option<NodeId>) {
+        for root in [old, new].into_iter().flatten() {
+            for a in self.inclusive_ancestors(root).collect::<Vec<_>>() {
+                self.update_element_state(a);
+            }
+        }
+    }
+
+    /// Drops hover/active if their element left the document. A removed node's
+    /// `:hover` must not keep matching, and — worse — must not leave a stale
+    /// `NodeId` behind for a later ancestor walk to touch.
+    ///
+    /// Called from the same place as [`DomTree::clear_focus_if_disconnected`]
+    /// and for the same reason.
+    pub(crate) fn clear_pointer_state_if_disconnected(&mut self) {
+        for slot in [&mut self.hovered, &mut self.active] {
+            if let Some(id) = *slot
+                && !self.arena.get(id).is_some_and(|n| n.is_connected())
+            {
+                *slot = None;
+            }
+        }
+    }
+
     /// Drops focus if the focused element is no longer connected — removing the
     /// focused element must not leave `document.activeElement` naming a detached
     /// node (and, once its wrapper is collected, a freed one). Browsers move
@@ -898,6 +1017,21 @@ impl DomTree {
             if self.inclusive_ancestors(focused).any(|a| a == id) {
                 state |= ElementState::FOCUS_WITHIN;
             }
+        }
+
+        // `:hover` and `:active` are *inherited by ancestors*, unlike `:focus`:
+        // hovering a `<span>` inside a `<li>` inside a `<nav>` puts all three in
+        // `:hover`. That is the same ancestor walk `:focus-within` does above,
+        // and the same reason `set_hovered`/`set_active` re-derive whole chains.
+        if let Some(hovered) = self.hovered()
+            && self.inclusive_ancestors(hovered).any(|a| a == id)
+        {
+            state |= ElementState::HOVER;
+        }
+        if let Some(active) = self.active()
+            && self.inclusive_ancestors(active).any(|a| a == id)
+        {
+            state |= ElementState::ACTIVE;
         }
 
         if !el.is_html_element() {
