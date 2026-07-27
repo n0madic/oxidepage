@@ -4242,6 +4242,48 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "labels",
         gen_html_input_element_get_labels,
     )?;
+    cx.define_accessor_ce(
+        &proto_html_input_element,
+        "maxLength",
+        gen_html_input_element_get_max_length,
+        gen_html_input_element_set_max_length,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_input_element,
+        "minLength",
+        gen_html_input_element_get_min_length,
+        gen_html_input_element_set_min_length,
+    )?;
+    cx.define_accessor(
+        &proto_html_input_element,
+        "selectionStart",
+        gen_html_input_element_get_selection_start,
+        gen_html_input_element_set_selection_start,
+    )?;
+    cx.define_accessor(
+        &proto_html_input_element,
+        "selectionEnd",
+        gen_html_input_element_get_selection_end,
+        gen_html_input_element_set_selection_end,
+    )?;
+    cx.define_accessor(
+        &proto_html_input_element,
+        "selectionDirection",
+        gen_html_input_element_get_selection_direction,
+        gen_html_input_element_set_selection_direction,
+    )?;
+    cx.define_method(
+        &proto_html_input_element,
+        "setSelectionRange",
+        2,
+        gen_html_input_element_set_selection_range,
+    )?;
+    cx.define_method(
+        &proto_html_input_element,
+        "select",
+        0,
+        gen_html_input_element_select,
+    )?;
     cx.finish_interface(
         "HTMLInputElement",
         &proto_html_input_element,
@@ -4323,6 +4365,48 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         &proto_html_text_area_element,
         "labels",
         gen_html_text_area_element_get_labels,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_text_area_element,
+        "maxLength",
+        gen_html_text_area_element_get_max_length,
+        gen_html_text_area_element_set_max_length,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_text_area_element,
+        "minLength",
+        gen_html_text_area_element_get_min_length,
+        gen_html_text_area_element_set_min_length,
+    )?;
+    cx.define_accessor(
+        &proto_html_text_area_element,
+        "selectionStart",
+        gen_html_text_area_element_get_selection_start,
+        gen_html_text_area_element_set_selection_start,
+    )?;
+    cx.define_accessor(
+        &proto_html_text_area_element,
+        "selectionEnd",
+        gen_html_text_area_element_get_selection_end,
+        gen_html_text_area_element_set_selection_end,
+    )?;
+    cx.define_accessor(
+        &proto_html_text_area_element,
+        "selectionDirection",
+        gen_html_text_area_element_get_selection_direction,
+        gen_html_text_area_element_set_selection_direction,
+    )?;
+    cx.define_method(
+        &proto_html_text_area_element,
+        "setSelectionRange",
+        2,
+        gen_html_text_area_element_set_selection_range,
+    )?;
+    cx.define_method(
+        &proto_html_text_area_element,
+        "select",
+        0,
+        gen_html_text_area_element_select,
     )?;
     cx.finish_interface(
         "HTMLTextAreaElement",
@@ -13048,6 +13132,123 @@ fn gen_html_input_element_get_labels(cx: &BindCx<'_>, call: &HostCall) -> Result
     imp::html_input_element::labels(cx, this)
 }
 
+fn gen_html_input_element_get_max_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(JsValue::Number(imp::html_input_element::max_length(
+        cx, this,
+    )?))
+}
+
+fn gen_html_input_element_set_max_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_i32(call, 0)?;
+    imp::html_input_element::set_max_length(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_min_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(JsValue::Number(imp::html_input_element::min_length(
+        cx, this,
+    )?))
+}
+
+fn gen_html_input_element_set_min_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_i32(call, 0)?;
+    imp::html_input_element::set_min_length(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_selection_start(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    imp::html_input_element::selection_start(cx, this)
+}
+
+fn gen_html_input_element_set_selection_start(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = call.arg(0);
+    imp::html_input_element::set_selection_start(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_selection_end(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    imp::html_input_element::selection_end(cx, this)
+}
+
+fn gen_html_input_element_set_selection_end(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = call.arg(0);
+    imp::html_input_element::set_selection_end(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_selection_direction(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(
+        match imp::html_input_element::selection_direction(cx, this)? {
+            Some(s) => JsValue::String(s),
+            None => JsValue::Null,
+        },
+    )
+}
+
+fn gen_html_input_element_set_selection_direction(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_nullable_dom_string(call, 0)?;
+    imp::html_input_element::set_selection_direction(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_set_selection_range(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_u32(call, 0)?;
+    let a1 = cx.arg_u32(call, 1)?;
+    let a2 = cx.arg_opt_dom_string(call, 2)?;
+    imp::html_input_element::set_selection_range(cx, this, a0, a1, a2)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_select(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    imp::html_input_element::select(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_html_text_area_element_get_name(
     cx: &BindCx<'_>,
     call: &HostCall,
@@ -13263,6 +13464,123 @@ fn gen_html_text_area_element_get_labels(
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
     imp::html_text_area_element::labels(cx, this)
+}
+
+fn gen_html_text_area_element_get_max_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    Ok(JsValue::Number(imp::html_text_area_element::max_length(
+        cx, this,
+    )?))
+}
+
+fn gen_html_text_area_element_set_max_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    let a0 = cx.arg_i32(call, 0)?;
+    imp::html_text_area_element::set_max_length(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_text_area_element_get_min_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    Ok(JsValue::Number(imp::html_text_area_element::min_length(
+        cx, this,
+    )?))
+}
+
+fn gen_html_text_area_element_set_min_length(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    let a0 = cx.arg_i32(call, 0)?;
+    imp::html_text_area_element::set_min_length(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_text_area_element_get_selection_start(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    imp::html_text_area_element::selection_start(cx, this)
+}
+
+fn gen_html_text_area_element_set_selection_start(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    let a0 = call.arg(0);
+    imp::html_text_area_element::set_selection_start(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_text_area_element_get_selection_end(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    imp::html_text_area_element::selection_end(cx, this)
+}
+
+fn gen_html_text_area_element_set_selection_end(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    let a0 = call.arg(0);
+    imp::html_text_area_element::set_selection_end(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_text_area_element_get_selection_direction(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    Ok(
+        match imp::html_text_area_element::selection_direction(cx, this)? {
+            Some(s) => JsValue::String(s),
+            None => JsValue::Null,
+        },
+    )
+}
+
+fn gen_html_text_area_element_set_selection_direction(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    let a0 = cx.arg_nullable_dom_string(call, 0)?;
+    imp::html_text_area_element::set_selection_direction(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_text_area_element_set_selection_range(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    let a0 = cx.arg_u32(call, 0)?;
+    let a1 = cx.arg_u32(call, 1)?;
+    let a2 = cx.arg_opt_dom_string(call, 2)?;
+    imp::html_text_area_element::set_selection_range(cx, this, a0, a1, a2)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_text_area_element_select(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_text_area_element(&call.this)?;
+    imp::html_text_area_element::select(cx, this)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_html_select_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

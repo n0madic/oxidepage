@@ -645,3 +645,85 @@ fn keyboard_event_members_are_populated() {
         "an uppercase A is the physical KeyA with shift held"
     );
 }
+
+/// The selection API: offsets, `setSelectionRange`, `select()`, and the `null`
+/// a control without text entry reports.
+#[test]
+fn selection_api() {
+    let page = page_with(
+        r##"<!doctype html>
+           <input id=t value="hello world">
+           <input id=c type=checkbox>
+           <textarea id=a>abc</textarea>"##,
+    );
+
+    // Focus places a collapsed caret at the end.
+    page.eval("document.getElementById('t').focus()").unwrap();
+    assert_eq!(
+        eval_string(
+            &page,
+            "[t.selectionStart, t.selectionEnd, t.selectionDirection].join(',')"
+        ),
+        "11,11,none"
+    );
+
+    page.eval("t.setSelectionRange(0, 5, 'backward')").unwrap();
+    assert_eq!(
+        eval_string(
+            &page,
+            "[t.selectionStart, t.selectionEnd, t.selectionDirection].join(',')"
+        ),
+        "0,5,backward"
+    );
+
+    // Typing replaces the selection.
+    type_text(&page, "X");
+    assert_eq!(eval_string(&page, "t.value"), "X world");
+
+    page.eval("t.select()").unwrap();
+    assert_eq!(
+        eval_string(&page, "[t.selectionStart, t.selectionEnd].join(',')"),
+        "0,7",
+        "select() covers the whole value"
+    );
+
+    // A control with no text entry reports null, not 0 — 0 is a valid caret.
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('c').selectionStart)"),
+        "null"
+    );
+    // A textarea has text entry like an input.
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('a').selectionStart)"),
+        "3"
+    );
+}
+
+/// Backspace over a selection deletes the selection, not one character.
+#[test]
+fn backspace_deletes_the_selection() {
+    let page = page_with(r##"<!doctype html><input id=t value="abcdef">"##);
+    page.eval("document.getElementById('t').focus(); t.setSelectionRange(1, 4)")
+        .unwrap();
+    press(&page, "Backspace");
+    assert_eq!(eval_string(&page, "t.value"), "aef");
+    assert_eq!(eval_string(&page, "String(t.selectionStart)"), "1");
+}
+
+/// `maxLength`/`minLength` reflect, with -1 for absent, and reject negatives.
+#[test]
+fn max_length_reflects() {
+    let page = page_with(r##"<!doctype html><input id=t maxlength=5>"##);
+    assert_eq!(eval_string(&page, "String(t.maxLength)"), "5");
+    assert_eq!(eval_string(&page, "String(t.minLength)"), "-1");
+
+    page.eval("t.maxLength = 9").unwrap();
+    assert_eq!(eval_string(&page, "t.getAttribute('maxlength')"), "9");
+    assert_eq!(
+        eval_string(
+            &page,
+            "(() => { try { t.maxLength = -1; return 'no throw' } catch (e) { return e.name } })()"
+        ),
+        "IndexSizeError"
+    );
+}

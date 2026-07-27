@@ -68,3 +68,11 @@ pub(crate) fn set_indeterminate(cx: &BindCx<'_>, this: NodeId, value: bool) -> R
     cx.state.dom.borrow_mut().set_indeterminate(this, value);
     Ok(())
 }
+
+// === Text selection (shared with `HTMLTextAreaElement`; see `imp::text_selection`) ===
+
+pub(crate) use crate::imp::text_selection::{
+    max_length, min_length, select, selection_direction, selection_end, selection_start,
+    set_max_length, set_min_length, set_selection_direction, set_selection_end,
+    set_selection_range, set_selection_start,
+};

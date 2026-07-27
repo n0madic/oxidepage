@@ -320,6 +320,21 @@ interface HTMLInputElement : HTMLElement {
   [CEReactions] attribute boolean formNoValidate;
   readonly attribute HTMLFormElement? form;
   [SameObject] readonly attribute NodeList labels;
+  [CEReactions] attribute long maxLength;
+  [CEReactions] attribute long minLength;
+  // The text entry cursor. `selectionStart`/`selectionEnd` are nullable
+  // because a control with no text entry (a checkbox, a button) reports null
+  // rather than a number — feature-detecting code reads them exactly that way.
+  // Typed `any` rather than `unsigned long?`: the code generator has no
+  // nullable-number return, and a text-entry-less control (a checkbox, a
+  // button) must report **null**, not 0 — feature detection reads it that way,
+  // and 0 is a valid caret position.
+  attribute any selectionStart;
+  attribute any selectionEnd;
+  attribute DOMString? selectionDirection;
+  undefined setSelectionRange(unsigned long start, unsigned long end,
+                              optional DOMString direction);
+  undefined select();
 };
 
 interface HTMLTextAreaElement : HTMLElement {
@@ -336,6 +351,20 @@ interface HTMLTextAreaElement : HTMLElement {
   readonly attribute DOMString type;
   readonly attribute HTMLFormElement? form;
   [SameObject] readonly attribute NodeList labels;
+  [CEReactions] attribute long maxLength;
+  [CEReactions] attribute long minLength;
+  // A `<textarea>` always has text entry, so unlike `<input>` these never
+  // report null — the type is shared with `HTMLInputElement` all the same.
+  // Typed `any` rather than `unsigned long?`: the code generator has no
+  // nullable-number return, and a text-entry-less control (a checkbox, a
+  // button) must report **null**, not 0 — feature detection reads it that way,
+  // and 0 is a valid caret position.
+  attribute any selectionStart;
+  attribute any selectionEnd;
+  attribute DOMString? selectionDirection;
+  undefined setSelectionRange(unsigned long start, unsigned long end,
+                              optional DOMString direction);
+  undefined select();
 };
 
 interface HTMLSelectElement : HTMLElement {

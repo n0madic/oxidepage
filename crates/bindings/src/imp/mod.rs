@@ -103,6 +103,7 @@ pub(crate) mod svg_element;
 #[path = "svg_a_element.rs"]
 pub(crate) mod svga_element;
 pub(crate) mod text;
+pub(crate) mod text_selection;
 pub(crate) mod ui_event;
 pub(crate) mod url;
 pub(crate) mod url_parts;

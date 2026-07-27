@@ -45,3 +45,11 @@ pub(crate) fn text_length(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow>
         .count();
     Ok(len as f64)
 }
+
+// === Text selection (shared with `HTMLTextAreaElement`; see `imp::text_selection`) ===
+
+pub(crate) use crate::imp::text_selection::{
+    max_length, min_length, select, selection_direction, selection_end, selection_start,
+    set_max_length, set_min_length, set_selection_direction, set_selection_end,
+    set_selection_range, set_selection_start,
+};
