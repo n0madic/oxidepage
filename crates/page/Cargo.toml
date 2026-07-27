@@ -23,7 +23,7 @@ style = { workspace = true }
 crossbeam-channel = { workspace = true }
 encoding_rs = { workspace = true }
 url = { workspace = true }
-percent-encoding = "2"
+percent-encoding = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

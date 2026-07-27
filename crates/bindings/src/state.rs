@@ -6,7 +6,7 @@
 //! ever holds a strong reference back to the page (see `oxidepage-js` docs).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use oxidepage_base::{NodeId, RequestId};
@@ -219,6 +219,12 @@ pub struct SessionHistory {
 /// The longest session history the page keeps. Older entries fall off the
 /// front (the index moves with them), which is what a browser's own cap does.
 pub const MAX_HISTORY_ENTRIES: usize = 50;
+
+/// The deepest [`PageState::pending_navigation`] queue. Requests past it are
+/// dropped: the page performs at most `MAX_CHAINED_NAVIGATIONS` off one entry
+/// point regardless, so anything queueing more than this in a single task is a
+/// runaway loop rather than a page with intent.
+pub const MAX_PENDING_NAVIGATIONS: usize = 32;
 
 impl SessionHistory {
     fn new(url: String) -> Self {
@@ -580,8 +586,6 @@ pub(crate) struct JsRefs {
     pub record_pairs: JsValue,
     /// `(proto, snapshotFn)` installer for URLSearchParams pair iteration.
     pub install_params_iterable: JsValue,
-    /// `(byteArray) => ArrayBuffer` (Response.arrayBuffer construction).
-    pub bytes_to_array_buffer: JsValue,
     /// Pristine `Object.freeze` wrapper used for WebIDL FrozenArray values.
     pub freeze: JsValue,
     /// `(target) => Proxy` wrapping a `CSSStyleDeclaration` host object with
@@ -777,12 +781,15 @@ pub struct PageState {
     /// viewport); the page's event loop drains this and dispatches `scroll`
     /// events as tasks.
     pub(crate) pending_scroll_targets: RefCell<Vec<Option<oxidepage_base::NodeId>>>,
-    /// The navigation script has asked for and the page has not yet performed.
+    /// The navigations script has asked for and the page has not yet performed,
+    /// in the order they were requested.
     ///
-    /// **Last write wins**: `location.href = a; location.href = b` in one task
-    /// navigates once, to `b` — the same collapsing a browser does when several
-    /// navigations are queued before the event loop next spins.
-    pub(crate) pending_navigation: RefCell<Option<PendingNavigation>>,
+    /// A **queue**, not a single slot. Only a `Load` superseding a queued `Load`
+    /// collapses (`location.href = a; location.href = b` navigates once, to `b`,
+    /// as a browser does); a traversal is *cumulative* — `history.back();
+    /// history.back()` must move two entries — and a `javascript:` URL is a
+    /// script to run, so neither may be swallowed by whatever was queued next.
+    pub(crate) pending_navigation: RefCell<VecDeque<PendingNavigation>>,
     /// The session history of this browsing context, shared by
     /// `history.pushState`/`go()` and the page's navigation driver.
     pub(crate) history: RefCell<SessionHistory>,
@@ -793,9 +800,12 @@ pub struct PageState {
     /// pattern: one object per realm, surviving navigation).
     pub(crate) location_js: RefCell<Option<JsValue>>,
     pub(crate) history_js: RefCell<Option<JsValue>>,
-    /// Set while a form submission is running, so an `onsubmit` handler calling
-    /// `form.submit()` cannot recurse into the same submission forever.
-    pub(crate) submitting: Cell<bool>,
+    /// HTML's **firing submission events** flag: set only while the `submit`
+    /// event of a submission is being dispatched, so a `requestSubmit()` or a
+    /// submit-button activation raised from inside `onsubmit` cannot recurse
+    /// forever. `form.submit()` fires no event and is not blocked by it, which
+    /// is what makes validate-then-submit work.
+    pub(crate) firing_submission_events: Cell<bool>,
     /// While the parser holds handles into the tree, detached subtrees must
     /// not be freed under it.
     pub(crate) parsing: Cell<bool>,
@@ -954,12 +964,12 @@ impl PageState {
             hooks,
             pending_net: RefCell::new(HashMap::new()),
             pending_scroll_targets: RefCell::new(Vec::new()),
-            pending_navigation: RefCell::new(None),
+            pending_navigation: RefCell::new(VecDeque::new()),
             history: RefCell::new(SessionHistory::new(initial_url)),
             referrer: RefCell::new(String::new()),
             location_js: RefCell::new(None),
             history_js: RefCell::new(None),
-            submitting: Cell::new(false),
+            firing_submission_events: Cell::new(false),
             parsing: Cell::new(false),
             ready_state: Cell::new(ReadyState::default()),
             parser_script_active: Cell::new(false),
@@ -1171,22 +1181,36 @@ impl PageState {
         self.pending_scroll_targets.borrow_mut().push(None);
     }
 
-    /// Queues a navigation for the page's event loop, superseding any request
-    /// queued earlier in this task (see [`PageState::pending_navigation`]).
+    /// Queues a navigation for the page's event loop (see
+    /// [`PageState::pending_navigation`] for what does and does not collapse).
     pub fn request_navigation(&self, navigation: PendingNavigation) {
-        *self.pending_navigation.borrow_mut() = Some(navigation);
+        let mut queue = self.pending_navigation.borrow_mut();
+        // A load supersedes a load that has not started yet.
+        if matches!(navigation, PendingNavigation::Load { .. })
+            && matches!(queue.back(), Some(PendingNavigation::Load { .. }))
+        {
+            queue.pop_back();
+        }
+        // A runaway loop of traversals or `javascript:` activations cannot grow
+        // this without bound. The page performs at most
+        // `MAX_CHAINED_NAVIGATIONS` per chain anyway, so a queue this deep is
+        // already a script that has lost control.
+        if queue.len() >= MAX_PENDING_NAVIGATIONS {
+            return;
+        }
+        queue.push_back(navigation);
     }
 
-    /// Takes the queued navigation, if any.
+    /// Takes the next queued navigation, if any.
     #[must_use]
     pub fn take_pending_navigation(&self) -> Option<PendingNavigation> {
-        self.pending_navigation.borrow_mut().take()
+        self.pending_navigation.borrow_mut().pop_front()
     }
 
     /// True when script has queued a navigation the page has not run yet.
     #[must_use]
     pub fn has_pending_navigation(&self) -> bool {
-        self.pending_navigation.borrow().is_some()
+        !self.pending_navigation.borrow().is_empty()
     }
 
     /// The session history, for the page's navigation driver.

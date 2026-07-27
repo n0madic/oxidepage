@@ -43,12 +43,6 @@ pub(crate) fn submit(
     submitter: Option<NodeId>,
     fire_event: bool,
 ) -> Result<(), JsThrow> {
-    // HTML's "constructing entry list" flag: a submission already under way
-    // means an `onsubmit` handler called back in. Re-entering would recurse
-    // until the script budget kills the page.
-    if cx.state.submitting.get() {
-        return Ok(());
-    }
     // HTML's "form cannot navigate" check, step 1 of form submission: a form
     // that is not in a document has no browsing context to navigate, so nothing
     // happens — not even the `submit` event. `Event-dispatch-click.html`'s
@@ -62,31 +56,48 @@ pub(crate) fn submit(
     {
         return Ok(());
     }
-    cx.state.submitting.set(true);
-    let result = submit_inner(cx, form, submitter, fire_event);
-    cx.state.submitting.set(false);
-    result
-}
-
-fn submit_inner(
-    cx: &BindCx<'_>,
-    form: NodeId,
-    submitter: Option<NodeId>,
-    fire_event: bool,
-) -> Result<(), JsThrow> {
     if fire_event {
-        let (value, data) = crate::imp::submit_event::new_trusted(cx, submitter)?;
-        let proceed = dispatch_event(cx, EventTargetKey::Node(form), &value, &data)?;
-        if !proceed {
+        // HTML's **firing submission events** flag, and it guards only this
+        // half of the algorithm. The spec checks it under "if submitted from
+        // submit() method is false", so it stops a `requestSubmit()` or a
+        // button activation raised from inside `onsubmit` from recursing until
+        // the script budget kills the page — and deliberately does *not* stop
+        // `form.submit()`, which skips the event entirely.
+        //
+        // Guarding the whole of `submit()` with it instead silently dropped
+        // `onsubmit = e => { e.preventDefault(); validate(); form.submit(); }`,
+        // the canonical validate-then-submit idiom, leaving the page looking
+        // hung with no warning.
+        if cx.state.firing_submission_events.get() {
             return Ok(());
         }
-        // A listener may have detached the form or removed the submitter.
-        let dom = cx.state.dom.borrow();
-        if dom.get(form).is_none_or(|n| !n.is_connected()) {
+        cx.state.firing_submission_events.set(true);
+        let proceed = fire_submit_event(cx, form, submitter);
+        cx.state.firing_submission_events.set(false);
+        if !proceed? {
             return Ok(());
         }
     }
+    submit_inner(cx, form, submitter)
+}
 
+/// Fires the `submit` event; `false` means the submission must not continue,
+/// either because a listener canceled it or because one detached the form.
+fn fire_submit_event(
+    cx: &BindCx<'_>,
+    form: NodeId,
+    submitter: Option<NodeId>,
+) -> Result<bool, JsThrow> {
+    let (value, data) = crate::imp::submit_event::new_trusted(cx, submitter)?;
+    if !dispatch_event(cx, EventTargetKey::Node(form), &value, &data)? {
+        return Ok(false);
+    }
+    // A listener may have detached the form or removed the submitter.
+    let dom = cx.state.dom.borrow();
+    Ok(dom.get(form).is_some_and(oxidepage_dom::Node::is_connected))
+}
+
+fn submit_inner(cx: &BindCx<'_>, form: NodeId, submitter: Option<NodeId>) -> Result<(), JsThrow> {
     let plan = match plan_submission(cx, form, submitter) {
         Some(plan) => plan,
         None => return Ok(()),

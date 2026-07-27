@@ -178,7 +178,6 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), J
         resolved_promise: get("resolvedPromise")?,
         record_pairs: get("recordPairs")?,
         install_params_iterable: get("installParamsIterable")?,
-        bytes_to_array_buffer: get("bytesToArrayBuffer")?,
         freeze: get("freeze")?,
         style_proxy: get("styleProxy")?,
         dataset_proxy: get("datasetProxy")?,
@@ -2198,14 +2197,7 @@ pub fn deliver_net_event(cx: &BindCx<'_>, event: NetEvent) {
                         // `responseURL` is the final post-redirect URL with its
                         // fragment stripped; it used to be discarded here.
                         x.response_url = strip_fragment(&final_url);
-                        // `lengthComputable`/`total` come from `Content-Length`
-                        // and from nowhere else: a cached or compressed response
-                        // has none, and then `total` stays 0 rather than being
-                        // invented from the bytes that happen to have arrived.
-                        x.total = headers
-                            .iter()
-                            .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-                            .and_then(|(_, v)| v.trim().parse::<f64>().ok());
+                        x.total = content_length_total(&headers);
                         x.response_headers = headers;
                         x.ready_state = 2; // HEADERS_RECEIVED
                         Some(Rc::clone(xhr))
@@ -2307,6 +2299,23 @@ fn strip_fragment(url: &str) -> String {
     }
 }
 
+/// `ProgressEvent.total` for a download: the response's `Content-Length`, and
+/// nothing else. A cached or compressed response has none, and then `total`
+/// stays absent (`lengthComputable === false`) rather than being invented from
+/// the bytes that happen to have arrived.
+///
+/// Parsed as the `unsigned long long` the IDL says it is. Parsing it as `f64`
+/// accepted `NaN`, `inf`, `-1` and `1e999` straight off a hostile or broken
+/// wire and then reported `lengthComputable === true` for them, so every
+/// `e.loaded / e.total` progress bar read `NaN`.
+fn content_length_total(headers: &[(String, String)]) -> Option<f64> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .map(|len| len as f64)
+}
+
 /// Builds a `Response` object from an accumulated fetch. A cross-origin opaque
 /// response exposes nothing to script (status 0, empty status text/url/headers,
 /// no body); a CORS response is `type: "cors"` with headers already pruned by
@@ -2393,4 +2402,30 @@ pub fn fire_timer_callback(cx: &BindCx<'_>, callback: &JsValue, args: &[JsValue]
         cx.state.hooks.report_error(error.to_string());
     }
     microtask_checkpoint(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_length_total;
+
+    fn headers(value: &str) -> Vec<(String, String)> {
+        vec![("Content-Length".to_owned(), value.to_owned())]
+    }
+
+    #[test]
+    fn content_length_accepts_only_an_unsigned_integer() {
+        assert_eq!(content_length_total(&headers(" 1024 ")), Some(1024.0));
+        assert_eq!(content_length_total(&headers("0")), Some(0.0));
+        assert_eq!(content_length_total(&[]), None);
+
+        // Everything a `f64` parse used to wave through, each of which made
+        // `lengthComputable` true with an unusable `total`.
+        for hostile in ["NaN", "inf", "Infinity", "-1", "1e999", "1.5", "0x10", ""] {
+            assert_eq!(
+                content_length_total(&headers(hostile)),
+                None,
+                "`Content-Length: {hostile}` must not be reported as a length"
+            );
+        }
+    }
 }

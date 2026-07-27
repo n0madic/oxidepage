@@ -1512,12 +1512,18 @@ impl BindCx<'_> {
         Ok(promise)
     }
 
-    /// Wraps a JS array of byte values into an `ArrayBuffer`
-    /// (`new Uint8Array(bytes).buffer`) via the bootstrap helper, so the
-    /// `Uint8Array` constructor is invoked with `new` on the JS side.
-    pub(crate) fn bytes_to_array_buffer(&self, bytes: JsValue) -> Result<JsValue, JsThrow> {
-        let helper = self.with_js(|js| js.bytes_to_array_buffer.clone())?;
-        self.call_helper(&helper, &[bytes])
+    /// Copies `bytes` straight into a new `ArrayBuffer`.
+    ///
+    /// Straight, because the route it replaced went through one boxed
+    /// `JsValue::Number` per byte plus a JS array of that length before
+    /// `new Uint8Array(array).buffer` copied it again — for a 10 MB
+    /// `responseType = "arraybuffer"` download, tens of megabytes of transient
+    /// allocation and a visible pause, over data already contiguous in Rust.
+    pub(crate) fn bytes_to_array_buffer(&self, bytes: &[u8]) -> Result<JsValue, JsThrow> {
+        self.scope
+            .new_array_buffer(bytes)
+            .map(JsValue::Object)
+            .map_err(JsThrow::from)
     }
 
     /// Builds a `TypeError` value (for rejecting a `fetch()` promise).

@@ -333,6 +333,14 @@ pub(crate) struct XhrData {
     /// stays 0 rather than being fabricated from what has arrived.
     pub loaded: f64,
     pub total: Option<f64>,
+    /// The request body's length in bytes, recorded at `send()`.
+    ///
+    /// The upload half reports it verbatim: the body is handed to hyper whole,
+    /// so once the response head proves it went out the honest figure is "all
+    /// of it". Reporting 0 there — which is what an absent length degrades to —
+    /// made every `xhr.upload.onprogress` bar read 0% (or `NaN`, dividing by a
+    /// `total` of 0) at the moment the upload finished.
+    pub upload_total: f64,
     pub request_id: Option<RequestId>,
     /// The spec's "response object" slot: `None` = not computed yet,
     /// `Some(None)` = computed and failed (unparseable JSON or document),

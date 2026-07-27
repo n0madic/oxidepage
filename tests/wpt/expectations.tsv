@@ -1049,7 +1049,6 @@ css/cssom-view/scroll-overflow-clip-quirks-002.html	__harness__	OK
 css/cssom-view/scroll-zoom.html	__harness__	OK
 css/cssom-view/scroll-zoom.html	scroll{Width, Height}	FAIL
 css/cssom-view/scrollIntoView-align-scrollport-covering-child.html	__harness__	OK
-css/cssom-view/scrollIntoView-align-scrollport-covering-child.html	scrollIntoView scrolls scrollport-covering child in both axes	FAIL
 css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	Element.scrollIntoView doesn't scroll a position:fixed element outside of the layout viewport	FAIL
 css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	__harness__	OK
 css/cssom-view/scrollIntoView-fixed.html	[Box A] scrollIntoView from unscrollable position:fixed	FAIL
@@ -1083,7 +1082,6 @@ css/cssom-view/scrollIntoView-multiple.html	__harness__	OK
 css/cssom-view/scrollIntoView-nearest-oversized-element.html	__harness__	OK
 css/cssom-view/scrollIntoView-nearest-oversized-element.html	scrollIntoView nearest aligns an oversized target before the scrollport to its closest (right/bottom) edge	FAIL
 css/cssom-view/scrollIntoView-nearest-visible-element.html	__harness__	OK
-css/cssom-view/scrollIntoView-nearest-visible-element.html	scrollIntoView with `nearest` block and inline option shouldn't scroll a completely visible element	FAIL
 css/cssom-view/scrollIntoView-root-overflow-clip.html	__harness__	OK
 css/cssom-view/scrollIntoView-root-overflow-clip.html	scrollIntoView scrolls the viewport when overflow-x: clip is applied to the root element	FAIL
 css/cssom-view/scrollIntoView-root-overflow-clip.html	scrollIntoView scrolls the viewport when overflow-y: clip is applied to the root element	FAIL

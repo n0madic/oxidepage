@@ -111,9 +111,12 @@ pub(crate) fn buttons(_cx: &BindCx<'_>, this: EventRef) -> Result<f64, JsThrow> 
     fields(&this, "MouseEvent", |m| f64::from(m.buttons))
 }
 
-pub(crate) fn related_target(cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
-    let related = fields(&this, "MouseEvent", |m| m.related)?;
-    cx.opt_node_to_js(related)
+/// The stored wrapper itself, so `e.relatedTarget === theNodeThatWasPassedIn`.
+/// Re-minting it from an id would be both slower and, for a node freed since,
+/// a throw where the spec wants the object back.
+pub(crate) fn related_target(_cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
+    let related = fields(&this, "MouseEvent", |m| m.related.clone())?;
+    Ok(related.unwrap_or(JsValue::Null))
 }
 
 pub(crate) fn ctrl_key(_cx: &BindCx<'_>, this: EventRef) -> Result<bool, JsThrow> {

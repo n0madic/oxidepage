@@ -1282,6 +1282,54 @@ fn xhr_success_event_sequence() {
     );
 }
 
+/// `open()` step 11 fires `readystatechange` only "if this's state is not
+/// opened". Firing it unconditionally gave a second `open()` a phantom
+/// transition, which any state machine driven off `onreadystatechange` counts.
+#[test]
+fn xhr_open_fires_readystatechange_only_on_a_state_change() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.opened = 0;
+            x.addEventListener('readystatechange', () => {
+                if (x.readyState === 1) window.opened++;
+            });
+            x.open('GET', '/text');
+            x.open('GET', '/text');
+            x.open('POST', '/echo');
+        })()",
+    )
+    .unwrap();
+    assert_eq!(
+        page.eval_to_string("String(window.opened)").unwrap(),
+        "1",
+        "three `open()` calls are one UNSENT -> OPENED transition"
+    );
+
+    // A *reopen* after the request completed is a real transition again.
+    page.eval(
+        "(() => {
+            const y = new XMLHttpRequest();
+            window.reopened = 0;
+            y.addEventListener('readystatechange', () => {
+                if (y.readyState === 1) window.reopened++;
+            });
+            y.open('GET', '/text');
+            y.addEventListener('load', () => y.open('GET', '/text'));
+            y.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("String(window.reopened)").unwrap(),
+        "2",
+        "reopening a DONE request transitions to OPENED again"
+    );
+}
+
 /// A network error: exactly one of the four terminal events fires, `loadend`
 /// follows it, and the response is a network error (status 0, empty body).
 #[test]
@@ -1657,12 +1705,24 @@ fn xhr_upload_events() {
             window.uploadIsTarget = x.upload instanceof XMLHttpRequestEventTarget
                 && x.upload instanceof EventTarget
                 && x instanceof XMLHttpRequestEventTarget;
+            // What a progress bar actually reads.
+            window.upBytes = [];
+            ['loadstart','progress','load'].forEach(t => x.upload.addEventListener(
+                t, e => window.upBytes.push(t + ':' + e.lengthComputable + ':' + e.loaded + '/' + e.total)));
             x.open('POST', '/echo');
             x.send('payload');
         })()",
     )
     .unwrap();
     page.settle(Duration::from_secs(5));
+    // The body went out whole, so completion reports all of it. Reporting
+    // `loaded = 0` with no total (`lengthComputable === false`) made every
+    // `e.loaded / e.total` bar read 0% — or NaN — at the moment it finished.
+    assert_eq!(
+        page.eval_to_string("window.upBytes.join(',')").unwrap(),
+        "loadstart:true:0/7,progress:true:7/7,load:true:7/7",
+        "the upload reports the byte count `send()` recorded"
+    );
     assert_eq!(page.eval_to_string("window.sameObject").unwrap(), "true");
     assert_eq!(
         page.eval_to_string("window.uploadIsTarget").unwrap(),

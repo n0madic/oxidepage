@@ -1446,6 +1446,7 @@ dependencies = [
  "oxidepage-layout",
  "oxidepage-net",
  "oxidepage-style",
+ "percent-encoding",
  "servo_arc",
  "stylo",
  "url",

@@ -136,6 +136,13 @@ pub trait JsScope {
     fn new_object_with_proto(&self, proto: Option<&JsObject>) -> Result<JsObject, JsError>;
     fn new_array(&self, items: &[JsValue]) -> Result<JsObject, JsError>;
 
+    /// Creates an `ArrayBuffer` holding a copy of `bytes`.
+    ///
+    /// Direct, because the alternative is not: building one boxed `JsValue`
+    /// per byte and a JS array of that length before converting is tens of
+    /// megabytes of transient allocation for a 10 MB download.
+    fn new_array_buffer(&self, bytes: &[u8]) -> Result<JsObject, JsError>;
+
     /// Creates a host function with the given `name` and `length`.
     fn new_function(&self, name: &str, length: u32, f: HostFn) -> Result<JsObject, JsError>;
 

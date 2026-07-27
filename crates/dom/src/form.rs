@@ -293,6 +293,20 @@ impl DomTree {
         }
     }
 
+    /// Whether pressing Enter in this control implicitly submits its form
+    /// (HTML's **implicit submission**).
+    ///
+    /// Narrower than [`Self::is_text_entry`] on purpose: a `<textarea>` is a
+    /// text entry control, but Enter inserts a newline there rather than
+    /// submitting. HTML scopes implicit submission to the *input* text states.
+    #[must_use]
+    pub fn allows_implicit_submission(&self, id: NodeId) -> bool {
+        let Some(el) = self.get(id).and_then(|n| n.as_element()) else {
+            return false;
+        };
+        el.is_html_element() && &**el.local_name() == "input" && self.is_text_entry(id)
+    }
+
     /// Whether the control refuses edits: `readonly` or disabled.
     #[must_use]
     pub fn is_edit_blocked(&self, id: NodeId) -> bool {

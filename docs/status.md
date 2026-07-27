@@ -340,7 +340,8 @@ v1 limits.
   carries `urlencoded`, `multipart/form-data` or `text/plain` — reusing the
   `FormData` entry list and multipart serializer rather than duplicating them.
   Navigation is a **task source**, not an inline call: a script navigation queues
-  on `PageState::pending_navigation` (last write wins) and the event loop drains
+  on `PageState::pending_navigation` (a queue; only a load supersedes a queued
+  load, so `history.back(); history.back()` moves two entries) and the event loop drains
   it first, because committing a document replaces the DOM, style and layout
   engines the calling script is borrowing. Session history is a real entry list;
   a traversal is same-document iff the target entry belongs to the loaded
@@ -381,7 +382,9 @@ v1 limits.
   fired only in the target phase, so delegation on a container never worked.
   `Page::dispatch_key` and `Page::insert_text` type: `keydown` → `keypress` →
   the default action (`beforeinput` → mutate → `input`) → `keyup`, with `Enter`
-  submitting, `Escape` blurring and `Tab` walking HTML's sequential focus order
+  submitting from an *input* text control (and inserting a newline in a
+  `<textarea>`, which HTML excludes from implicit submission),
+  `Escape` blurring and `Tab` walking HTML's sequential focus order
   (positive `tabindex` ascending, then document order). **`change` fires on
   blur**, and only when the value differs from the one the control had when
   focus arrived — so `move_focus` snapshots it on the way in. `selectionStart`/
@@ -390,8 +393,9 @@ v1 limits.
   `null` rather than 0. `Element.scrollIntoView()` walks every scrollable
   ancestor, which un-skipped 38 vendored WPT files.
   `Page::dispatch_wheel` fires a cancelable `wheel` and scrolls the nearest
-  ancestor that can move; `document.hasFocus()` is real (false for a document
-  with no browsing context).
+  *inclusive* ancestor that can move — the hit element may be the scroller, and
+  `scrollParent()` by definition cannot say so; `document.hasFocus()` is real
+  (false for a document with no browsing context).
   `relatedTarget` is retargeted across shadow boundaries, so a closed tree does
   not leak the node the pointer came from. `XMLHttpRequest` is a real
   `EventTarget` — its events are genuine `Event` objects (so `preventDefault`,

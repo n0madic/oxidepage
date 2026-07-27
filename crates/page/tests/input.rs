@@ -283,6 +283,37 @@ fn coordinates_are_reported_correctly() {
     );
 }
 
+/// `offsetX/Y` are measured against the target's padding box **in viewport
+/// coordinates**, so scrolling the document must not shift them: both sides of
+/// the subtraction move together. Adding the document scroll to one of them
+/// offset every reading by exactly the scroll position.
+#[test]
+fn offset_coordinates_ignore_the_document_scroll() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #pad { height: 2000px }
+             #b { position: absolute; left: 0; top: 500px; width: 100px; height: 100px }
+           </style>
+           <div id=pad></div><div id=b></div>
+           <script>
+             window.seen = "";
+             document.getElementById("b").addEventListener("click", e => {
+               seen = [e.offsetX, e.offsetY, e.pageY].join(",");
+             });
+           </script>"##,
+    );
+    page.eval("window.scrollTo(0, 300)").unwrap();
+    // The box's top is now at viewport y = 200; a click 10px into it.
+    click_at(&page, 10.0, 210.0);
+    assert_eq!(
+        eval_string(&page, "window.seen"),
+        // offset is padding-box relative (10, 10); pageY adds the scroll.
+        "10,10,510",
+        "offsetX/Y are padding-box relative regardless of scroll, pageY is not"
+    );
+}
+
 /// A listener that removes the element mid-sequence must not take the engine
 /// down: every step re-validates its node ids.
 #[test]
@@ -553,6 +584,32 @@ fn enter_submits_the_form() {
     assert_eq!(eval_string(&page, "String(window.submitted)"), "true");
 }
 
+/// Enter in a `<textarea>` is a **newline**, not an implicit submission. HTML
+/// scopes implicit submission to the input text states; treating every text
+/// entry control as one submitted the form and lost the line break.
+#[test]
+fn enter_in_a_textarea_inserts_a_newline() {
+    let page = page_with(
+        r##"<!doctype html>
+           <form id=f onsubmit="window.submitted = true; return false">
+             <textarea id=a>ab</textarea>
+           </form>"##,
+    );
+    page.eval("document.getElementById('a').focus(); a.setSelectionRange(1, 1)")
+        .unwrap();
+    press(&page, "Enter");
+    assert_eq!(
+        eval_string(&page, "JSON.stringify(a.value)"),
+        "\"a\\nb\"",
+        "Enter inserts a line break at the caret"
+    );
+    assert_eq!(
+        eval_string(&page, "String(window.submitted)"),
+        "undefined",
+        "and must not submit the owning form"
+    );
+}
+
 /// The sequential focus order: positive `tabindex` ascending first, then
 /// document order over the natively focusable and `tabindex="0"`.
 #[test]
@@ -701,6 +758,31 @@ fn selection_api() {
     );
 }
 
+/// The two selection setters move *different* endpoints when the new value
+/// would invert the selection: `selectionStart` drags the end up, but
+/// `selectionEnd` drags the **start** down. Clamping the end up to the old
+/// start instead left the caret where it was.
+#[test]
+fn selection_end_below_the_start_drags_the_start_down() {
+    let page = page_with(r##"<!doctype html><input id=t value="abcdef">"##);
+    page.eval("t.setSelectionRange(5, 5); t.selectionEnd = 2")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "[t.selectionStart, t.selectionEnd].join(',')"),
+        "2,2",
+        "an end below the start moves the start to it"
+    );
+
+    // The mirror case still clamps the other way.
+    page.eval("t.setSelectionRange(1, 2); t.selectionStart = 4")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "[t.selectionStart, t.selectionEnd].join(',')"),
+        "4,4",
+        "a start past the end drags the end along"
+    );
+}
+
 /// Backspace over a selection deletes the selection, not one character.
 #[test]
 fn backspace_deletes_the_selection() {
@@ -771,6 +853,37 @@ fn wheel_scrolls_the_nearest_container() {
         eval_string(&page, "String(document.getElementById('box').scrollTop)"),
         "120",
         "the nearest scrollable ancestor scrolls"
+    );
+}
+
+/// The hit element may *be* the scroller. `scrollParent()` answers a strictly
+/// ancestor question, so routing the wheel through it alone skipped the
+/// container whenever the point did not land on an element *child* of it —
+/// and scrolled the document instead. Here the point is to the right of the
+/// only child, so `elements_from_point` returns the container itself.
+#[test]
+fn wheel_scrolls_the_container_it_is_over() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #pad { height: 3000px }
+             #box { position: absolute; left: 0; top: 0; width: 200px; height: 100px;
+                    overflow: scroll }
+             #tall { width: 100px; height: 2000px }
+           </style>
+           <div id=box><div id=tall></div></div>
+           <div id=pad></div>"##,
+    );
+    wheel(&page, 150.0, 50.0, 0.0, 60.0);
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)"),
+        "60",
+        "the container under the pointer scrolls, not the document"
+    );
+    assert_eq!(
+        eval_string(&page, "String(window.scrollY)"),
+        "0",
+        "the document must not have scrolled instead"
     );
 }
 
@@ -867,6 +980,61 @@ fn scroll_into_view_walks_every_ancestor() {
     assert!(
         eval_string(&page, "String(window.scrollY)") != "0",
         "and so did the document"
+    );
+}
+
+/// Inside a scroll container, `scrollIntoView` is idempotent for the same
+/// reason it is against the viewport: the box position handed to the alignment
+/// is the *visual* delta from the container's near edge, and the container's
+/// current offset is added once, by the alignment. Adding it to the delta too
+/// scrolled by the whole distance again on every call.
+#[test]
+fn scroll_into_view_in_a_container_is_idempotent() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #box { height: 200px; overflow: scroll }
+             #inner { height: 3000px }
+             #target { position: relative; top: 1000px; height: 50px }
+           </style>
+           <div id=box><div id=inner><div id=target></div></div></div>"##,
+    );
+    page.eval("document.getElementById('target').scrollIntoView()")
+        .unwrap();
+    let first = eval_string(&page, "String(document.getElementById('box').scrollTop)");
+    assert_eq!(
+        first, "1000",
+        "the target's top is brought to the near edge"
+    );
+
+    page.eval("document.getElementById('target').scrollIntoView()")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)"),
+        first,
+        "a second call on an element already at the start must not move anything"
+    );
+
+    // `nearest` sees the element as visible now, and must likewise not move.
+    page.eval("document.getElementById('target').scrollIntoView({block: 'nearest'})")
+        .unwrap();
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)"),
+        first,
+        "`nearest` on a visible element is a no-op inside a container too"
+    );
+
+    // And `nearest` from *below* the element scrolls back up to it, which the
+    // double-counted position could never report (its delta was never negative).
+    page.eval(
+        "document.getElementById('box').scrollTop = 2000;\
+               document.getElementById('target').scrollIntoView({block: 'nearest'})",
+    )
+    .unwrap();
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('box').scrollTop)"),
+        "1000",
+        "an element above the visible top is scrolled back into view"
     );
 }
 

@@ -501,6 +501,12 @@ fn fire_focus(
     );
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
+    // The payload holds the related node's *wrapper*, which is what pins it for
+    // as long as the event lives (see `MouseFields::related`).
+    let related = match related {
+        Some(id) => Some(cx.node_to_js(id)?),
+        None => None,
+    };
     let mut payload = crate::events::UiPayload::new(crate::events::UiKind::Focus { related });
     payload.has_view = true;
     data.ui = Some(Box::new(payload));
@@ -542,23 +548,7 @@ pub(crate) fn active_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<Nod
 /// serialized URL, in which the script text has been percent-encoded — running
 /// it verbatim would fail on the first `%20`.
 fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (
-                (bytes[i + 1] as char).to_digit(16),
-                (bytes[i + 2] as char).to_digit(16),
-            )
-        {
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    percent_encoding::percent_decode_str(input)
+        .decode_utf8_lossy()
+        .into_owned()
 }

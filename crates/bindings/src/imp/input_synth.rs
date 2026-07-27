@@ -64,24 +64,31 @@ fn hit_test(cx: &BindCx<'_>, x: f32, y: f32) -> Option<NodeId> {
 fn offset_in(cx: &BindCx<'_>, target: Option<NodeId>, x: f32, y: f32) -> Option<(f64, f64)> {
     let target = target?;
     let layout = cx.state.layout.borrow();
-    let scroll = layout.viewport_scroll();
     let rect = layout.padding_box(target)?;
-    // `padding_box` is in document coordinates; the input is in viewport ones.
-    Some((
-        f64::from(x + scroll.x - rect.origin.x),
-        f64::from(y + scroll.y - rect.origin.y),
-    ))
+    // Both sides are already **viewport** coordinates — `padding_box` resolves
+    // through `absolute_origin(.., include_scroll: true)`. Adding the document
+    // scroll here offset every reading by exactly the scroll position on any
+    // page that had been scrolled.
+    Some((f64::from(x - rect.origin.x), f64::from(y - rect.origin.y)))
 }
 
 /// Builds the payload for one synthesized mouse event.
+///
+/// Fallible because `relatedTarget` is stored as the node's wrapper (which is
+/// what pins it for the life of the event — see `MouseFields::related`), and
+/// minting a wrapper can throw.
 fn mouse_payload(
     cx: &BindCx<'_>,
     input: &MouseInput,
     target: Option<NodeId>,
     related: Option<NodeId>,
     pointer: bool,
-) -> UiPayload {
+) -> Result<UiPayload, JsThrow> {
     let offset = offset_in(cx, target, input.x, input.y);
+    let related = match related {
+        Some(id) => Some(cx.node_to_js(id)?),
+        None => None,
+    };
     let mut payload = UiPayload::new(UiKind::Mouse(Box::new(MouseFields {
         // A headless page has no screen origin, so screen == client.
         screen_x: f64::from(input.x),
@@ -98,7 +105,7 @@ fn mouse_payload(
     payload.detail = input.click_count;
     payload.has_view = true;
     payload.modifiers = input.modifiers;
-    payload
+    Ok(payload)
 }
 
 /// Creates a trusted event of `interface` and dispatches it at `target`.
@@ -193,18 +200,18 @@ fn transfer_hover(
         .collect();
 
     if let Some(old) = old {
-        let payload = mouse_payload(cx, input, Some(old), new, false);
+        let payload = mouse_payload(cx, input, Some(old), new, false)?;
         fire_at(cx, old, "MouseEvent", "mouseout", true, true, payload)?;
         for &id in &leaving {
-            let payload = mouse_payload(cx, input, Some(id), new, false);
+            let payload = mouse_payload(cx, input, Some(id), new, false)?;
             fire_at(cx, id, "MouseEvent", "mouseleave", false, false, payload)?;
         }
     }
     if let Some(new) = new {
-        let payload = mouse_payload(cx, input, Some(new), old, false);
+        let payload = mouse_payload(cx, input, Some(new), old, false)?;
         fire_at(cx, new, "MouseEvent", "mouseover", true, true, payload)?;
         for &id in &entering {
-            let payload = mouse_payload(cx, input, Some(id), old, false);
+            let payload = mouse_payload(cx, input, Some(id), old, false)?;
             fire_at(cx, id, "MouseEvent", "mouseenter", false, false, payload)?;
         }
     }
@@ -230,7 +237,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
             let old = cx.state.dom.borrow().hovered();
             transfer_hover(cx, &input, old, target)?;
             if let Some(target) = target {
-                let payload = mouse_payload(cx, &input, Some(target), None, true);
+                let payload = mouse_payload(cx, &input, Some(target), None, true)?;
                 fire_at(
                     cx,
                     target,
@@ -240,7 +247,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
                     true,
                     payload,
                 )?;
-                let payload = mouse_payload(cx, &input, Some(target), None, false);
+                let payload = mouse_payload(cx, &input, Some(target), None, false)?;
                 fire_at(cx, target, "MouseEvent", "mousemove", true, true, payload)?;
             }
         }
@@ -253,7 +260,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
             let Some(target) = target else {
                 return Ok(());
             };
-            let payload = mouse_payload(cx, &input, Some(target), None, true);
+            let payload = mouse_payload(cx, &input, Some(target), None, true)?;
             fire_at(
                 cx,
                 target,
@@ -263,7 +270,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
                 true,
                 payload,
             )?;
-            let payload = mouse_payload(cx, &input, Some(target), None, false);
+            let payload = mouse_payload(cx, &input, Some(target), None, false)?;
             let proceed = fire_at(cx, target, "MouseEvent", "mousedown", true, true, payload)?;
 
             cx.state.dom.borrow_mut().set_active(Some(target));
@@ -283,9 +290,9 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
             let Some(target) = target else {
                 return Ok(());
             };
-            let payload = mouse_payload(cx, &input, Some(target), None, true);
+            let payload = mouse_payload(cx, &input, Some(target), None, true)?;
             fire_at(cx, target, "PointerEvent", "pointerup", true, true, payload)?;
-            let payload = mouse_payload(cx, &input, Some(target), None, false);
+            let payload = mouse_payload(cx, &input, Some(target), None, false)?;
             fire_at(cx, target, "MouseEvent", "mouseup", true, true, payload)?;
 
             // `click` goes to the nearest common inclusive ancestor of the
@@ -296,7 +303,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
                 // being a MouseEvent is what makes `dispatch_event` run the
                 // activation behavior, so a synthesized click follows a link and
                 // submits a form through exactly the path `.click()` uses.
-                let payload = mouse_payload(cx, &input, Some(click_target), None, true);
+                let payload = mouse_payload(cx, &input, Some(click_target), None, true)?;
                 fire_at(
                     cx,
                     click_target,
@@ -307,7 +314,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
                     payload,
                 )?;
                 if input.button == 2 {
-                    let payload = mouse_payload(cx, &input, Some(click_target), None, false);
+                    let payload = mouse_payload(cx, &input, Some(click_target), None, false)?;
                     fire_at(
                         cx,
                         click_target,
@@ -319,7 +326,7 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
                     )?;
                 }
                 if input.click_count == 2 {
-                    let payload = mouse_payload(cx, &input, Some(click_target), None, false);
+                    let payload = mouse_payload(cx, &input, Some(click_target), None, false)?;
                     fire_at(
                         cx,
                         click_target,
@@ -472,14 +479,22 @@ fn run_key_default_action(
 
     match resolved.key.as_str() {
         "Enter" => {
-            // Implicit submission: Enter in a text control submits its form.
-            if cx.state.dom.borrow().is_text_entry(target) {
+            // Implicit submission: Enter in an *input* text control submits its
+            // form. A `<textarea>` is a text entry control too, but there Enter
+            // is a newline — HTML scopes implicit submission to the input text
+            // states, and submitting a textarea's form instead of inserting the
+            // line break loses whatever the user was typing.
+            if cx.state.dom.borrow().allows_implicit_submission(target) {
                 let form = cx.state.dom.borrow().form_owner(target);
                 if let Some(form) = form {
                     crate::imp::form_submit::submit(cx, form, None, /* fire_event */ true)?;
                 }
+                return Ok(());
             }
-            Ok(())
+            if shortcut {
+                return Ok(());
+            }
+            edit_text(cx, target, Some("\n".to_owned()), false)
         }
         "Escape" => {
             if cx.state.dom.borrow().focused() == Some(target) {
@@ -647,7 +662,7 @@ pub fn dispatch_wheel(cx: &BindCx<'_>, input: WheelInput) -> Result<(), JsThrow>
         modifiers: input.modifiers,
         click_count: 0,
     };
-    let mut payload = mouse_payload(cx, &mouse, Some(target), None, false);
+    let mut payload = mouse_payload(cx, &mouse, Some(target), None, false)?;
     if let UiKind::Mouse(fields) = &mut payload.kind {
         fields.wheel = Some(WheelFields {
             delta_x: input.delta_x,
@@ -667,10 +682,29 @@ pub fn dispatch_wheel(cx: &BindCx<'_>, input: WheelInput) -> Result<(), JsThrow>
     Ok(())
 }
 
-/// Scrolls the nearest scrollable ancestor of `node` by a delta, walking
-/// outwards past any container that cannot move in that direction — which is
-/// what makes a wheel over an already-bottomed-out inner panel scroll the page.
+/// Scrolls the nearest scrollable **inclusive** ancestor of `node` by a delta,
+/// walking outwards past any container that cannot move in that direction —
+/// which is what makes a wheel over an already-bottomed-out inner panel scroll
+/// the page.
+///
+/// "Inclusive" is load-bearing: `scroll_parent` starts at the box's *parent*,
+/// so a wheel over an `overflow: auto` container whose children are all text
+/// nodes (`elements_from_point` returns the container itself) would otherwise
+/// skip the very element the pointer is over and scroll the document.
 fn scroll_nearest(cx: &BindCx<'_>, node: NodeId, dx: f32, dy: f32) {
+    if cx.state.layout.borrow().is_scroll_container(node) {
+        let changed = {
+            let mut layout = cx.state.layout.borrow_mut();
+            let offset = layout.scroll_offset(node);
+            layout
+                .set_scroll_offset(node, offset.x + dx, offset.y + dy)
+                .changed
+        };
+        if changed {
+            crate::imp::geometry_support::note_scroll(cx, Some(node), true);
+            return;
+        }
+    }
     let mut current = node;
     loop {
         let parent = {

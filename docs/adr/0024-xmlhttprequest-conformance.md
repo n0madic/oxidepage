@@ -52,7 +52,10 @@ have moved on from.
 
 - `open()` terminates any in-flight fetch, resets the response to a network
   error, clears the send() flag, **re-roots the wrapper**, then enters OPENED
-  and fires `readystatechange`. It also parses the URL and normalizes/validates
+  and fires `readystatechange` — but only when the state was **not already
+  opened**, which is the spec's own condition on step 11. `open(); open()` is
+  one transition, and code driving a state machine off `onreadystatechange`
+  counts them. It also parses the URL and normalizes/validates
   the method, as the spec does — so a bad URL throws `SyntaxError` from
   `open()` rather than a `TypeError` from `send()`.
 - `abort()` and the error and timeout paths share one "request error steps"
@@ -86,6 +89,12 @@ common `x.onload = () => { x.open(...); x.send(); }` chain work.
 otherwise; it is never fabricated from the bytes that happen to have arrived,
 because a progress bar computed from a fabricated total is worse than one that
 knows it cannot be drawn.
+
+That header is server-controlled, so it is parsed as the `unsigned long long`
+the IDL says it is (`content_length_total`). Parsing it as `f64` accepted `NaN`,
+`Infinity`, `-1` and `1e999` off the wire and then reported
+`lengthComputable === true` for them — a fabricated total by another route, and
+the worst kind, since `loaded / total` comes out `NaN`.
 
 ### `ProgressEvent` reuses the ADR-0023 payload slot
 
@@ -165,6 +174,19 @@ response. It now uses the spec's **final charset**: the charset of an
 `oxidepage_net::charset_from_content_type` so both callers ask the question the
 same way.
 
+### `responseType = "arraybuffer"` copies bytes directly
+
+`JsScope::new_array_buffer(&[u8])` is a **new trait method** on the engine
+backend (`ArrayBuffer::new_copy` on the QuickJS side), and it replaced the
+bootstrap's `bytesToArrayBuffer` helper for all three callers
+(`XMLHttpRequest.response`, `Response.arrayBuffer()`, `Request.arrayBuffer()`).
+
+The route it replaced built one boxed `JsValue::Number` **per byte**, then a JS
+array of that length, then `new Uint8Array(array).buffer` copied it again — tens
+of megabytes of transient allocation and a visible pause for a 10 MB download,
+over data already contiguous in Rust. The helper is gone from `bootstrap.js`
+with it.
+
 ## The four deliberate limits
 
 ### No `Blob`
@@ -202,6 +224,12 @@ is handed to hyper whole. Its `progress`/`load`/`loadend` fire when the response
 head arrives — the earliest point at which the body demonstrably went out —
 rather than synchronously inside `send()`, so `xhr.upload`'s `load` still
 precedes the download's.
+
+"100%" is the byte count `send()` recorded (`XhrData::upload_total`), reported as
+`loaded == total` with `lengthComputable` true. Firing those three events with
+`(0, None)` instead said the opposite of what the comment above them claimed,
+and made every `e.loaded / e.total` bar read 0% — or `NaN` — at the exact moment
+the upload finished.
 
 ### `timeout` is a page-side timer
 

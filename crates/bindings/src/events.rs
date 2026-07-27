@@ -86,10 +86,14 @@ pub struct MouseFields {
     pub offset: Option<(f64, f64)>,
     pub button: i16,
     pub buttons: u16,
-    /// The `relatedTarget` as a node id, not a wrapper: it is always a node
-    /// here, and holding the id keeps the generation check at the read
-    /// (`opt_node_to_js`) where every other node-valued member puts it.
-    pub related: Option<NodeId>,
+    /// The `relatedTarget` as the node's **wrapper**, not a bare id — the same
+    /// choice `SubmitEvent.submitter` makes, and for the same reason: a wrapper
+    /// pins its node, so an event parked in a listener's closure can never be
+    /// left naming a freed arena slot. A bare id could, and the shadow-DOM
+    /// retargeting walk in [`dispatch_event`] reads it through
+    /// `DomTree::containing_shadow_root`, which **panics** on a stale id.
+    /// The id is recovered, generation-checked, at every read.
+    pub related: Option<JsValue>,
     pub wheel: Option<WheelFields>,
     pub pointer: Option<PointerFields>,
 }
@@ -141,9 +145,10 @@ pub enum UiKind {
     Plain,
     Mouse(Box<MouseFields>),
     Keyboard(Box<KeyboardFields>),
-    /// `FocusEvent`, whose only extra member is `relatedTarget`.
+    /// `FocusEvent`, whose only extra member is `relatedTarget` — held as a
+    /// wrapper for the reason [`MouseFields::related`] documents.
     Focus {
-        related: Option<NodeId>,
+        related: Option<JsValue>,
     },
     Input(Box<InputFields>),
     Composition {
@@ -449,6 +454,10 @@ pub(crate) fn target_to_js(cx: &BindCx<'_>, key: EventTargetKey) -> Result<JsVal
 /// This is what stops a `relatedTarget` inside a closed shadow tree from
 /// leaking out of it: a listener in the light tree sees the *host*, never the
 /// node the pointer actually came from.
+///
+/// Both ids must be **live**: the walk uses `DomTree::node`, which panics on a
+/// stale one. [`ui_related_target`] is where `a` is checked and the dispatch
+/// target is live by construction.
 fn retarget(dom: &oxidepage_dom::DomTree, mut a: NodeId, b: Option<NodeId>) -> NodeId {
     // Bounded by the shadow nesting depth; the guard is against a malformed
     // tree rather than an expected case.
@@ -559,14 +568,18 @@ pub fn dispatch_event(
         EventTargetKey::Node(node) => Some(node),
         _ => None,
     };
-    let related = event.borrow().ui.as_deref().and_then(ui_related_target);
+    let related = {
+        let ev = event.borrow();
+        ev.ui.as_deref().and_then(|p| ui_related_target(cx, p))
+    };
     if let Some(related) = related {
         let retargeted = {
             let dom = cx.state.dom.borrow();
             retarget(&dom, related, target_node)
         };
         if retargeted != related {
-            set_ui_related_target(&mut event.borrow_mut(), Some(retargeted));
+            let wrapper = cx.node_to_js(retargeted)?;
+            set_ui_related_target(&mut event.borrow_mut(), Some(wrapper));
         }
     }
 
@@ -574,8 +587,11 @@ pub fn dispatch_event(
     // free to move the target out of its shadow tree mid-dispatch, and the
     // decision must reflect where it was when the event started.
     let clear_targets = {
+        let related = {
+            let ev = event.borrow();
+            ev.ui.as_deref().and_then(|p| ui_related_target(cx, p))
+        };
         let dom = cx.state.dom.borrow();
-        let related = event.borrow().ui.as_deref().and_then(ui_related_target);
         target_node.is_some_and(|t| dom.containing_shadow_root(t).is_some())
             || related.is_some_and(|r| dom.containing_shadow_root(r).is_some())
     };
@@ -681,15 +697,27 @@ pub fn dispatch_event(
 }
 
 /// The `relatedTarget` of a UI payload, whichever interface carries it.
-fn ui_related_target(payload: &UiPayload) -> Option<NodeId> {
+///
+/// This is the read boundary the stored wrapper's id is generation-checked at:
+/// `this_node` refuses an id whose node is gone (a wrapper minted before a
+/// navigation replaced the arena), so the callers below never hand a stale id
+/// to the panicking `DomTree::node` family.
+pub(crate) fn ui_related_target(cx: &BindCx<'_>, payload: &UiPayload) -> Option<NodeId> {
+    let value = related_target_value(payload)?;
+    cx.this_node(value).ok()
+}
+
+/// The stored `relatedTarget` wrapper, unvalidated — for the getters, which
+/// hand back the very object script passed in so `e.relatedTarget === node`.
+pub(crate) fn related_target_value(payload: &UiPayload) -> Option<&JsValue> {
     match &payload.kind {
-        UiKind::Mouse(m) => m.related,
-        UiKind::Focus { related } => *related,
+        UiKind::Mouse(m) => m.related.as_ref(),
+        UiKind::Focus { related } => related.as_ref(),
         _ => None,
     }
 }
 
-fn set_ui_related_target(event: &mut EventData, related: Option<NodeId>) {
+fn set_ui_related_target(event: &mut EventData, related: Option<JsValue>) {
     if let Some(payload) = event.ui.as_deref_mut() {
         match &mut payload.kind {
             UiKind::Mouse(m) => m.related = related,

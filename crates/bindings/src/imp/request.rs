@@ -272,15 +272,7 @@ pub(crate) fn array_buffer(cx: &BindCx<'_>, this: Req) -> Result<JsValue, JsThro
     if let Err(err) = take_body(cx, &this) {
         return cx.rejected_promise(err);
     }
-    let bytes: Vec<JsValue> = this
-        .body
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|b| JsValue::Number(f64::from(*b)))
-        .collect();
-    let array = cx.scope.new_array(&bytes).map_err(JsThrow::from)?;
-    let buffer = cx.bytes_to_array_buffer(JsValue::Object(array))?;
+    let buffer = cx.bytes_to_array_buffer(this.body.as_deref().unwrap_or_default())?;
     cx.resolved_promise(buffer)
 }
 

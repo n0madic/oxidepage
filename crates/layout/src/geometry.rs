@@ -1071,6 +1071,28 @@ impl LayoutEngine {
             && self.tree().box_(box_id).parent == Some(root)
     }
 
+    /// Whether `node`'s own principal box is a scroll container on either axis.
+    ///
+    /// [`Self::scroll_parent`] answers a strictly *ancestor* question (it is
+    /// `Element.scrollParent()`), so anything routing input to "the scroller
+    /// under the pointer" has to ask this about the hit element first — a
+    /// scrollable `<div>` whose children are all text nodes is the element
+    /// `elements_from_point` returns, and is its own scroller.
+    ///
+    /// The root box is excluded: document scrolling goes through
+    /// [`Self::set_viewport_scroll`], not through an element offset.
+    #[must_use]
+    pub fn is_scroll_container(&self, node: NodeId) -> bool {
+        let Some(box_id) = self.tree().box_for_node(node) else {
+            return false;
+        };
+        if self.tree().root() == Some(box_id) {
+            return false;
+        }
+        let b = self.tree().box_(box_id);
+        b.style.overflow.x.is_scroll_container() || b.style.overflow.y.is_scroll_container()
+    }
+
     /// `Element.scrollParent()` (CSSOM-View, draft): the nearest ancestor
     /// along the containing-block chain that is a scroll container.
     ///

@@ -138,15 +138,7 @@ pub(crate) fn array_buffer(cx: &BindCx<'_>, this: Resp) -> Result<JsValue, JsThr
     if let Err(err) = take_body(cx, &this) {
         return cx.rejected_promise(err);
     }
-    let bytes: Vec<JsValue> = this
-        .body
-        .iter()
-        .map(|b| JsValue::Number(f64::from(*b)))
-        .collect();
-    let array = cx.scope.new_array(&bytes).map_err(JsThrow::from)?;
-    // `new Uint8Array(byteArray).buffer` via the bootstrap helper (the
-    // constructor must be invoked with `new`, which a bare `call` cannot do).
-    let buffer = cx.bytes_to_array_buffer(JsValue::Object(array))?;
+    let buffer = cx.bytes_to_array_buffer(&this.body)?;
     cx.resolved_promise(buffer)
 }
 

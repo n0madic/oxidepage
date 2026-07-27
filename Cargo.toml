@@ -119,6 +119,9 @@ webpki-roots = "1"
 crossbeam-channel = "0.5"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "brotli", "zstd", "deflate"] }
 url = "2"
+# `url`'s own percent-decoder, used directly wherever a URL component has to be
+# read back as text (`javascript:` payloads, fragment ids, `data:` bodies).
+percent-encoding = "2"
 psl = "2"
 http-cache-semantics = "2"
 

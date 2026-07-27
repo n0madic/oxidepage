@@ -609,9 +609,6 @@
         return arrayMap.call(objectEntries(o), ([k, v]) => [k, String(v)]);
     };
 
-    // Builds an ArrayBuffer from an array of byte values (Response.arrayBuffer).
-    // The `Uint8Array` constructor runs with `new` here, on the JS side.
-    const bytesToArrayBuffer = (bytes) => new Uint8Array(bytes).buffer;
     const freeze = (value) => objectFreeze(value);
 
     // Runs a custom-element constructor as an upgrade: `Reflect.construct(C,
@@ -1448,7 +1445,7 @@
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
         setToStringTag, makeDomException, structuredClone,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
-        bytesToArrayBuffer, freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
+        freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
         ceConstruct, installLateGlobals, enqueueMicrotask,
         objectPrototype: Object.prototype,
     };

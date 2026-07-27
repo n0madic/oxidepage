@@ -161,6 +161,15 @@ fn route(path: &str) -> Vec<u8> {
             "<!doctype html><title>loop</title>\
              <script>location.href = '/loop.html?n=' + Math.random();</script>",
         ),
+        // Every load queues *two* navigations — a load and a traversal, which
+        // do not collapse into each other. A chain that stops at
+        // `MAX_CHAINED_NAVIGATIONS` therefore leaves work queued, and the event
+        // loop re-enters its navigation branch immediately: without a deadline
+        // check on that path, it never reaches the one at the foot of the loop.
+        "/double-nav.html" => html(
+            "<!doctype html><title>double</title>\
+             <script>location.href = '/double-nav.html?n=' + Math.random(); history.back();</script>",
+        ),
         // Navigates from a *parser-inserted* script, i.e. while the parser
         // still holds handles into the tree.
         "/navigate-while-parsing.html" => html(
@@ -195,6 +204,16 @@ fn route(path: &str) -> Vec<u8> {
             "<!doctype html><form id='f' action='/submitted' method='post' \
                                  enctype='multipart/form-data'>\
              <input name='a' value='1'><button id='btn' type='submit'>go</button></form>",
+        ),
+        // The canonical validate-then-submit idiom: cancel the event, do the
+        // work, then submit programmatically.
+        "/form-validate.html" => html(
+            "<!doctype html><form id='f' action='/submitted' method='post'>\
+             <input name='a' value='1'>\
+             <button id='btn' type='submit'>go</button></form>\
+             <script>document.getElementById('f').addEventListener('submit', e => {\
+                 e.preventDefault(); window.validated = true; e.target.submit();\
+             });</script>",
         ),
         "/form-reset.html" => html(
             "<!doctype html><form id='f'>\
@@ -486,6 +505,26 @@ fn history_go_zero_reloads_and_out_of_range_is_a_no_op() {
     assert_eq!(document_url(&page), server.url("/start.html"));
 }
 
+/// Two traversals queued in one task are **both** performed. A delta traversal
+/// is cumulative — a browser moving one entry per `back()` is the whole point —
+/// so the second must not supersede the first the way a second load supersedes
+/// a first.
+#[test]
+fn two_traversals_in_one_task_both_happen() {
+    let server = spawn_server();
+    let page = started(&server);
+    eval_and_settle(&page, "location.href = '/next.html';");
+    eval_and_settle(&page, "location.href = '/other.html';");
+    assert_eq!(document_url(&page), server.url("/other.html"));
+
+    eval_and_settle(&page, "history.back(); history.back();");
+    assert_eq!(
+        document_url(&page),
+        server.url("/start.html"),
+        "two back() calls move two entries, not one"
+    );
+}
+
 /// A `pushState` truncates the forward entries, as a real navigation does.
 #[test]
 fn push_state_truncates_forward_entries() {
@@ -672,7 +711,10 @@ fn an_inline_handler_returning_false_cancels_the_default_action() {
     assert_eq!(document_url(&page), server.url("/next.html"));
 }
 
-/// An `onsubmit` handler that re-submits must not recurse forever.
+/// An `onsubmit` handler that re-submits must not recurse forever, and must
+/// still reach the wire exactly once: `form.submit()` queues a navigation, the
+/// outer submission queues another, and a queued load supersedes a queued load
+/// — the same collapsing a browser does.
 #[test]
 fn a_resubmitting_submit_handler_terminates() {
     let server = spawn_server();
@@ -686,8 +728,33 @@ fn a_resubmitting_submit_handler_terminates() {
          f.addEventListener('submit', () => f.submit());\
          document.getElementById('btn').click();",
     );
-    // One submission reached the wire; the re-entrant one was refused.
     assert_eq!(server.since(at).len(), 1);
+}
+
+/// `onsubmit = e => { e.preventDefault(); validate(); form.submit(); }` — the
+/// idiom every hand-rolled validator uses. HTML's "firing submission events"
+/// flag guards only the event-firing entry points, so `form.submit()`, which
+/// fires no event, must go through. Guarding the whole of `submit()` with it
+/// swallowed the submission silently and left the page looking hung.
+#[test]
+fn a_programmatic_submit_from_onsubmit_is_performed() {
+    let server = spawn_server();
+    let page = loopback_page();
+    page.navigate(&server.url("/form-validate.html"), WaitUntil::Load)
+        .unwrap();
+    let at = server.mark();
+    eval_and_settle(&page, "document.getElementById('btn').click();");
+
+    assert_eq!(eval(&page, "String(window.validated)"), "true");
+    let seen = server.since(at);
+    assert_eq!(
+        seen.len(),
+        1,
+        "expected exactly one submission, got {seen:?}"
+    );
+    assert_eq!(seen[0].method, "POST");
+    assert_eq!(seen[0].path, "/submitted");
+    assert_eq!(seen[0].body, "a=1");
 }
 
 #[test]
@@ -762,6 +829,28 @@ fn an_endless_navigation_chain_is_capped() {
         .iter()
         .any(|m| m.message.contains("consecutive script-driven navigations"));
     assert!(stopped, "expected the chain cap to report itself");
+}
+
+/// `MAX_CHAINED_NAVIGATIONS` bounds one *chain*, and the event loop's own
+/// navigation branch starts a fresh chain with the counter back at zero every
+/// time it runs. A page that leaves work queued after every chain therefore
+/// re-enters that branch forever, and the settle deadline is the only thing
+/// that can stop it — which the branch used to `continue` straight past.
+#[test]
+fn settle_respects_its_budget_while_the_page_keeps_navigating() {
+    let server = spawn_server();
+    let page = loopback_page();
+    page.navigate(&server.url("/double-nav.html"), WaitUntil::Load)
+        .unwrap();
+    let started = std::time::Instant::now();
+    page.settle(Duration::from_millis(100));
+    let elapsed = started.elapsed();
+    // Measured: ~170 ms with the check, ~2.25 s without it — a whole further
+    // chain of `MAX_CHAINED_NAVIGATIONS` document loads past the budget.
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "settle(100ms) took {elapsed:?} on a page that never stops navigating"
+    );
 }
 
 /// `load_html` has no URL to fetch, but a script in it can still navigate.
@@ -840,6 +929,35 @@ fn navigation_events_record_the_milestones_in_order() {
             .iter()
             .any(|e| e.kind == NavigationEventKind::NetworkIdle)
     );
+}
+
+/// `NetworkIdle` is a milestone of one *navigation*, not of one `settle` call.
+/// Every `eval`/`dispatch_*` ends in a settle that reaches idle, so recording
+/// it each time grew the stream — which nothing drains for the embedder —
+/// without bound, one owned document URL at a time.
+#[test]
+fn network_idle_is_recorded_once_per_document() {
+    let server = spawn_server();
+    let page = started(&server);
+    for _ in 0..5 {
+        page.settle(Duration::from_millis(50));
+    }
+    let idle = page
+        .drain_navigation_events()
+        .into_iter()
+        .filter(|e| e.kind == NavigationEventKind::NetworkIdle)
+        .count();
+    assert_eq!(idle, 1, "repeated settles must not re-record the milestone");
+
+    // A navigation starts a new document, and with it a new milestone.
+    eval_and_settle(&page, "location.href = '/next.html';");
+    page.settle(Duration::from_millis(50));
+    let idle = page
+        .drain_navigation_events()
+        .into_iter()
+        .filter(|e| e.kind == NavigationEventKind::NetworkIdle)
+        .count();
+    assert_eq!(idle, 1, "the next document records its own");
 }
 
 #[test]

@@ -25,8 +25,8 @@ use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::Declared;
 use rquickjs::prelude::Coerced;
 use rquickjs::{
-    Array, Context, Ctx, Exception, Function, JsLifetime, Module, Object, Persistent, Runtime,
-    Value, qjs,
+    Array, ArrayBuffer, Context, Ctx, Exception, Function, JsLifetime, Module, Object, Persistent,
+    Runtime, Value, qjs,
 };
 
 use crate::error::{JsError, JsThrow};
@@ -463,6 +463,14 @@ impl<'js> JsScope for QuickScope<'js> {
             array.set(i, value).map_err(|e| self.error_from(e))?;
         }
         Ok(self.import_obj(array.into_object()))
+    }
+
+    fn new_array_buffer(&self, bytes: &[u8]) -> Result<JsObject, JsError> {
+        // `new_copy` hands the slice to `JS_NewArrayBufferCopy`, so the engine
+        // owns the result and nothing here has to outlive the call.
+        ArrayBuffer::new_copy(self.ctx.clone(), bytes)
+            .map(|buffer| self.import_obj(buffer.into_object()))
+            .map_err(|e| self.error_from(e))
     }
 
     fn new_function(&self, name: &str, length: u32, f: HostFn) -> Result<JsObject, JsError> {

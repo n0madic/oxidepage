@@ -67,6 +67,11 @@ pub(crate) fn set_selection_start(
     Ok(())
 }
 
+/// The mirror of [`set_selection_start`], but the *other* endpoint moves: HTML
+/// says an end below the selection start drags the **start** down to it, where
+/// `DomTree::set_selection`'s own `end.max(start)` normalization (right for
+/// `setSelectionRange`) would instead pull the end back up and leave the caret
+/// at the old start.
 pub(crate) fn set_selection_end(
     cx: &BindCx<'_>,
     this: NodeId,
@@ -80,7 +85,7 @@ pub(crate) fn set_selection_end(
     cx.state
         .dom
         .borrow_mut()
-        .set_selection(this, start, end, direction);
+        .set_selection(this, start.min(end), end, direction);
     Ok(())
 }
 

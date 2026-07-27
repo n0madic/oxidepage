@@ -73,6 +73,16 @@ const CANCELLED_SET_PRUNE_CAP: usize = 1024;
 /// the tab, and a headless engine has a caller waiting for a return.
 const MAX_CHAINED_NAVIGATIONS: usize = 20;
 
+/// Milestones retained by [`Page::drain_navigation_events`] before the oldest
+/// are dropped.
+///
+/// Draining is the embedder's job and nothing forces it: a driver session that
+/// never calls it would otherwise accumulate one owned URL `String` per
+/// milestone forever. Bounded for the same reason `MAX_HISTORY_ENTRIES` bounds
+/// the session history — the newest events are the ones a driver acts on, so
+/// the front of the stream is what gets dropped.
+const MAX_NAVIGATION_EVENTS: usize = 1024;
+
 /// Where a commit puts its session-history entry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum HistoryTarget {
@@ -918,6 +928,11 @@ pub struct Page {
     /// `Cell`, not `bool`, so `load_document` can take `&self` — which is what
     /// lets the event loop drive a navigation (ADR-0022).
     load_fired: Cell<bool>,
+    /// Whether the `NetworkIdle` milestone has been recorded for the current
+    /// document. `settle` reaches idle on *every* call — each `eval`,
+    /// `dispatch_mouse`, `dispatch_key` — and a milestone is a milestone of one
+    /// navigation, not of one call.
+    network_idle_recorded: Cell<bool>,
     /// Set for the whole of a document load or a chain of navigations.
     ///
     /// This is the single thing standing between a nested `load_document` and a
@@ -1050,6 +1065,7 @@ impl Page {
             last_inline_svg_scan: Cell::new((u64::MAX, u64::MAX)),
             deferred: RefCell::new(Vec::new()),
             load_fired: Cell::new(false),
+            network_idle_recorded: Cell::new(false),
             navigating: Cell::new(false),
             navigation_events: RefCell::new(Vec::new()),
             viewport: Cell::new(viewport),
@@ -1170,7 +1186,14 @@ impl Page {
     }
 
     fn record_navigation(&self, kind: NavigationEventKind, url: &str, error: Option<String>) {
-        self.navigation_events.borrow_mut().push(NavigationEvent {
+        let mut events = self.navigation_events.borrow_mut();
+        if events.len() >= MAX_NAVIGATION_EVENTS {
+            // Drop from the front: an undrained stream must not grow without
+            // bound, and the newest milestones are the useful ones.
+            let overflow = events.len() + 1 - MAX_NAVIGATION_EVENTS;
+            events.drain(..overflow);
+        }
+        events.push(NavigationEvent {
             kind,
             url: url.to_owned(),
             error,
@@ -1251,7 +1274,7 @@ impl Page {
                     self.commit_traversal(delta, wait_until, embedder)?;
                 }
                 PendingNavigation::JavaScriptUrl { source } => {
-                    self.run_javascript_url(&source, wait_until, embedder)?;
+                    self.run_javascript_url(&source, wait_until)?;
                 }
             }
             pending = self.state.take_pending_navigation();
@@ -1268,12 +1291,10 @@ impl Page {
     /// real web return `undefined`, and must leave the page exactly as it was —
     /// treating the navigation as unconditional would blank the document on
     /// every such link.
-    fn run_javascript_url(
-        &self,
-        source: &str,
-        wait_until: WaitUntil,
-        embedder: bool,
-    ) -> Result<(), JsError> {
+    /// No `embedder` flag: it exists to suppress the `Referer` of an
+    /// embedder-driven request, and this path issues none — the replacement
+    /// document is the script's own return value.
+    fn run_javascript_url(&self, source: &str, wait_until: WaitUntil) -> Result<(), JsError> {
         let result = self.with_cx(|cx| {
             let value = cx.scope.eval(source, "oxidepage:javascript-url");
             oxidepage_bindings::microtask_checkpoint(cx);
@@ -1301,7 +1322,6 @@ impl Page {
         let url = self.state.dom.borrow().document_url().to_owned();
         self.commit_history(url, HistoryTarget::Replace);
         self.load_document(&html, wait_until)?;
-        let _ = embedder;
         Ok(())
     }
 
@@ -1611,6 +1631,7 @@ impl Page {
         self.last_bg_scan.set((u64::MAX, u64::MAX));
         self.last_inline_svg_scan.set((u64::MAX, u64::MAX));
         self.load_fired.set(false);
+        self.network_idle_recorded.set(false);
         self.render.reset();
         // The rAF timestamp origin restarts at navigation.
         self.start_time.set(Instant::now());
@@ -2202,6 +2223,15 @@ impl Page {
                 && let Some(navigation) = self.state.take_pending_navigation()
             {
                 let _ = self.run_navigation(navigation, WaitUntil::Load, /* embedder */ false);
+                // The deadline is checked here too, not only at the bottom of
+                // the loop: `MAX_CHAINED_NAVIGATIONS` bounds one *chain*, and a
+                // fresh chain starts with its counter at zero every time this
+                // branch runs. Two documents whose `load` handlers navigate to
+                // each other would otherwise loop forever, and `settle(budget)`
+                // would never return however small the budget.
+                if Instant::now() >= deadline {
+                    break;
+                }
                 // The document is gone; restart the drain order against the
                 // new one rather than finishing this pass over the old.
                 continue;
@@ -2278,7 +2308,12 @@ impl Page {
             {
                 // Idle reached rather than the budget running out — the
                 // distinction a `NetworkIdle` milestone is there to record.
-                self.record_document_milestone(NavigationEventKind::NetworkIdle);
+                // Once per document: every `eval`/`dispatch_*` ends in a settle
+                // that reaches idle, and one milestone per call is noise the
+                // stream would never stop growing by.
+                if !self.network_idle_recorded.replace(true) {
+                    self.record_document_milestone(NavigationEventKind::NetworkIdle);
+                }
                 return;
             }
             let now = Instant::now();

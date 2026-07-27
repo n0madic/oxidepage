@@ -1132,6 +1132,54 @@ fn a_stale_mutation_record_target_never_resolves_to_another_node() {
     }
 }
 
+/// The mirror of the case above, for the one node-valued event member that
+/// *must* survive: `relatedTarget` holds the node's wrapper, and a wrapper pins
+/// its node. Held as a bare `NodeId` instead, a detached related target the GC
+/// collected left the id naming a freed slot — and dispatch feeds it straight
+/// to the shadow-DOM retargeting walk, which reads it with `DomTree::node` and
+/// **panics** out of a JS host call.
+#[test]
+fn a_related_target_is_pinned_by_the_event_that_names_it() {
+    let page = load_html_page(
+        "<!DOCTYPE html><html><body><div id=here></div></body></html>",
+        PageOptions::default(),
+    )
+    .unwrap();
+    // The only reference to the detached <b> is the event's relatedTarget.
+    page.eval_to_string(
+        "window.ev = (function () {\
+             var away = document.createElement('b');\
+             away.id = 'away';\
+             return new MouseEvent('mouseover', { relatedTarget: away, bubbles: true });\
+         })(); 'ok'",
+    )
+    .unwrap();
+    page.collect_garbage();
+    page.run_until_stalled();
+    // Refill the arena so a freed slot would be reused by an unrelated node.
+    page.eval_to_string(
+        "for (var i = 0; i < 8; i++) { document.body.appendChild(document.createElement('span')); } 'ok'",
+    )
+    .unwrap();
+    page.collect_garbage();
+
+    // Dispatching must neither panic nor lose the related target.
+    assert_eq!(
+        eval_string(
+            &page,
+            "(function () {\
+                 var seen = null;\
+                 document.getElementById('here')\
+                     .addEventListener('mouseover', function (e) { seen = e.relatedTarget; });\
+                 document.getElementById('here').dispatchEvent(window.ev);\
+                 return seen === null ? 'null' : seen.id + ':' + (seen === window.ev.relatedTarget);\
+             })()"
+        ),
+        "away:true",
+        "the related target survives GC and keeps its identity"
+    );
+}
+
 #[test]
 fn eval_returns_engine_values() {
     let page = Page::new(PageOptions::default()).unwrap();

@@ -8,7 +8,6 @@
 //! calls the one above it. That is why every subinterface constructor starts
 //! with [`parse_ui_init`].
 
-use oxidepage_base::NodeId;
 use oxidepage_js::{HostCall, JsThrow, JsValue};
 
 use crate::cx::BindCx;
@@ -73,15 +72,22 @@ pub(crate) fn member_u32(cx: &BindCx<'_>, init: &JsValue, name: &str) -> u32 {
     member_i32(cx, init, name) as u32
 }
 
-/// An `EventTarget?` dictionary member. Only nodes can be a related target
-/// here; anything else (the Window, a bare `EventTarget`) reads as absent,
-/// because the payload stores a `NodeId`.
-pub(crate) fn member_node(cx: &BindCx<'_>, init: &JsValue, name: &str) -> Option<NodeId> {
+/// An `EventTarget?` dictionary member, kept as the node's **wrapper**. Only
+/// nodes can be a related target here; anything else (the Window, a bare
+/// `EventTarget`) reads as absent.
+///
+/// The wrapper rather than the id is what the payload stores — see
+/// [`crate::events::MouseFields::related`] — so the node cannot be collected
+/// out from under an event a listener retained.
+pub(crate) fn member_node(cx: &BindCx<'_>, init: &JsValue, name: &str) -> Option<JsValue> {
     let value = member(cx, init, name)?;
     if value.is_nullish() {
         return None;
     }
-    cx.this_node(&value).ok()
+    // Creating the wrapper is what pinned the node; this only rejects a
+    // non-node (and a wrapper whose node is already gone).
+    cx.this_node(&value).ok()?;
+    Some(value)
 }
 
 /// `EventModifierInit`'s four flags.

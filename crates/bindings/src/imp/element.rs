@@ -921,9 +921,16 @@ pub(crate) fn scroll_into_view(cx: &BindCx<'_>, this: NodeId, arg: JsValue) -> R
                         return (Some(container), false);
                     };
                     let offset = layout.scroll_offset(container);
+                    // `border_box`/`padding_box` are both *viewport*-relative,
+                    // so their difference is already the visual delta from the
+                    // container's near edge — the position `axis_offset` wants.
+                    // Adding `offset` too counted the container's current scroll
+                    // twice, which made a second `scrollIntoView()` (a no-op in
+                    // a browser) scroll the container by another full delta and
+                    // made `Align::Nearest`'s "above the top" test unreachable.
                     let (x, y) = aligned_offset(
-                        rect.origin.x - view.origin.x + offset.x,
-                        rect.origin.y - view.origin.y + offset.y,
+                        rect.origin.x - view.origin.x,
+                        rect.origin.y - view.origin.y,
                         rect.size.width,
                         rect.size.height,
                         view.size.width,

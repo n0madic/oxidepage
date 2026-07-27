@@ -46,11 +46,18 @@ const FORBIDDEN_METHODS: &[&str] = &["CONNECT", "TRACE", "TRACK"];
 pub(crate) fn constructor(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
     let xhr = Rc::new(RefCell::new(XhrData::default()));
     let wrapper = cx.new_net_object("XMLHttpRequest", HostData::Xhr(Rc::clone(&xhr)))?;
+    // The slab key is this object's event-target identity for its whole life;
+    // every listener and handler is filed under it. Failing loudly is the only
+    // safe answer: key 0 is a *valid* `EventTargetKey::Host`, so a silent
+    // `unwrap_or_default` would file two XHRs (and an XHR and its own upload
+    // object, whose key defaults the same way) under one identity and
+    // cross-deliver their `load`/`readystatechange` events.
+    let slab_key = cx.slab_key(&wrapper).ok_or_else(|| {
+        JsThrow::Type("XMLHttpRequest: the host object has no event-target identity".into())
+    })?;
     {
         let mut x = xhr.borrow_mut();
-        // The slab key is this object's event-target identity for its whole
-        // life; every listener and handler is filed under it.
-        x.slab_key = cx.slab_key(&wrapper).unwrap_or_default();
+        x.slab_key = slab_key;
         x.wrapper = Some(wrapper.clone());
     }
     Ok(wrapper)
@@ -116,7 +123,11 @@ pub(crate) fn upload(cx: &BindCx<'_>, this: XhrRef) -> Result<JsValue, JsThrow> 
         return Ok(existing);
     }
     let wrapper = cx.new_xhr_upload(Rc::downgrade(&this.data))?;
-    let key = cx.slab_key(&wrapper).unwrap_or_default();
+    // As in `constructor`: key 0 is a real identity, so falling back to it
+    // would alias the upload object with whatever else took that fallback.
+    let key = cx.slab_key(&wrapper).ok_or_else(|| {
+        JsThrow::Type("XMLHttpRequestUpload: the host object has no event-target identity".into())
+    })?;
     let mut x = this.borrow_mut();
     x.upload_key = key;
     x.upload = Some(wrapper.clone());
@@ -176,8 +187,9 @@ pub(crate) fn open(
     // state this call is resetting.
     terminate(cx, &this);
 
-    {
+    let was_opened = {
         let mut x = this.borrow_mut();
+        let was_opened = x.ready_state == OPENED;
         x.method = normalized;
         x.url = absolute;
         x.request_headers.clear();
@@ -189,8 +201,15 @@ pub(crate) fn open(
         // without putting it back a *reused* XHR would fire no events at all —
         // `fire_at` needs the wrapper for `event.target`.
         x.wrapper = Some(this.wrapper.clone());
+        was_opened
+    };
+    // `open()` step 11 fires `readystatechange` only "if this's state is not
+    // opened". `open(); open()` on a fresh object must produce one transition,
+    // not two — code that drives a state machine off `onreadystatechange`
+    // counts them.
+    if !was_opened {
+        fire_plain(cx, &this, "readystatechange");
     }
-    fire_plain(cx, &this, "readystatechange");
     Ok(())
 }
 
@@ -312,6 +331,7 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
         x.request_id = Some(id);
         x.send_flag = true;
         x.upload_complete = body_len == 0.0;
+        x.upload_total = body_len;
         x.loaded = 0.0;
         x.total = None;
         x.send_started_ms = cx.now_ms();
@@ -560,14 +580,7 @@ fn final_mime(x: &XhrData) -> String {
 }
 
 fn array_buffer_response(cx: &BindCx<'_>, this: &XhrRef) -> Result<JsValue, JsThrow> {
-    let bytes: Vec<JsValue> = this
-        .borrow()
-        .response_body
-        .iter()
-        .map(|b| JsValue::Number(f64::from(*b)))
-        .collect();
-    let array = cx.scope.new_array(&bytes).map_err(JsThrow::from)?;
-    cx.bytes_to_array_buffer(JsValue::Object(array))
+    cx.bytes_to_array_buffer(&this.borrow().response_body)
 }
 
 /// The JSON response. Per the spec this is a **UTF-8** decode of the bytes, not
@@ -732,12 +745,17 @@ pub(crate) fn upload_finished(cx: &BindCx<'_>, this: &XhrRef) {
     if this.borrow().upload_complete {
         return;
     }
-    this.borrow_mut().upload_complete = true;
-    // The body is handed to hyper whole, so the only honest report is 100%.
-    let total = None;
-    fire_progress(cx, this, Target::Upload, "progress", 0.0, total);
-    fire_progress(cx, this, Target::Upload, "load", 0.0, total);
-    fire_progress(cx, this, Target::Upload, "loadend", 0.0, total);
+    let total = {
+        let mut x = this.borrow_mut();
+        x.upload_complete = true;
+        x.upload_total
+    };
+    // The body is handed to hyper whole, so the only honest report is 100%:
+    // `loaded == total ==` the byte count `send()` recorded, and
+    // `lengthComputable` true. Reporting `(0, None)` said the opposite.
+    fire_progress(cx, this, Target::Upload, "progress", total, Some(total));
+    fire_progress(cx, this, Target::Upload, "load", total, Some(total));
+    fire_progress(cx, this, Target::Upload, "loadend", total, Some(total));
 }
 
 /// The successful terminal sequence: DONE, then `load`, then `loadend`.

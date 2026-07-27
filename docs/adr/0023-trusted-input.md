@@ -42,9 +42,14 @@ fields.
 `PointerEvent` therefore share `UiKind::Mouse` — they *are* mouse events, and
 `wheelEvent.clientX` has to work.
 
-`relatedTarget` is stored as a `NodeId`, not a wrapper, so the generation check
-stays at the read (`opt_node_to_js`) where every other node-valued member puts
-it.
+`relatedTarget` is stored as the node's **wrapper**, the same choice
+`SubmitEvent.submitter` makes (ADR-0022 §9). A `NodeId` was tried first, on the
+theory that the generation check could stay at the read — but a wrapper *pins*
+its node and a bare id does not, so a detached related target the GC collected
+left the payload naming a freed slot. That is not a null at the getter: dispatch
+hands the related target to the retargeting walk below, which reads it through
+`DomTree::containing_shadow_root`/`node` and **panics** on a stale id, unwinding
+out of a JS host call.
 
 ### Activation moved into `dispatch_event`
 
@@ -133,7 +138,11 @@ is what makes it reach the activation behavior above.
 Coordinates are viewport CSS pixels throughout — what `elements_from_point`
 takes and what `clientX/Y` mean. `pageX/Y` add the document scroll at *read*
 time (a listener may have scrolled since dispatch); `offsetX/Y` subtract the
-target's padding-box origin, resolved at construction.
+target's padding-box origin, resolved at construction. **Both sides of that
+subtraction are viewport coordinates** — `LayoutEngine::padding_box` resolves
+through `absolute_origin(.., include_scroll: true)` — so the document scroll
+appears in neither. Adding it to one of them offset every `offsetX/Y` by exactly
+the scroll position, invisibly on any test that never scrolls first.
 
 Every step re-validates its node ids. A listener between two events of one
 sequence can remove the element under the pointer or navigate, and a stale
@@ -171,6 +180,12 @@ checks only the final value, and breaks every form that validates on `change`.
 `maxlength` caps **user** edits only — assigning `value` from script bypasses
 it — so the check lives in the synthesis path, not in the DOM layer.
 
+Enter's default action is **implicit submission**, and HTML scopes that to the
+*input* text states (`DomTree::allows_implicit_submission`), not to every text
+entry control. A `<textarea>` is a text entry control and Enter inserts a
+newline there; submitting its form instead both navigated away and lost the line
+break, since the `"Enter"` arm also shadows the printable-text arm.
+
 Selection offsets are UTF-16 code units, the units script compares against
 `value.length`. `selectionStart`/`selectionEnd` are typed `any` in the IDL
 rather than `unsigned long?`, because the generator has no nullable-number
@@ -192,6 +207,15 @@ in a scroll container inside the document has to end up visible in both, and
 scrolling only the nearest one leaves it off-screen, which is the first thing an
 automation driver hits. Each step re-reads the element's rect, because the
 previous scroll moved it.
+
+The position handed to the alignment is the element's **visual delta from the
+container's near edge** — `border_box.origin - padding_box(container).origin`,
+both already viewport-relative — and the container's current scroll offset is
+added exactly once, by the alignment itself. Adding it to the delta as well
+counted it twice: a second `scrollIntoView()` (a no-op in a browser) scrolled by
+the whole distance again, and `Align::Nearest`'s "the element is above the
+visible top" branch became unreachable, since a doubled delta is never negative.
+The viewport path never had the bug, which is what made the two disagree.
 
 `behavior: "smooth"` is treated as **instant**, and that is a documented limit:
 there is no animation timeline here, and a driver wants the final position.
@@ -281,9 +305,17 @@ restored by `open()`.
 `Page::dispatch_wheel` fires a **cancelable** `wheel` and respects the answer: a
 carousel or modal that calls `preventDefault()` to trap scrolling actually traps
 it, and a driver that ignored the return would scroll the page out from under
-such a widget. Otherwise the nearest scrollable ancestor scrolls — walking
-outwards past any container that cannot move in that direction, which is what
-makes a wheel over a bottomed-out inner panel scroll the page instead.
+such a widget. Otherwise the nearest scrollable **inclusive** ancestor scrolls —
+walking outwards past any container that cannot move in that direction, which is
+what makes a wheel over a bottomed-out inner panel scroll the page instead.
+
+"Inclusive" is `LayoutEngine::is_scroll_container`, and it exists because
+`scroll_parent` cannot answer this: it is `Element.scrollParent()` and starts at
+the box's *parent* by definition. `elements_from_point` returns the container
+itself whenever the point does not land on an element child of it — a scroller
+whose content is text, or a point beside its only child — so routing the wheel
+through `scroll_parent` alone scrolled the document instead of the container the
+pointer was over.
 
 `document.hasFocus()` answers `true` for the rendered document — one browsing
 context, never backgrounded — and `false` for a document with none

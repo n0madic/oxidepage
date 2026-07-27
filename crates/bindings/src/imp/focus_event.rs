@@ -20,10 +20,11 @@ pub(crate) fn constructor(
     Ok(value)
 }
 
-pub(crate) fn related_target(cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
+/// The stored wrapper itself — see [`crate::imp::mouse_event::related_target`].
+pub(crate) fn related_target(_cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
     let related = payload(&this, "FocusEvent", |p| match &p.kind {
-        UiKind::Focus { related } => Some(*related),
+        UiKind::Focus { related } => Some(related.clone()),
         _ => None,
     })?;
-    cx.opt_node_to_js(related)
+    Ok(related.unwrap_or(JsValue::Null))
 }

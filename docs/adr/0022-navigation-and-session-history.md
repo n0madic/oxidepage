@@ -49,17 +49,27 @@ slow or risky, it is a `BorrowMutError`; it is CLAUDE.md's "reflow must never
 re-enter JS" seen from the other side.
 
 So a script navigation *queues*. `PageState::pending_navigation`
-(`crates/bindings/src/state.rs:776`) holds one `PendingNavigation`, and the
-page's event loop performs it — exactly like `pending_scroll_targets`.
+(`crates/bindings/src/state.rs`) holds a `VecDeque<PendingNavigation>`, and the
+page's event loop performs them — exactly like `pending_scroll_targets`.
 
-- **Last write wins.** `location.href = a; location.href = b` in one task
-  navigates once, to `b`, which is the collapsing a browser does when several
-  navigations are queued before the loop next spins.
-- **It is drained first.** `run_until_stalled_until` takes it immediately after
+- **Only a load collapses.** `location.href = a; location.href = b` in one task
+  navigates once, to `b`: a queued `Load` supersedes a queued `Load`, which is
+  the collapsing a browser does when several navigations are queued before the
+  loop next spins. Nothing else collapses. A **traversal is cumulative** —
+  `history.back(); history.back()` must move two entries, and a single
+  last-write-wins slot turned that into one — and a `javascript:` URL is a
+  script to run, not a destination to supersede. The queue is capped at
+  `MAX_PENDING_NAVIGATIONS` = 32, since a script looping on `history.back()`
+  would otherwise grow it without bound while the page performs at most
+  `MAX_CHAINED_NAVIGATIONS` of them per chain anyway.
+- **It is drained first.** `run_until_stalled_until` takes one immediately after
   `process_finalized` and then `continue`s the loop rather than finishing the
-  pass (`crates/page/src/lib.rs:2091`). Every drain step below it is keyed on
+  pass (`crates/page/src/lib.rs`). Every drain step below it is keyed on
   nodes of the *outgoing* tree, whose ids the replacement arena deliberately
-  makes stale.
+  makes stale. It checks the loop deadline **before** that `continue`: the chain
+  counter below resets on every entry to this branch, so a page that leaves work
+  queued after each chain re-enters it forever, and the deadline is the only
+  backstop `Page::settle(budget)` has.
 - **Two guards keep the drain out of its own way.** `navigating` is held for the
   whole of `load_document`, which runs the event loop internally (parser
   scripts, `await_subresources`, the trailing `run_until_stalled`) — without it
@@ -313,6 +323,11 @@ naming a freed slot; the id is recovered, generation-checked, on read. A raw id
 here would have been precisely the cross-task-boundary snapshot CLAUDE.md warns
 about.
 
+`MouseEvent.relatedTarget` and `FocusEvent.relatedTarget` now follow the same
+rule, and it is not merely tidiness there: dispatch feeds the related target to
+the shadow-DOM retargeting walk, which reads it through `DomTree::node` — a
+freed detached related target was a **panic** out of a JS host call, not a null.
+
 ### 10. The `NavigationEvent` stream
 
 `Page::drain_navigation_events` yields
@@ -327,6 +342,14 @@ anything. `NetworkIdle` records a distinction `settle` already draws internally
 but never surfaced — idle *reached* (no timer, no pending rAF, nothing in flight)
 versus the budget running out. Building it now rather than with the protocol
 keeps it testable from the library, where it is far cheaper to get right.
+
+The stream is a milestone log **per navigation**, and bounded on both counts.
+`NetworkIdle` is recorded once per document, not once per `settle`: every
+`eval`/`dispatch_mouse`/`dispatch_key` ends in a settle that reaches idle, so
+recording it each time made the stream grow with input rather than with
+navigation. And nothing forces an embedder to drain it, so the vector is capped
+at `MAX_NAVIGATION_EVENTS` = 1024 with the oldest dropped — the same reasoning
+`MAX_HISTORY_ENTRIES` applies to the session history.
 
 ## Consequences
 

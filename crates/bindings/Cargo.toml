@@ -19,6 +19,7 @@ style = { workspace = true }
 servo_arc = { workspace = true }
 html5ever = { workspace = true }
 url = { workspace = true }
+percent-encoding = { workspace = true }
 getrandom = "0.4"
 
 [lints]
