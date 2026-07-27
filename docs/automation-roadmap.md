@@ -41,17 +41,18 @@ Ready to be exposed almost as-is:
 | DOM queries, geometry | arena + `querySelector*` + CSSOM-View surface |
 | `evaluate` | `Page::eval` (by value only) |
 | load lifecycle | `WaitUntil`, `readyState`, `Page::settle` |
+| navigation, history, lifecycle events | stage 1, ADR-0022 |
 
-Missing outright: navigation from script, every UI event interface, dialogs,
-multiple pages, remote object handles, request interception, isolated worlds,
-frames, and the whole `cdp` crate (`crates/cdp/src/lib.rs` is a three-line stub;
-so is `crates/engine/src/lib.rs`).
+Missing outright: every UI event interface, dialogs, multiple pages, remote
+object handles, request interception, isolated worlds, frames, and the whole
+`cdp` crate (`crates/cdp/src/lib.rs` is a three-line stub; so is
+`crates/engine/src/lib.rs`).
 
 ## Stage map
 
 | # | Stage | Unblocks | ADR | Est. |
 |---|---|---|---|---|
-| 1 | Navigation & session history | "click a link and wait" | yes | 3–4 w |
+| 1 | Navigation & session history — **landed** | "click a link and wait" | ADR-0022 | 3–4 w |
 | 2 | Trusted input (mouse/keyboard/focus/typing) | `click`, `type`, `press`, `hover` | yes | 5–7 w |
 | 3 | Dialogs & structured page events | real sites stop throwing on `alert` | no | 1–2 w |
 | 4 | Transform-aware geometry, capture completeness | correct click points, `page.pdf()` | yes | 3–4 w |
@@ -69,14 +70,45 @@ milestone "Playwright" is end of stage 10.
 
 ---
 
-## Stage 1 — Navigation and session history
+## Stage 1 — Navigation and session history — **landed (ADR-0022)**
 
 **Why first.** Automation is "go somewhere, do something, go somewhere else".
-Today `window.location` is installed as getters only
-(`crates/bindings/src/lib.rs:1204`), `a.click()` fires the event but does not
-follow `href`, `form.submit()` is deliberately absent (ADR-0019), and history is
-`pushState` only. Every "click through to the next page" flow is dead regardless
-of which protocol sits on top.
+Before this stage `window.location` was installed as getters only, `a.click()`
+fired the event but did not follow `href`, `form.submit()` was deliberately
+absent (ADR-0019), and history was `pushState` only. Every "click through to the
+next page" flow was dead regardless of which protocol sits on top.
+
+**Landed.** The scope below shipped as written, with four additions the
+implementation forced and one verification gap:
+
+- `Location` and `History` became **real IDL interfaces**, replacing the
+  getters-only object *and* the `bootstrap.js` history closure with its
+  `__oxide_setDocumentUrl` native hook (both deleted). Cross-origin writes are
+  allowed on `Location`; the same-origin check lives on `pushState`.
+- `Page::navigate` / `load_html` / `load_document` became **`&self`** — a public
+  API signature change, forced by draining the navigation queue from inside
+  `run_until_stalled_until(&self)`.
+- An **event-handler IDL attribute returning `false` now cancels the event**
+  (HTML's event handler processing algorithm step 5). Not a navigation feature —
+  a long-standing dispatch bug that was invisible until there was a default
+  action to cancel. Without it, WPT's
+  `Event-dispatch-single-activation-behavior.html` navigated away from itself
+  (`onsubmit="…; return false"`) and reverted to a whole-file HARNESS TIMEOUT.
+- **`<label>` activation forwarding**, which the plan listed as out of scope.
+  Omitting it *regressed* six passing subtests: a no-op activation behavior is
+  not the same as no activation behavior, so without a `<label>` variant a label
+  stopped shadowing its ancestors and a click inside one activated the wrong
+  element.
+- **Verification gap:** WPT's `html/browsers/history/` and
+  `html/semantics/forms/` are **not** in the runner's `RUN_DIRS`. Neither
+  directory is vendored under `tests/wpt/vendor/`, and fetching them needs
+  network, which CI never has (§9). Adding them is a separate, mechanical
+  vendoring change; until then the coverage is the Rust integration suites plus
+  the activation subtests already vendored under `dom/events`.
+
+The deliberate v1 limits are enumerated in ADR-0022's Consequences; the
+non-goals below all held, and `<meta http-equiv=refresh>` was dropped entirely
+rather than kept to a single hop. The original scope follows, for the record.
 
 **Scope.**
 
@@ -113,7 +145,8 @@ the destructive `document.open`/`write` path, bfcache, the Navigation API,
 
 **Verification.** New `crates/page/tests/navigation.rs` against loopback servers;
 WPT `html/browsers/history/` and `html/semantics/forms/form-submission-0/`
-subsets added to `xtask wpt`.
+subsets added to `xtask wpt`. *(The WPT subsets did not land — see the
+verification gap above.)*
 
 ---
 

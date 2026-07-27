@@ -85,7 +85,7 @@ fn huge_finite_timer_delay_does_not_panic() {
 
 #[test]
 fn second_load_replaces_document_not_appends() {
-    let mut page = page("<!DOCTYPE html><body><div id=a>first</div></body>");
+    let page = page("<!DOCTYPE html><body><div id=a>first</div></body>");
     assert_eq!(
         page.eval_to_string("document.querySelectorAll('div').length")
             .unwrap(),
@@ -122,7 +122,7 @@ fn second_load_replaces_document_not_appends() {
 /// running doc-1's callback against doc-2 (browsers discard it).
 #[test]
 fn navigation_cancels_the_previous_documents_timers() {
-    let mut page = page(
+    let page = page(
         "<!DOCTYPE html><body><script>\
            window.__ticks = 0;\
            setInterval(function(){ window.__ticks++; }, 1);\
@@ -150,7 +150,7 @@ fn navigation_cancels_the_previous_documents_timers() {
 /// frame would already have fired during the first load).
 #[test]
 fn navigation_cancels_the_previous_documents_animation_frames() {
-    let mut page = page(
+    let page = page(
         "<!DOCTYPE html><body><script>\
            window.__frames = 0;\
            (function arm(){ requestAnimationFrame(function(){ window.__frames++; arm(); }); })();\
@@ -213,7 +213,7 @@ fn performance_timing_milestones_are_monotonic_and_reset_on_navigation() {
     // re-stamped (>= the old) — the timing reset on navigation.
     page.eval_to_string("window.__firstNav = performance.timing.navigationStart")
         .unwrap();
-    let mut page = page;
+    let page = page;
     page.load_html("<!DOCTYPE html><html><head><title>t2</title></head><body>bye</body></html>")
         .unwrap();
     assert_eq!(

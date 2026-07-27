@@ -81,14 +81,18 @@ pub(crate) fn url(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsThrow> {
     Ok(cx.state.dom.borrow().document_url_of(this).to_owned())
 }
 
-/// The referrer of the navigation that created this document, `""` when there
-/// is none — which, today, is always. Every document here comes from a
-/// top-level `NetRequest::navigation`, defined no-referrer by the net layer,
-/// and `Location` exposes no setter, so script cannot navigate a document into
-/// existence from another one. Read the navigation's referrer here once
-/// script-initiated navigation lands.
-pub(crate) fn referrer(_cx: &BindCx<'_>, _this: NodeId) -> Result<String, JsThrow> {
-    Ok(String::new())
+/// The referrer of the navigation that created this document: the URL of the
+/// document it was navigated *from*, written by the page at commit time
+/// (ADR-0022). `""` when the navigation had no predecessor — an embedder
+/// `Page::navigate`, or the initial document.
+///
+/// Only the rendered document has a browsing context to have been navigated
+/// within; an inert `DOMParser`/`createHTMLDocument` document reports `""`.
+pub(crate) fn referrer(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsThrow> {
+    if !is_page_document(cx, this) {
+        return Ok(String::new());
+    }
+    Ok(cx.state.referrer())
 }
 
 /// A second document's sheets are never registered with the page's stylist, so

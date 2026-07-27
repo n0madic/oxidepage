@@ -7,7 +7,10 @@ use oxidepage_js::JsThrow;
 use crate::cx::BindCx;
 use crate::imp::reflect::{bool_reflector, reflect_string, set_string, string_reflector};
 
-pub(crate) use crate::imp::form_support::{form, labels};
+pub(crate) use crate::imp::form_support::{
+    form, form_action, form_enctype, form_method, form_no_validate, labels, set_form_action,
+    set_form_enctype, set_form_method, set_form_no_validate,
+};
 
 string_reflector!(name, set_name, "name");
 string_reflector!(value, set_value, "value");

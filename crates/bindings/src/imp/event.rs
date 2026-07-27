@@ -129,9 +129,9 @@ pub(crate) fn prevent_default(cx: &BindCx<'_>, this: EventRef) -> Result<(), JsT
 
 /// Spec "set the canceled flag": marks the event canceled, but only if it is
 /// cancelable *and* the in-passive-listener flag (§2.8) is not set. Shared by
-/// `preventDefault()` and the legacy `returnValue` setter — the single gate
-/// both go through.
-fn set_canceled_flag(cx: &BindCx<'_>, this: &EventRef) {
+/// `preventDefault()`, the legacy `returnValue` setter, and an event handler
+/// that returns `false` — the single gate all three go through.
+pub(crate) fn set_canceled_flag(cx: &BindCx<'_>, this: &EventRef) {
     let mut ev = this.borrow_mut();
     if !ev.cancelable {
         return;

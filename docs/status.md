@@ -280,11 +280,12 @@ v1 limits.
   exactly one selected option. `el.click()` runs the control's activation behavior
   (a checkbox toggles and fires `input`/`change`) unless a listener cancels it, and
   `focus()`/`blur()` move `document.activeElement`, firing the bubbling and
-  non-bubbling event pairs. **Not implemented:** `form.submit()` (submitting is a
-  navigation, and the engine never navigates from script — so the member is absent
-  rather than a no-op), anchor activation (`a.click()` fires the event but does not
-  follow the href), constraint validation (`checkValidity()`, `:valid`/`:invalid`),
-  and `input.files`. Decisions and v1 limits: ADR-0019.
+  non-bubbling event pairs. ADR-0019 also recorded `form.submit()` and anchor
+  activation as deliberately absent, because submitting and following an `href`
+  are navigations and the engine had none; **both landed with navigation** — see
+  the navigation entry below (ADR-0022). Still **not implemented:** constraint
+  validation (`checkValidity()`, `:valid`/`:invalid`) and `input.files`.
+  Decisions and v1 limits: ADR-0019.
 - **`FormData`**: done. `new FormData(form)` runs HTML's "construct the entry list"
   over the form's successful controls, and the object is a real entry list
   (`append`/`delete`/`get`/`getAll`/`has`/`set`, plus `entries`/`keys`/`values`/
@@ -305,6 +306,14 @@ v1 limits.
   state and so passed our tests, but broke React outright: React synthesises
   `onChange` for a checkbox/radio from the native `click` and reads `node.checked`
   inside it, so it saw no change and **never fired `onChange`**. See ADR-0020.
+- **Event handlers that return `false`**: fixed. HTML's event handler processing
+  algorithm step 5 — a handler assigned through an IDL attribute (`onclick`,
+  `onsubmit`, …) that returns exactly `false` cancels the event. The return value
+  had always been discarded, which was invisible until there were default actions
+  worth cancelling: `onsubmit="…; return false"` and `onclick="return false"` are
+  the canonical cancel idioms, older than `preventDefault()`. Only `false`
+  cancels (`undefined` must not), and only on the IDL-attribute path — an
+  `addEventListener` listener has no return value by design. See ADR-0022 §6.
 - **`<template>`**: `template.content` is exposed. The parser always built the contents
   fragment (a `<template>`'s children are not its child list); the IDL attribute was
   missing, so script could not reach it. It is the foundation of Alpine's `x-if`/`x-for`,
@@ -315,4 +324,35 @@ v1 limits.
   detection honest: `MouseEvent` (no library constructs one, but test tooling like
   React Testing Library's `fireEvent` does), and `MessageChannel` (React's scheduler
   falls back to `setTimeout`; only `act()` needs it).
+- **Navigation & session history**: done — stage 1 of the automation roadmap. The
+  page can now leave a document. `Location` and `History` are **real IDL
+  interfaces** (replacing a getters-only object and a `bootstrap.js` closure):
+  `href`/`assign`/`replace`/`reload` and the decomposition setters, plus
+  `length`/`state`/`go`/`back`/`forward`/`pushState`/`replaceState`. A click on
+  `<a href>`/`<area href>` follows the link, and `form.submit()`,
+  `requestSubmit()` and submit-button activation run HTML's submission algorithm
+  with a cancelable `SubmitEvent`: a GET rewrites the action URL's query, a POST
+  carries `urlencoded`, `multipart/form-data` or `text/plain` — reusing the
+  `FormData` entry list and multipart serializer rather than duplicating them.
+  Navigation is a **task source**, not an inline call: a script navigation queues
+  on `PageState::pending_navigation` (last write wins) and the event loop drains
+  it first, because committing a document replaces the DOM, style and layout
+  engines the calling script is borrowing. Session history is a real entry list;
+  a traversal is same-document iff the target entry belongs to the loaded
+  document, otherwise it reloads (there is **no bfcache**). `document.referrer` is
+  a real value, and `Page::drain_navigation_events` exposes the lifecycle stream
+  (`Started`/`SameDocument`/`Committed`/`DomContentLoaded`/`Load`/`NetworkIdle`/
+  `Failed`) that CDP's `Page.lifecycleEvent`/`frameNavigated` will rename.
+  `Page::navigate`/`load_html` are now `&self` — **a public API signature
+  change**. A `<label>` forwards its activation to the labeled control, and it
+  has that behavior even when it does nothing — the activation target is the
+  innermost element with a behavior *at all*, so a label must shadow its
+  ancestors or a click inside one activates the wrong element. **Not
+  implemented:** `<input type=image>`, the `formdata` event, constraint
+  validation, `<details>`/`<summary>`, `javascript:` URLs,
+  `<meta http-equiv=refresh>`, `beforeunload`/`unload`, real
+  popups for `target` (a `target` link navigates in place and warns), bfcache, and
+  `HashChangeEvent` (so `hashchange` is a plain `Event` and `e.oldURL` is honestly
+  `undefined`). History is capped at 50 entries, because an entry holds live JS
+  state across navigations. Decisions and v1 limits: ADR-0022.
 - Phases 8+ (GPU raster, C ABI, CDP, …): not started.

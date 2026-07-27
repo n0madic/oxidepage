@@ -473,7 +473,7 @@ fn load_page(
         }
         Some(p)
     };
-    let mut page = match Page::new(PageOptions {
+    let page = match Page::new(PageOptions {
         url: (!is_http).then(|| file_url(Path::new(file))),
         policy,
         viewport: Some(viewport.unwrap_or(DEFAULT_VIEWPORT)),

@@ -39,6 +39,8 @@ pub enum DomExceptionKind {
     /// The request is not allowed by the user agent or the platform (e.g.
     /// `replaceSync` on a non-constructed stylesheet).
     NotAllowedError,
+    /// The operation is insecure (e.g. `history.pushState` to another origin).
+    SecurityError,
 }
 
 impl DomExceptionKind {
@@ -58,6 +60,7 @@ impl DomExceptionKind {
             Self::NoModificationAllowedError => "NoModificationAllowedError",
             Self::NamespaceError => "NamespaceError",
             Self::NotAllowedError => "NotAllowedError",
+            Self::SecurityError => "SecurityError",
         }
     }
 }

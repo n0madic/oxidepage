@@ -297,6 +297,8 @@ interface HTMLFormElement : HTMLElement {
   [SameObject] readonly attribute HTMLCollection elements;
   readonly attribute unsigned long length;
   undefined reset();
+  undefined submit();
+  undefined requestSubmit(optional HTMLElement? submitter = null);
 };
 
 interface HTMLInputElement : HTMLElement {
@@ -312,6 +314,10 @@ interface HTMLInputElement : HTMLElement {
   attribute DOMString value;
   attribute boolean checked;
   attribute boolean indeterminate;
+  [CEReactions] attribute USVString formAction;
+  [CEReactions] attribute DOMString formEnctype;
+  [CEReactions] attribute DOMString formMethod;
+  [CEReactions] attribute boolean formNoValidate;
   readonly attribute HTMLFormElement? form;
   [SameObject] readonly attribute NodeList labels;
 };
@@ -369,6 +375,10 @@ interface HTMLButtonElement : HTMLElement {
   [CEReactions] attribute DOMString name;
   [CEReactions] attribute DOMString value;
   [CEReactions] attribute boolean disabled;
+  [CEReactions] attribute USVString formAction;
+  [CEReactions] attribute DOMString formEnctype;
+  [CEReactions] attribute DOMString formMethod;
+  [CEReactions] attribute boolean formNoValidate;
   readonly attribute HTMLFormElement? form;
   [SameObject] readonly attribute NodeList labels;
 };
@@ -452,6 +462,63 @@ interface PerformanceTiming {
   readonly attribute unsigned long long domComplete;
   readonly attribute unsigned long long loadEventStart;
   readonly attribute unsigned long long loadEventEnd;
+};
+
+// `window.location`. A Location *is* the document URL, so the getters read the
+// DOM's document URL and every setter queues a navigation — including `hash`,
+// whose write the navigation classifier recognises as same-document.
+//
+// Cross-origin writes are allowed: navigating away from the current origin is
+// the whole point of a Location. The same-origin restriction belongs to
+// `History.pushState`/`replaceState`, which change the URL *without* loading.
+interface Location {
+  stringifier attribute USVString href;
+  readonly attribute USVString origin;
+  attribute USVString protocol;
+  attribute USVString host;
+  attribute USVString hostname;
+  attribute USVString port;
+  attribute USVString pathname;
+  attribute USVString search;
+  attribute USVString hash;
+  undefined assign(USVString url);
+  undefined replace(USVString url);
+  undefined reload();
+};
+
+// `window.history`. The entry list lives in `PageState::history`; traversal is
+// queued for the page's navigation driver because it may need a document load
+// (there is no bfcache, so leaving the current document always reloads).
+interface History {
+  readonly attribute unsigned long length;
+  attribute DOMString scrollRestoration;
+  readonly attribute any state;
+  undefined go(optional long delta = 0);
+  undefined back();
+  undefined forward();
+  undefined pushState(any data, DOMString unused, optional USVString? url = null);
+  undefined replaceState(any data, DOMString unused, optional USVString? url = null);
+};
+
+dictionary PopStateEventInit : EventInit {
+  any state = null;
+};
+
+// Fired at the window when a session-history traversal stays in the current
+// document. `hashchange` is a plain `Event` — `HashChangeEvent` stays absent
+// (P6), so `e.oldURL` is honestly `undefined` rather than a fabricated value.
+interface PopStateEvent : Event {
+  constructor(DOMString type, optional PopStateEventInit eventInitDict = {});
+  readonly attribute any state;
+};
+
+dictionary SubmitEventInit : EventInit {
+  HTMLElement? submitter = null;
+};
+
+interface SubmitEvent : Event {
+  constructor(DOMString type, optional SubmitEventInit eventInitDict = {});
+  readonly attribute HTMLElement? submitter;
 };
 
 interface MediaQueryList : EventTarget {

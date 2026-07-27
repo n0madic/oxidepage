@@ -4117,6 +4117,18 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         0,
         gen_html_form_element_reset,
     )?;
+    cx.define_method(
+        &proto_html_form_element,
+        "submit",
+        0,
+        gen_html_form_element_submit,
+    )?;
+    cx.define_method(
+        &proto_html_form_element,
+        "requestSubmit",
+        0,
+        gen_html_form_element_request_submit,
+    )?;
     cx.finish_interface(
         "HTMLFormElement",
         &proto_html_form_element,
@@ -4195,6 +4207,30 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "indeterminate",
         gen_html_input_element_get_indeterminate,
         gen_html_input_element_set_indeterminate,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_input_element,
+        "formAction",
+        gen_html_input_element_get_form_action,
+        gen_html_input_element_set_form_action,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_input_element,
+        "formEnctype",
+        gen_html_input_element_get_form_enctype,
+        gen_html_input_element_set_form_enctype,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_input_element,
+        "formMethod",
+        gen_html_input_element_get_form_method,
+        gen_html_input_element_set_form_method,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_input_element,
+        "formNoValidate",
+        gen_html_input_element_get_form_no_validate,
+        gen_html_input_element_set_form_no_validate,
     )?;
     cx.define_getter(
         &proto_html_input_element,
@@ -4471,6 +4507,30 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         gen_html_button_element_get_disabled,
         gen_html_button_element_set_disabled,
     )?;
+    cx.define_accessor_ce(
+        &proto_html_button_element,
+        "formAction",
+        gen_html_button_element_get_form_action,
+        gen_html_button_element_set_form_action,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_button_element,
+        "formEnctype",
+        gen_html_button_element_get_form_enctype,
+        gen_html_button_element_set_form_enctype,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_button_element,
+        "formMethod",
+        gen_html_button_element_get_form_method,
+        gen_html_button_element_set_form_method,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_button_element,
+        "formNoValidate",
+        gen_html_button_element_get_form_no_validate,
+        gen_html_button_element_set_form_no_validate,
+    )?;
     cx.define_getter(
         &proto_html_button_element,
         "form",
@@ -4730,6 +4790,108 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "PerformanceTiming",
         &proto_performance_timing,
         CtorSpec::Illegal,
+    )?;
+
+    let proto_location = cx.begin_interface("Location", None)?;
+    cx.define_accessor(
+        &proto_location,
+        "href",
+        gen_location_get_href,
+        gen_location_set_href,
+    )?;
+    cx.define_method(&proto_location, "toString", 0, gen_location_get_href)?;
+    cx.define_getter(&proto_location, "origin", gen_location_get_origin)?;
+    cx.define_accessor(
+        &proto_location,
+        "protocol",
+        gen_location_get_protocol,
+        gen_location_set_protocol,
+    )?;
+    cx.define_accessor(
+        &proto_location,
+        "host",
+        gen_location_get_host,
+        gen_location_set_host,
+    )?;
+    cx.define_accessor(
+        &proto_location,
+        "hostname",
+        gen_location_get_hostname,
+        gen_location_set_hostname,
+    )?;
+    cx.define_accessor(
+        &proto_location,
+        "port",
+        gen_location_get_port,
+        gen_location_set_port,
+    )?;
+    cx.define_accessor(
+        &proto_location,
+        "pathname",
+        gen_location_get_pathname,
+        gen_location_set_pathname,
+    )?;
+    cx.define_accessor(
+        &proto_location,
+        "search",
+        gen_location_get_search,
+        gen_location_set_search,
+    )?;
+    cx.define_accessor(
+        &proto_location,
+        "hash",
+        gen_location_get_hash,
+        gen_location_set_hash,
+    )?;
+    cx.define_method(&proto_location, "assign", 1, gen_location_assign)?;
+    cx.define_method(&proto_location, "replace", 1, gen_location_replace)?;
+    cx.define_method(&proto_location, "reload", 0, gen_location_reload)?;
+    cx.finish_interface("Location", &proto_location, CtorSpec::Illegal)?;
+
+    let proto_history = cx.begin_interface("History", None)?;
+    cx.define_getter(&proto_history, "length", gen_history_get_length)?;
+    cx.define_accessor(
+        &proto_history,
+        "scrollRestoration",
+        gen_history_get_scroll_restoration,
+        gen_history_set_scroll_restoration,
+    )?;
+    cx.define_getter(&proto_history, "state", gen_history_get_state)?;
+    cx.define_method(&proto_history, "go", 0, gen_history_go)?;
+    cx.define_method(&proto_history, "back", 0, gen_history_back)?;
+    cx.define_method(&proto_history, "forward", 0, gen_history_forward)?;
+    cx.define_method(&proto_history, "pushState", 2, gen_history_push_state)?;
+    cx.define_method(&proto_history, "replaceState", 2, gen_history_replace_state)?;
+    cx.finish_interface("History", &proto_history, CtorSpec::Illegal)?;
+
+    let proto_pop_state_event = cx.begin_interface("PopStateEvent", Some("Event"))?;
+    cx.define_getter(
+        &proto_pop_state_event,
+        "state",
+        gen_pop_state_event_get_state,
+    )?;
+    cx.finish_interface(
+        "PopStateEvent",
+        &proto_pop_state_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_pop_state_event_constructor,
+        },
+    )?;
+
+    let proto_submit_event = cx.begin_interface("SubmitEvent", Some("Event"))?;
+    cx.define_getter(
+        &proto_submit_event,
+        "submitter",
+        gen_submit_event_get_submitter,
+    )?;
+    cx.finish_interface(
+        "SubmitEvent",
+        &proto_submit_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_submit_event_constructor,
+        },
     )?;
 
     let proto_media_query_list = cx.begin_interface("MediaQueryList", Some("EventTarget"))?;
@@ -12342,6 +12504,22 @@ fn gen_html_form_element_reset(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
     Ok(JsValue::Undefined)
 }
 
+fn gen_html_form_element_submit(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_form_element(&call.this)?;
+    imp::html_form_element::submit(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_form_element_request_submit(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_form_element(&call.this)?;
+    let a0 = cx.arg_nullable_node(call, 0)?;
+    imp::html_form_element::request_submit(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_html_input_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
     Ok(JsValue::String(imp::html_input_element::r#type(cx, this)?))
@@ -12545,6 +12723,86 @@ fn gen_html_input_element_set_indeterminate(
     let this = cx.this_html_input_element(&call.this)?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_indeterminate(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_form_action(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(JsValue::String(imp::html_input_element::form_action(
+        cx, this,
+    )?))
+}
+
+fn gen_html_input_element_set_form_action(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_input_element::set_form_action(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_form_enctype(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(JsValue::String(imp::html_input_element::form_enctype(
+        cx, this,
+    )?))
+}
+
+fn gen_html_input_element_set_form_enctype(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_input_element::set_form_enctype(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_form_method(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(JsValue::String(imp::html_input_element::form_method(
+        cx, this,
+    )?))
+}
+
+fn gen_html_input_element_set_form_method(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_input_element::set_form_method(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_form_no_validate(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    Ok(JsValue::Bool(imp::html_input_element::form_no_validate(
+        cx, this,
+    )?))
+}
+
+fn gen_html_input_element_set_form_no_validate(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    let a0 = cx.arg_bool(call, 0);
+    imp::html_input_element::set_form_no_validate(cx, this, a0)?;
     Ok(JsValue::Undefined)
 }
 
@@ -13126,6 +13384,86 @@ fn gen_html_button_element_set_disabled(
     Ok(JsValue::Undefined)
 }
 
+fn gen_html_button_element_get_form_action(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    Ok(JsValue::String(imp::html_button_element::form_action(
+        cx, this,
+    )?))
+}
+
+fn gen_html_button_element_set_form_action(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_button_element::set_form_action(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_button_element_get_form_enctype(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    Ok(JsValue::String(imp::html_button_element::form_enctype(
+        cx, this,
+    )?))
+}
+
+fn gen_html_button_element_set_form_enctype(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_button_element::set_form_enctype(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_button_element_get_form_method(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    Ok(JsValue::String(imp::html_button_element::form_method(
+        cx, this,
+    )?))
+}
+
+fn gen_html_button_element_set_form_method(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_button_element::set_form_method(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_button_element_get_form_no_validate(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    Ok(JsValue::Bool(imp::html_button_element::form_no_validate(
+        cx, this,
+    )?))
+}
+
+fn gen_html_button_element_set_form_no_validate(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_button_element(&call.this)?;
+    let a0 = cx.arg_bool(call, 0);
+    imp::html_button_element::set_form_no_validate(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_html_button_element_get_form(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
     let ret = imp::html_button_element::form(cx, this)?;
@@ -13606,6 +13944,215 @@ fn gen_performance_timing_get_load_event_end(
     Ok(JsValue::Number(imp::performance_timing::load_event_end(
         cx, this,
     )?))
+}
+
+fn gen_location_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::href(cx, this)?))
+}
+
+fn gen_location_set_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_href(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_origin(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::origin(cx, this)?))
+}
+
+fn gen_location_get_protocol(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::protocol(cx, this)?))
+}
+
+fn gen_location_set_protocol(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_protocol(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::host(cx, this)?))
+}
+
+fn gen_location_set_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_host(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_hostname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::hostname(cx, this)?))
+}
+
+fn gen_location_set_hostname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_hostname(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::port(cx, this)?))
+}
+
+fn gen_location_set_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_port(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_pathname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::pathname(cx, this)?))
+}
+
+fn gen_location_set_pathname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_pathname(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::search(cx, this)?))
+}
+
+fn gen_location_set_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_search(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_get_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    Ok(JsValue::String(imp::location::hash(cx, this)?))
+}
+
+fn gen_location_set_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::set_hash(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_assign(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::assign(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_replace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::location::replace(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_location_reload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_location(&call.this)?;
+    imp::location::reload(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_history_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    Ok(JsValue::Number(imp::history::length(cx, this)?))
+}
+
+fn gen_history_get_scroll_restoration(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    Ok(JsValue::String(imp::history::scroll_restoration(cx, this)?))
+}
+
+fn gen_history_set_scroll_restoration(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::history::set_scroll_restoration(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_history_get_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    imp::history::state(cx, this)
+}
+
+fn gen_history_go(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    let a0 = cx.arg_i32_or(call, 0, 0)?;
+    imp::history::go(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_history_back(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    imp::history::back(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_history_forward(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    imp::history::forward(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_history_push_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    let a0 = call.arg(0);
+    let a1 = cx.arg_dom_string(call, 1)?;
+    let a2 = cx.arg_nullable_dom_string(call, 2)?;
+    imp::history::push_state(cx, this, a0, a1, a2)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_history_replace_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_history(&call.this)?;
+    let a0 = call.arg(0);
+    let a1 = cx.arg_dom_string(call, 1)?;
+    let a2 = cx.arg_nullable_dom_string(call, 2)?;
+    imp::history::replace_state(cx, this, a0, a1, a2)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_pop_state_event_get_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    imp::pop_state_event::state(cx, this)
+}
+
+fn gen_pop_state_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::pop_state_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_submit_event_get_submitter(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let ret = imp::submit_event::submitter(cx, this)?;
+    cx.opt_node_to_js(ret)
+}
+
+fn gen_submit_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::submit_event::constructor(cx, call, a0, a1)
 }
 
 fn gen_media_query_list_get_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

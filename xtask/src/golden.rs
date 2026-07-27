@@ -25,7 +25,7 @@ fn goldens_dir(workspace: &Path) -> PathBuf {
 
 /// Renders a fixture's display list to golden JSON.
 fn render(html: &str, doc_url: String) -> Result<String, String> {
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         url: Some(doc_url),
         viewport: Some(VIEWPORT),
         ..PageOptions::default()

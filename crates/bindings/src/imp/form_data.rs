@@ -44,7 +44,7 @@ pub(crate) fn constructor(
                 "FormData constructor: argument is not an HTMLFormElement".into(),
             ));
         }
-        construct_the_entry_list(cx, node)
+        construct_the_entry_list(cx, node, None)
     };
     let data = Rc::new(FormDataData::new(entries));
     cx.new_slab_object("FormData", HostData::FormData(data))
@@ -54,11 +54,19 @@ pub(crate) fn constructor(
 /// tree order.
 ///
 /// A control contributes iff it has a non-empty `name`, is not disabled, and —
-/// for a checkbox or radio — is checked. Buttons are excluded: only the
-/// submitter contributes, and there is no submitter here. All of that state
-/// already lives in the DOM (ADR-0019), so this is a projection, not a
-/// re-derivation.
-fn construct_the_entry_list(cx: &BindCx<'_>, form: NodeId) -> Vec<(String, String)> {
+/// for a checkbox or radio — is checked. Buttons are excluded **unless the
+/// button is `submitter`**, which is what makes a submit button's `name=value`
+/// land in the list at its own tree position rather than appended at the end.
+/// All of that state already lives in the DOM (ADR-0019), so this is a
+/// projection, not a re-derivation.
+///
+/// `submitter` is `None` for `new FormData(form)` (there is no submitter) and
+/// `Some` for a form submission — one algorithm, not two (`imp::form_submit`).
+pub(crate) fn construct_the_entry_list(
+    cx: &BindCx<'_>,
+    form: NodeId,
+    submitter: Option<NodeId>,
+) -> Vec<(String, String)> {
     let dom = cx.state.dom.borrow();
     let mut entries = Vec::new();
     for control in dom.form_controls(form) {
@@ -92,8 +100,11 @@ fn construct_the_entry_list(cx: &BindCx<'_>, form: NodeId) -> Vec<(String, Strin
                             ));
                         }
                     }
-                    // Buttons are only successful as the submitter; there is
-                    // none. A file input has no files to contribute.
+                    // A button is successful only as the submitter. A file
+                    // input has no files to contribute.
+                    "submit" if submitter == Some(control) => {
+                        entries.push((name, dom.form_value(control)));
+                    }
                     "submit" | "reset" | "button" | "image" | "file" => {}
                     _ => entries.push((name, dom.form_value(control))),
                 }
@@ -110,6 +121,9 @@ fn construct_the_entry_list(cx: &BindCx<'_>, form: NodeId) -> Vec<(String, Strin
             }
             // `<button>` is only successful as the submitter; `<fieldset>` and
             // `<object>` never contribute.
+            "button" if submitter == Some(control) => {
+                entries.push((name, dom.form_value(control)));
+            }
             _ => {}
         }
     }

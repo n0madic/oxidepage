@@ -59,7 +59,11 @@ pub struct EventData {
     pub dispatching: bool,
     pub is_trusted: bool,
     pub time_stamp: f64,
-    /// `CustomEvent.detail`.
+    /// The one extra value an event subinterface carries, read under a
+    /// different name by each of them: `CustomEvent.detail`,
+    /// `PopStateEvent.state`, and `SubmitEvent.submitter` (as the submitter's
+    /// wrapper — the node id is recovered from it). Three interfaces, one
+    /// slot, because no event is more than one of them.
     pub detail: JsValue,
     /// The propagation path of the current/last dispatch (for `composedPath`).
     pub path: Vec<EventTargetKey>,
@@ -506,12 +510,42 @@ fn invoke_listeners(
     if !event.borrow().stop_immediate_propagation
         && let Some(handler) = handler
         && cx.scope.is_function(&handler)
-        && let Err(error) = cx
+    {
+        match cx
             .scope
             .call(&handler, &this, std::slice::from_ref(event_value))
-    {
-        cx.report_callback_error(error);
+        {
+            Err(error) => cx.report_callback_error(error),
+            // HTML's **event handler processing algorithm**, step 5: a handler
+            // that returns `false` cancels the event. This is the `onsubmit=
+            // "…; return false"` / `onclick="return false"` idiom, and it is
+            // only reachable through the IDL-attribute path — a listener added
+            // with `addEventListener` has no return value by design, which is
+            // why the branch above discards its result.
+            //
+            // Only `false` exactly: `undefined` (the common case) must not
+            // cancel. `onerror` on the Window inverts the test, and
+            // `beforeunload` uses the value differently again — neither exists
+            // here, so neither is special-cased.
+            Ok(JsValue::Bool(false)) => crate::imp::event::set_canceled_flag(cx, event),
+            Ok(_) => {}
+        }
     }
+    Ok(())
+}
+
+/// Creates and dispatches a trusted `popstate` at the window, carrying the
+/// state of the session-history entry just traversed to.
+///
+/// Not `fire_simple_event`: `popstate` is a `PopStateEvent`, and its `state`
+/// is the only way script learns *which* entry it landed on.
+pub fn fire_pop_state(cx: &BindCx<'_>, state: JsValue) -> Result<(), JsThrow> {
+    let mut data = EventData::new("popstate".to_owned(), false, false, false);
+    data.is_trusted = true;
+    data.detail = state;
+    let (value, data) = cx.new_event_object("PopStateEvent", data)?;
+    dispatch_event(cx, EventTargetKey::Window, &value, &data)?;
+    crate::microtask_checkpoint(cx);
     Ok(())
 }
 

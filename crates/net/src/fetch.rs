@@ -126,6 +126,58 @@ impl NetRequest {
         }
     }
 
+    /// A top-level document navigation carrying a referrer and/or skipping the
+    /// HTTP cache — a link click, a `location.href` write, `location.reload()`.
+    ///
+    /// The referrer is the URL of the document the navigation *left*, so it is
+    /// passed in rather than derived: by the time the request is built the
+    /// engine still has the outgoing document, but it is the caller that knows
+    /// whether this navigation has a referrer at all (an embedder-driven
+    /// `Page::navigate` does not).
+    #[must_use]
+    pub fn navigation_with(
+        url: impl Into<String>,
+        referrer: Option<String>,
+        bypass_cache: bool,
+    ) -> Self {
+        Self {
+            referrer,
+            bypass_cache,
+            ..Self::navigation(url)
+        }
+    }
+
+    /// A form submission navigating the page (POST, credentialed).
+    ///
+    /// `RequestMode::Navigate` is what makes this work cross-origin: it is
+    /// exempt from the CORS checks a script `fetch` would face, and it keeps
+    /// the author-chosen `Content-Type` (`application/x-www-form-urlencoded`,
+    /// `multipart/form-data`, `text/plain`) — a form POST to another origin is
+    /// a normal, unpreflighted thing for a browser to do.
+    #[must_use]
+    pub fn form_navigation(
+        url: impl Into<String>,
+        body: Vec<u8>,
+        content_type: String,
+        referrer: Option<String>,
+    ) -> Self {
+        // A POST needs an `Origin` header, and `request_origin` derives it from
+        // the initiator — so unlike a GET navigation this one names the
+        // submitting document's origin, exactly as a browser does.
+        let initiator_origin = referrer
+            .as_deref()
+            .and_then(|r| Url::parse(r).ok())
+            .map(|u| u.origin().ascii_serialization());
+        Self {
+            method: "POST".to_owned(),
+            headers: vec![("content-type".to_owned(), content_type)],
+            body: Some(body),
+            referrer,
+            initiator_origin,
+            ..Self::navigation(url)
+        }
+    }
+
     /// A subresource load initiated by a document (GET, credentialed).
     #[must_use]
     pub fn subresource(url: impl Into<String>, document_url: impl Into<String>) -> Self {

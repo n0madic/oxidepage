@@ -124,7 +124,7 @@ fn stem(path: &Path) -> String {
 fn render(path: &Path) -> Result<RasterImage, String> {
     let html =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         url: Some(format!("file://{}", path.display())),
         viewport: Some(VIEWPORT),
         ..PageOptions::default()

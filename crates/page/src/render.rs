@@ -135,7 +135,7 @@ impl Page {
     pub(crate) fn update_the_rendering(&self) {
         let callbacks = self.hooks.take_raf_callbacks();
         if !callbacks.is_empty() {
-            let timestamp = self.start_time.elapsed().as_secs_f64() * 1000.0;
+            let timestamp = self.start_time.get().elapsed().as_secs_f64() * 1000.0;
             self.with_cx(|cx| {
                 for (id, callback) in &callbacks {
                     if self.hooks.take_raf_cancelled(*id) {

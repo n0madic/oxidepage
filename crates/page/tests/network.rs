@@ -268,7 +268,7 @@ fn loopback_page() -> Page {
 #[test]
 fn http_page_runs_scripts_in_order_and_waits_for_load() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -314,7 +314,7 @@ fn http_page_runs_scripts_in_order_and_waits_for_load() {
 #[test]
 fn document_current_script_tracks_external_classic_execution_modes() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -337,7 +337,7 @@ fn document_current_script_tracks_external_classic_execution_modes() {
 fn navigator_profile_matches_navigation_subresource_and_fetch_headers() {
     let port = spawn_server();
     PROFILE_HEADERS.lock().unwrap().clear();
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         navigator: NavigatorProfile {
             user_agent: "Mozilla/5.0 ProfileTest/9".to_owned(),
@@ -418,7 +418,7 @@ fn navigator_profile_matches_navigation_subresource_and_fetch_headers() {
 #[test]
 fn dynamic_external_scripts_dispatch_load_and_error_and_do_not_repeat() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index2.html"),
         WaitUntil::Load,
@@ -477,7 +477,7 @@ fn dynamic_external_scripts_dispatch_load_and_error_and_do_not_repeat() {
 #[test]
 fn dynamic_external_scripts_with_async_false_keep_insertion_order() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index2.html"),
         WaitUntil::Load,
@@ -504,7 +504,7 @@ fn dynamic_external_scripts_with_async_false_keep_insertion_order() {
 #[test]
 fn module_with_static_import_and_meta_url() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -525,7 +525,7 @@ fn module_with_static_import_and_meta_url() {
 #[test]
 fn redirect_updates_document_url() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/redirect"),
         WaitUntil::Load,
@@ -540,7 +540,7 @@ fn redirect_updates_document_url() {
 #[test]
 fn fetch_get_text_and_json() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -565,7 +565,7 @@ fn fetch_get_text_and_json() {
 #[test]
 fn fetch_post_echoes_body() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -585,7 +585,7 @@ fn fetch_post_echoes_body() {
 #[test]
 fn fetch_aborted_in_flight_rejects_with_reason() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -619,7 +619,7 @@ fn fetch_aborted_in_flight_rejects_with_reason() {
 #[test]
 fn fetch_with_pre_aborted_signal_rejects_immediately() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -647,7 +647,7 @@ fn fetch_with_pre_aborted_signal_rejects_immediately() {
 #[test]
 fn xhr_get_fires_load() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -682,7 +682,7 @@ fn xhr_get_fires_load() {
 #[test]
 fn set_cookie_from_load_reaches_document_cookie() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -698,7 +698,7 @@ fn set_cookie_from_load_reaches_document_cookie() {
 #[test]
 fn document_charset_falls_back_to_meta_when_no_http_charset() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(&format!("http://127.0.0.1:{port}/latin1"), WaitUntil::Load)
         .unwrap();
     // The `<meta charset=windows-1252>` decodes the 0xE9 byte to 'é'; the old
@@ -715,7 +715,7 @@ fn document_charset_falls_back_to_meta_when_no_http_charset() {
 fn module_load_referrer_is_the_document_not_the_module() {
     let port = spawn_server();
     *DEP_REFERER.lock().unwrap() = None;
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -740,7 +740,7 @@ fn cross_origin_no_cors_response_is_opaque() {
     let port = spawn_server();
     // A second server on another port is a different origin.
     let other = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -769,7 +769,7 @@ fn cross_origin_no_cors_response_is_opaque() {
 #[test]
 fn fetch_init_headers_are_validated_synchronously() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -806,7 +806,7 @@ fn fetch_init_headers_are_validated_synchronously() {
 #[test]
 fn navigation_abandons_a_scripts_in_flight_fetch() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -837,7 +837,7 @@ fn navigation_abandons_a_scripts_in_flight_fetch() {
 #[test]
 fn second_navigation_discards_stale_async_state() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     // Stop at DOMContentLoaded so the async subresource may still be in flight.
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
@@ -861,7 +861,7 @@ fn fetch_response_body_stream_reads_full_body() {
     // `response.body.getReader()`; without the byte stream every runtime fetch
     // came back empty (ADR-0012).
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -901,7 +901,7 @@ fn fetch_response_body_stream_reads_full_body() {
 #[test]
 fn fetch_formdata_body_is_sent_as_multipart() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -945,7 +945,7 @@ fn fetch_formdata_body_is_sent_as_multipart() {
 #[test]
 fn explicit_content_type_beats_the_body_default() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,
@@ -974,7 +974,7 @@ fn explicit_content_type_beats_the_body_default() {
 #[test]
 fn xhr_send_formdata_is_multipart() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.navigate(
         &format!("http://127.0.0.1:{port}/index.html"),
         WaitUntil::Load,

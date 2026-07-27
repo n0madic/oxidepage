@@ -1025,10 +1025,10 @@ css/cssom-view/scroll-behavior-main-frame-window.html	Main frame with smooth scr
 css/cssom-view/scroll-behavior-main-frame-window.html	Main frame with smooth scroll-behavior ; scrollTo() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-main-frame-window.html	Make sure the page is ready for animation.	FAIL
 css/cssom-view/scroll-behavior-main-frame-window.html	__harness__	OK
-css/cssom-view/scroll-behavior-smooth-navigation.html	Instant scrolling while doing history navigation.	TIMEOUT
+css/cssom-view/scroll-behavior-smooth-navigation.html	Instant scrolling while doing history navigation.	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	Make sure the page is ready for animation.	FAIL
-css/cssom-view/scroll-behavior-smooth-navigation.html	Smooth scrolling while doing history navigation.	NOTRUN
-css/cssom-view/scroll-behavior-smooth-navigation.html	__harness__	TIMEOUT
+css/cssom-view/scroll-behavior-smooth-navigation.html	Smooth scrolling while doing history navigation.	FAIL
+css/cssom-view/scroll-behavior-smooth-navigation.html	__harness__	OK
 css/cssom-view/scroll-behavior-smooth-positions.html	Make sure the page is ready for animation.	FAIL
 css/cssom-view/scroll-behavior-smooth-positions.html	Scroll positions when performing smooth scrolling from (0, 0) to (500, 250) using scrollIntoView() 	FAIL
 css/cssom-view/scroll-behavior-smooth-positions.html	Scroll positions when performing smooth scrolling from (0, 500) to (500, 250) using scrollIntoView() 	FAIL
@@ -2663,12 +2663,10 @@ dom/events/Event-dispatch-click.html	disabled checkbox should be checked from di
 dom/events/Event-dispatch-click.html	disabled checkbox should fire onclick	FAIL
 dom/events/Event-dispatch-click.html	disabled checkbox should get legacy-canceled-activation behavior	FAIL
 dom/events/Event-dispatch-click.html	disabled checkbox should get legacy-canceled-activation behavior 2	FAIL
-dom/events/Event-dispatch-click.html	disabled checkbox still has activation behavior, part 2	FAIL
 dom/events/Event-dispatch-click.html	disabled radio should be checked from dispatchEvent(new MouseEvent("click"))	FAIL
 dom/events/Event-dispatch-click.html	disabled radio should fire onclick	FAIL
 dom/events/Event-dispatch-click.html	disabled radio should get legacy-canceled-activation behavior	FAIL
 dom/events/Event-dispatch-click.html	disabled radio should get legacy-canceled-activation behavior 2	FAIL
-dom/events/Event-dispatch-click.html	disabled radio still has activation behavior	FAIL
 dom/events/Event-dispatch-click.html	disabled submit button should not activate	FAIL
 dom/events/Event-dispatch-click.html	disconnected checkbox should be checked from dispatchEvent(new MouseEvent('click'))	FAIL
 dom/events/Event-dispatch-click.html	disconnected radio should be checked from dispatchEvent(new MouseEvent('click'))	FAIL
@@ -2740,28 +2738,6 @@ dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <D
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <DETAILS><SUMMARY></SUMMARY></DETAILS> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <DETAILS><SUMMARY></SUMMARY></DETAILS> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <DETAILS><SUMMARY></SUMMARY></DETAILS> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <A></A>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <AREA></AREA>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <FORM><BUTTON type=submit></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <FORM><INPUT type=reset></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <FORM><INPUT type=submit></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <INPUT type=checkbox></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=reset></BUTTON></FORM> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <A></A>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <AREA></AREA>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <FORM><BUTTON type=reset></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <FORM><INPUT type=reset></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <FORM><INPUT type=submit></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <INPUT type=checkbox></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><BUTTON type=submit></BUTTON></FORM> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <A></A>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <AREA></AREA>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
@@ -2773,39 +2749,6 @@ dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <F
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=image></INPUT></FORM> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <A></A>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <AREA></AREA>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <FORM><BUTTON type=reset></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <FORM><BUTTON type=submit></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <FORM><INPUT type=submit></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <INPUT type=checkbox></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=reset></INPUT></FORM> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <A></A>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <AREA></AREA>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <FORM><BUTTON type=reset></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <FORM><BUTTON type=submit></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <FORM><INPUT type=reset></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <INPUT type=checkbox></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <FORM><INPUT type=submit></INPUT></FORM> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <A></A>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <AREA></AREA>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <DETAILS><SUMMARY></SUMMARY></DETAILS>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <FORM><BUTTON type=reset></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <FORM><BUTTON type=submit></BUTTON></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <FORM><INPUT type=image></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <FORM><INPUT type=reset></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <FORM><INPUT type=submit></INPUT></FORM>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <INPUT type=checkbox></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <INPUT type=radio></INPUT>, only child should be activated.	FAIL
-dom/events/Event-dispatch-single-activation-behavior.html	When clicking child <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL> of parent <LABEL><BUTTON type=button></BUTTON></LABEL>, only child should be activated.	FAIL
 dom/events/Event-dispatch-single-activation-behavior.html	__harness__	OK
 dom/events/Event-dispatch-target-moved.html	__harness__	OK
 dom/events/Event-dispatch-target-removed.html	__harness__	OK
@@ -2989,7 +2932,6 @@ dom/events/passive-by-default.html	wheel listener is passive with {passive:undef
 dom/events/pointer-event-document-move.html	Moving a node to new document should move the registered event listeners together	TIMEOUT
 dom/events/pointer-event-document-move.html	__harness__	TIMEOUT
 dom/events/preventDefault-during-activation-behavior.html	__harness__	OK
-dom/events/preventDefault-during-activation-behavior.html	behavior of preventDefault during activation behavior	FAIL
 dom/events/relatedTarget.window.js	Reset if target pointed to a shadow tree	FAIL
 dom/events/relatedTarget.window.js	Reset if target pointed to a shadow tree pre-dispatch	FAIL
 dom/events/relatedTarget.window.js	Reset targets before activation behavior	FAIL

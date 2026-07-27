@@ -83,7 +83,7 @@ fn spawn_recording_server() -> (u16, Arc<Mutex<Vec<String>>>) {
 #[test]
 fn subresources_resolve_against_the_base_href() {
     let (port, paths) = spawn_recording_server();
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         ..PageOptions::default()
     })

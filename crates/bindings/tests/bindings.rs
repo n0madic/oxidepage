@@ -3179,6 +3179,33 @@ fn history_state_stack() {
         "{\"a\":1}|{\"a\":2}|1"
     );
     assert_eq!(h.eval_string("history.scrollRestoration"), "auto");
+    // A real IDL interface now (ADR-0022), not a closure shim: it has a
+    // prototype chain, a brand, and a `Symbol.toStringTag`.
+    assert!(h.eval_bool("history instanceof History"));
+    assert_eq!(
+        h.eval_string("Object.prototype.toString.call(history)"),
+        "[object History]"
+    );
+    assert!(h.eval_bool("location instanceof Location"));
+    // The state is a structured *clone*: mutating the object afterwards must
+    // not reach into the entry.
+    assert_eq!(
+        h.eval_string(
+            "(() => { const o = {v: 1}; history.replaceState(o, ''); o.v = 2; \
+              return String(history.state.v); })()"
+        ),
+        "1"
+    );
+    // `pushState` to another origin is a SecurityError, and the document URL
+    // must not have moved.
+    assert_eq!(
+        h.eval_string(
+            "(() => { const before = location.href; \
+              try { history.pushState(null, '', 'https://evil.example/x'); return 'no throw'; } \
+              catch (e) { return e.name + '|' + String(location.href === before); } })()"
+        ),
+        "SecurityError|true"
+    );
 }
 
 #[test]

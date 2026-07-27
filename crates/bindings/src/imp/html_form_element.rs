@@ -7,9 +7,10 @@
 //!
 //! `elements` is a plain `HTMLCollection`, not an `HTMLFormControlsCollection`
 //! (that interface adds only the `namedItem` overload returning a RadioNodeList).
-//! `submit()` is **absent** rather than a no-op: submitting is a navigation, and
-//! form navigation does not exist (P6 — absent beats fake). `reset()` needs no
-//! navigation and is implemented.
+//!
+//! `submit()`/`requestSubmit()` live in [`crate::imp::form_submit`], which owns
+//! the whole submission algorithm; the two differ only in whether the `submit`
+//! event fires, exactly as HTML specifies.
 
 use oxidepage_base::NodeId;
 use oxidepage_js::{JsThrow, JsValue};
@@ -54,7 +55,25 @@ pub(crate) fn length(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
 
 /// HTML "reset the form owner": clear every control's dirty flags, so each one
 /// falls back to its content attribute again.
+///
+/// `form.reset()` does *not* fire the `reset` event — only the reset button's
+/// activation behavior does (`imp::form_submit::reset`).
 pub(crate) fn reset(cx: &BindCx<'_>, this: NodeId) -> Result<(), JsThrow> {
     cx.state.dom.borrow_mut().reset_form(this);
     Ok(())
+}
+
+/// `form.submit()`: submit **without** firing `submit` and without validating,
+/// per HTML.
+pub(crate) fn submit(cx: &BindCx<'_>, this: NodeId) -> Result<(), JsThrow> {
+    crate::imp::form_submit::submit(cx, this, None, /* fire_event */ false)
+}
+
+/// `form.requestSubmit(submitter?)`: what a click on a submit button does.
+pub(crate) fn request_submit(
+    cx: &BindCx<'_>,
+    this: NodeId,
+    submitter: Option<NodeId>,
+) -> Result<(), JsThrow> {
+    crate::imp::form_submit::request_submit(cx, this, submitter)
 }

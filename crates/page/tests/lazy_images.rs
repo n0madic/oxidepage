@@ -153,7 +153,7 @@ fn resp(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
 fn load(body: &str, lazy: bool) -> (Page, Hits) {
     let html = format!("<!DOCTYPE html><body style='margin:0'>{body}</body>");
     let (port, hits) = spawn_server(html);
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         lazy_images: lazy,
         ..PageOptions::default()
@@ -372,7 +372,7 @@ fn deferred_image_shares_the_url_dedup() {
 /// The queue holds nodes of the outgoing document; their ids go stale with it.
 #[test]
 fn navigation_clears_deferred_images() {
-    let (mut page, hits) = run(
+    let (page, hits) = run(
         &format!("{SPACER}<img src='/img.png' style='display:block'>"),
         true,
     );

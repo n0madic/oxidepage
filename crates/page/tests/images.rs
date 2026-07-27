@@ -132,7 +132,7 @@ fn resp(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
 fn run(body: &str) -> (Page, Arc<AtomicUsize>) {
     let html = format!("<!DOCTYPE html><body style='margin:0'>{body}</body>");
     let (port, counter) = spawn_server(html);
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         ..PageOptions::default()
     })

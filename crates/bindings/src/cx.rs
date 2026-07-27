@@ -201,7 +201,7 @@ pub(crate) fn unpack_node(data: u64) -> Option<NodeId> {
 impl BindCx<'_> {
     // === JS-side helper access ===
 
-    fn with_js<T>(&self, f: impl FnOnce(&JsRefs) -> T) -> Result<T, JsThrow> {
+    pub(crate) fn with_js<T>(&self, f: impl FnOnce(&JsRefs) -> T) -> Result<T, JsThrow> {
         let js = self.state.js.borrow();
         let refs = js
             .as_ref()
@@ -240,6 +240,18 @@ impl BindCx<'_> {
     }
 
     // === Exceptions ===
+
+    /// Reports an unimplemented behavior to the console.
+    ///
+    /// P6 says an API we do not implement is *absent*; where the API is present
+    /// but one of its effects is out of reach (a link's `target`, a
+    /// `javascript:` URL), the page still runs — so the gap is announced rather
+    /// than left as an unexplained non-event.
+    pub(crate) fn warn(&self, message: &str) {
+        self.state
+            .hooks
+            .console_message(crate::state::ConsoleLevel::Warn, message.to_owned());
+    }
 
     /// Builds a real `DOMException` throw from an engine-side error.
     pub fn dom_exception(&self, error: DomException) -> JsThrow {
@@ -744,6 +756,38 @@ impl BindCx<'_> {
             Some(HostData::Performance) => Ok(key),
             _ => Err(JsThrow::Type("receiver is not a Performance".into())),
         }
+    }
+
+    /// Brand-checks the `location` receiver. A Location has no state of its
+    /// own — it *is* the document URL — so the slab key is only a brand token.
+    pub(crate) fn this_location(&self, value: &JsValue) -> Result<u64, JsThrow> {
+        let Some((TAG_SLAB, key)) = self.payload(value) else {
+            return Err(JsThrow::Type("receiver is not a Location".into()));
+        };
+        match self.state.slab.borrow().get(key) {
+            Some(HostData::Location) => Ok(key),
+            _ => Err(JsThrow::Type("receiver is not a Location".into())),
+        }
+    }
+
+    pub(crate) fn new_location(&self) -> Result<JsValue, JsThrow> {
+        self.new_slab_object("Location", HostData::Location)
+    }
+
+    /// Brand-checks the `history` receiver (state lives in
+    /// [`crate::state::PageState::history`]).
+    pub(crate) fn this_history(&self, value: &JsValue) -> Result<u64, JsThrow> {
+        let Some((TAG_SLAB, key)) = self.payload(value) else {
+            return Err(JsThrow::Type("receiver is not a History".into()));
+        };
+        match self.state.slab.borrow().get(key) {
+            Some(HostData::History) => Ok(key),
+            _ => Err(JsThrow::Type("receiver is not a History".into())),
+        }
+    }
+
+    pub(crate) fn new_history(&self) -> Result<JsValue, JsThrow> {
+        self.new_slab_object("History", HostData::History)
     }
 
     pub(crate) fn this_performance_timing(&self, value: &JsValue) -> Result<u64, JsThrow> {
@@ -1557,6 +1601,13 @@ impl BindCx<'_> {
         match call.arg(i) {
             JsValue::Undefined => Ok(default),
             _ => self.arg_u32(call, i),
+        }
+    }
+
+    pub fn arg_i32_or(&self, call: &HostCall, i: usize, default: i32) -> Result<i32, JsThrow> {
+        match call.arg(i) {
+            JsValue::Undefined => Ok(default),
+            _ => self.arg_i32(call, i),
         }
     }
 

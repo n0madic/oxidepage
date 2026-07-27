@@ -344,7 +344,7 @@ fn invalid_navigator_profiles_fail_page_construction() {
 
 #[test]
 fn navigator_identity_survives_same_realm_navigation() {
-    let mut page = load_html_page(
+    let page = load_html_page(
         "<script>globalThis.savedNavigator = navigator;
          globalThis.savedScreen = screen; globalThis.savedPerformance = performance;</script>",
         PageOptions::default(),
@@ -374,7 +374,7 @@ fn navigator_identity_survives_same_realm_navigation() {
 /// navigation, so its payload must keep resolving — to the incoming document.
 #[test]
 fn old_node_ids_go_stale_across_navigation() {
-    let mut page = load_html_page(
+    let page = load_html_page(
         "<!doctype html><html><body><p id=old>old</p>\
          <script>globalThis.saved = document.getElementById('old');\
                  globalThis.savedBody = document.body;\
@@ -816,8 +816,7 @@ fn onreadystatechange_handler_attribute_works() {
 /// script must not see the old document's `complete`.
 #[test]
 fn navigation_resets_ready_state_to_loading() {
-    let mut page =
-        load_html_page("<html><body>first</body></html>", PageOptions::default()).unwrap();
+    let page = load_html_page("<html><body>first</body></html>", PageOptions::default()).unwrap();
     assert_eq!(eval_string(&page, "document.readyState"), "complete");
 
     page.load_html(
@@ -1032,7 +1031,7 @@ fn console_output_is_captured() {
 
 #[test]
 fn document_url_option_is_visible() {
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         url: Some("file:///tmp/index.html".into()),
         ..PageOptions::default()
     })

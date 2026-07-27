@@ -295,19 +295,46 @@ fn form_reset_restores_the_defaults() {
     assert_eq!(eval_str(&page, "document.getElementById('sel').value"), "y");
 }
 
-/// `submit()` is deliberately absent (form navigation does not exist), so
-/// feature detection sees the truth — P6, absent beats fake.
+/// `submit()`/`requestSubmit()` exist since navigation does (ADR-0022,
+/// reversing ADR-0019's deliberate absence). Behavior lives in
+/// `crates/page/tests/navigation.rs`, which has a server to submit to; this
+/// only pins the surface feature detection sees.
 #[test]
-fn form_submit_is_absent_not_a_silent_no_op() {
+fn form_submission_surface_is_present() {
     let page = page();
-    assert!(eval_bool(
-        &page,
-        "document.getElementById('f').submit === undefined"
-    ));
-    assert!(eval_bool(
-        &page,
-        "typeof document.getElementById('f').reset === 'function'"
-    ));
+    for expr in [
+        "typeof document.getElementById('f').submit === 'function'",
+        "typeof document.getElementById('f').requestSubmit === 'function'",
+        "typeof document.getElementById('f').reset === 'function'",
+        "typeof SubmitEvent === 'function'",
+        "'submitter' in SubmitEvent.prototype",
+    ] {
+        assert!(eval_bool(&page, expr), "{expr}");
+    }
+}
+
+/// `requestSubmit` validates its argument before doing anything: a non-submit
+/// button is a `TypeError`, a submit button owned by another form a
+/// `NotFoundError`.
+#[test]
+fn request_submit_validates_the_submitter() {
+    let page = page();
+    page.eval(
+        "window.errs = [];\
+         const f = document.getElementById('f');\
+         const notAButton = document.createElement('div');\
+         try { f.requestSubmit(notAButton); } catch (e) { window.errs.push(e.name); }\
+         const other = document.createElement('form');\
+         const btn = document.createElement('button');\
+         other.appendChild(btn);\
+         document.body.appendChild(other);\
+         try { f.requestSubmit(btn); } catch (e) { window.errs.push(e.name); }",
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&page, "window.errs.join(',')"),
+        "TypeError,NotFoundError"
+    );
 }
 
 // --------------------------------------------------------------- interaction
@@ -316,6 +343,40 @@ fn form_submit_is_absent_not_a_silent_no_op() {
 /// `click`, then `input`, then `change`. The toggle lands *before* the `click`
 /// event propagates (HTML's legacy-pre-activation behavior), so every one of the
 /// three listeners reads the new checkedness.
+#[test]
+fn clicking_a_label_activates_its_control() {
+    let page = page();
+    // `for` names the checkbox; clicking the label's text must toggle it, and
+    // exactly once.
+    page.eval(
+        "window.log = [];\
+         const cb = document.getElementById('cb');\
+         cb.addEventListener('click', () => window.log.push('click:' + cb.checked));\
+         document.getElementById('cblabel').htmlFor = 'cb';\
+         document.getElementById('cblabel').click();",
+    )
+    .unwrap();
+    assert_eq!(eval_str(&page, "window.log.join(',')"), "click:true");
+    assert!(eval_bool(&page, "document.getElementById('cb').checked"));
+
+    // Clicking the control *inside* a label must not toggle twice: the label's
+    // activation behavior does nothing for a click on interactive content.
+    page.eval(
+        "const wrap = document.createElement('label');\
+         const inner = document.createElement('input');\
+         inner.type = 'checkbox';\
+         wrap.appendChild(inner);\
+         document.body.appendChild(wrap);\
+         window.count = 0;\
+         inner.addEventListener('click', () => window.count++);\
+         inner.click();\
+         window.innerChecked = inner.checked;",
+    )
+    .unwrap();
+    assert_eq!(eval_str(&page, "String(window.count)"), "1");
+    assert!(eval_bool(&page, "window.innerChecked"));
+}
+
 #[test]
 fn click_toggles_a_checkbox_and_fires_input_and_change() {
     let page = page();

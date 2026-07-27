@@ -99,7 +99,7 @@ fn resize_observer_callback_mutation_converges() {
 /// never fires against the new tree.
 #[test]
 fn navigation_resets_the_observer_registry() {
-    let mut page = page();
+    let page = page();
     page.eval(
         "window.n = 0;\
          window.ro = new ResizeObserver(() => window.n++);\

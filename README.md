@@ -25,6 +25,10 @@ rasterization.
   `MutationObserver`/`ResizeObserver`/`IntersectionObserver`,
   `requestAnimationFrame`, custom elements, and Shadow DOM — enough to boot
   real single-page apps (Angular, Lit, Stencil, Vue-based sites).
+- **Follow the page where it goes.** Clicking a link, submitting a form, or
+  setting `location.href` navigates for real, with session history
+  (`back`/`forward`/`pushState`) and `popstate`/`hashchange` — so you can
+  script your way through a multi-page flow, not just one document.
 - **Fetch safely.** Networking is SSRF-guarded by default (loopback,
   private, link-local and cloud-metadata addresses are blocked unless you
   opt in), with a real cookie jar, HTTP caching, redirects, and CORS.
@@ -127,7 +131,7 @@ oxidepage-page = { git = "https://github.com/n0madic/oxidepage" }
 use oxidepage_page::{Page, PageOptions, WaitUntil};
 use std::time::Duration;
 
-let mut page = Page::new(PageOptions::default())?;
+let page = Page::new(PageOptions::default())?;
 page.navigate("https://example.com", WaitUntil::Load)?;
 page.settle(Duration::from_secs(5));
 

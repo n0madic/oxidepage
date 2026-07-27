@@ -89,13 +89,14 @@ const URL_SKIP: &[&str] = &["idlharness", "IdnaTestV2", "historical"];
 ///   at `elem.style.transition = …`, which is why their harness flipped
 ///   `OK`→`TIMEOUT`.)
 /// - `javascript-urls`: each subtest clicks an `<a href="javascript:…">` and
-///   awaits the navigation that executes it. `HTMLElement.click()` (ADR-0019)
-///   fires the click event, but an anchor's **activation behavior** — following
-///   the href — does not exist: the engine never navigates from script (the
-///   same reason `form.submit()` is absent). So the promise never settles and
-///   the file waits out the harness budget. This is the animation-events story
-///   again: before `click()` existed the call threw and the file failed *fast*,
-///   which is the only reason it was not a TIMEOUT before.
+///   awaits the navigation that executes it. Anchor activation now exists
+///   (ADR-0022), so the click *does* reach "follow the hyperlink" — but the
+///   `javascript:` scheme does not: evaluating a URL as script is a separate
+///   navigation mode this engine deliberately does not implement, so the
+///   activation warns and stops. The awaited promise therefore still never
+///   settles and the file waits out the harness budget. This is the
+///   animation-events story again: before `click()` existed the call threw and
+///   the file failed *fast*, which is the only reason it was not a TIMEOUT.
 const SKIP_SUBSTRINGS: &[&str] = &[
     "NodeList-static-length-getter-tampered",
     "Event-dispatch-on-disabled-elements",
@@ -704,7 +705,7 @@ fn run_over_test_server(vendor: &Path, rel: &str) -> ExitCode {
     let server = crate::testserver::TestServer::start(vendor.to_path_buf(), REPORT_HOOK.to_owned());
     let url = format!("http://127.0.0.1:{}/{html_rel}", server.port());
 
-    let mut page = match oxidepage_page::Page::new(oxidepage_page::PageOptions {
+    let page = match oxidepage_page::Page::new(oxidepage_page::PageOptions {
         // Loopback test server: keep HTTP(S)-only + budgets, allow 127.0.0.1.
         policy: Some(oxidepage_page::ResourcePolicy::permissive_localhost()),
         ..Default::default()

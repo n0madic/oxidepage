@@ -29,10 +29,11 @@ use oxidepage_net::{Credentials, NetEvent, NetRequest, RequestMode, ResponseType
 use oxidepage_style::Viewport;
 
 pub use cx::BindCx;
-pub use events::{EventTargetKey, dispatch_event, fire_simple_event};
+pub use events::{EventTargetKey, dispatch_event, fire_pop_state, fire_simple_event};
 pub use script::is_classic_script_type;
 pub use state::{
-    ConsoleLevel, HostHooks, NavigatorData, PageState, ReadyState, ScreenData, TimingMilestone,
+    ConsoleLevel, HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState,
+    PendingNavigation, ReadyState, ScreenData, SessionHistory, TimingMilestone,
 };
 
 use netdata::{HeadersData, PendingNet, PendingResponse, ResponseData};
@@ -167,6 +168,7 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), J
         adopted_sheets_proxy: get("adoptedSheetsProxy")?,
         set_to_string_tag: get("setToStringTag")?,
         make_dom_exception: get("makeDomException")?,
+        structured_clone: get("structuredClone")?,
         make_promise: get("makePromise")?,
         resolved_promise: get("resolvedPromise")?,
         record_pairs: get("recordPairs")?,
@@ -235,33 +237,6 @@ fn install_native_helpers(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         Ok(JsValue::Object(
             cx.scope.new_array(&items).map_err(JsThrow::from)?,
         ))
-    })?;
-
-    // `__oxide_setDocumentUrl(url)` → bool. Replaces the document URL in place
-    // (no navigation) when `url` parses and is same-origin as the current
-    // document, backing `history.pushState`/`replaceState`. Returns false on a
-    // cross-origin or unparseable URL so the JS side can throw a SecurityError.
-    define_fn(cx, &global, "__oxide_setDocumentUrl", 1, |cx, call| {
-        let url = cx
-            .scope
-            .coerce_string(&call.arg(0))
-            .map_err(JsThrow::from)?;
-        let current = cx.state.dom.borrow().document_url().to_owned();
-        // Compare the (scheme, host, port) tuple rather than `origin()`: `file:`
-        // and other non-special-scheme URLs get a fresh opaque origin per parse,
-        // which would spuriously fail same-origin for local test documents.
-        let same_origin = match (url::Url::parse(&url), url::Url::parse(&current)) {
-            (Ok(next), Ok(cur)) => {
-                next.scheme() == cur.scheme()
-                    && next.host_str() == cur.host_str()
-                    && next.port_or_known_default() == cur.port_or_known_default()
-            }
-            _ => false,
-        };
-        if same_origin {
-            cx.state.dom.borrow_mut().set_document_url(url);
-        }
-        Ok(JsValue::Bool(same_origin))
     })?;
 
     Ok(())
@@ -1154,103 +1129,24 @@ fn define_fn(
         .map_err(JsThrow::from)
 }
 
-/// The document URL as a string, for `href`/`toString`. `Location` is the
-/// document URL by definition — a `<base href>` never moves it.
-fn location_href(cx: &BindCx<'_>) -> String {
-    cx.state.dom.borrow().document_url().to_owned()
-}
-
-/// Reads one URL-decomposition attribute off the document URL. Document URLs
-/// that do not parse (`about:blank` predecessors, opaque strings) yield the
-/// empty string, matching a browser's opaque-origin Location.
-fn location_part(cx: &BindCx<'_>, part: fn(&url::Url) -> String) -> Result<JsValue, JsThrow> {
-    let href = location_href(cx);
-    let value = url::Url::parse(&href)
-        .map(|url| part(&url))
-        .unwrap_or_default();
-    Ok(JsValue::String(value))
-}
-
-fn define_location_getter(
-    cx: &BindCx<'_>,
-    location: &oxidepage_js::JsObject,
-    name: &str,
-    getter: cx::NativeFn,
-) -> Result<(), JsThrow> {
-    let func = cx
-        .scope
-        .new_function(&format!("get {name}"), 0, cx::native(getter))
-        .map_err(JsThrow::from)?;
-    cx.scope
-        .define_property(
-            location,
-            name,
-            PropertyDef::Accessor {
-                getter: Some(&JsValue::Object(func)),
-                setter: None,
-                enumerable: true,
-                configurable: true,
-            },
-        )
-        .map_err(JsThrow::from)
-}
-
-/// Installs `window.location` (and the `Document.location` alias).
+/// Installs `window.location` / `window.history`, and the `Document.location`
+/// alias.
 ///
-/// The full URL-decomposition surface matters beyond convenience: library code
-/// walks `window.parent` until it finds a frame with a non-empty
-/// `location.hostname`, so a Location without `hostname` spins forever on the
-/// top-level window.
+/// Both are real IDL interfaces (`imp::location`, `imp::history`); what is left
+/// here is realm plumbing — minting the one wrapper each (the `navigator_js`
+/// pattern, so object identity survives navigation) and defining the window
+/// properties as **accessors**.
+///
+/// `location` needs its setter because `window.location = "/x"` is a common
+/// idiom and means `location.assign("/x")`, not "replace the Location object".
 fn install_location(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<(), JsThrow> {
-    let location = cx.scope.new_object().map_err(JsThrow::from)?;
+    let location = cx.new_location()?;
+    *cx.state.location_js.borrow_mut() = Some(location);
+    cx.define_accessor(global, "location", window_location, window_set_location)?;
 
-    define_location_getter(cx, &location, "href", |cx, _call| {
-        Ok(JsValue::String(location_href(cx)))
-    })?;
-    define_location_getter(cx, &location, "origin", |cx, _call| {
-        location_part(cx, |url| url.origin().ascii_serialization())
-    })?;
-    define_location_getter(cx, &location, "protocol", |cx, _call| {
-        location_part(cx, |url| format!("{}:", url.scheme()))
-    })?;
-    define_location_getter(cx, &location, "host", |cx, _call| {
-        location_part(cx, |url| match (url.host_str(), url.port()) {
-            (Some(host), Some(port)) => format!("{host}:{port}"),
-            (Some(host), None) => host.to_owned(),
-            (None, _) => String::new(),
-        })
-    })?;
-    define_location_getter(cx, &location, "hostname", |cx, _call| {
-        location_part(cx, |url| url.host_str().unwrap_or_default().to_owned())
-    })?;
-    define_location_getter(cx, &location, "port", |cx, _call| {
-        location_part(cx, |url| {
-            url.port().map(|port| port.to_string()).unwrap_or_default()
-        })
-    })?;
-    define_location_getter(cx, &location, "pathname", |cx, _call| {
-        location_part(cx, |url| url.path().to_owned())
-    })?;
-    define_location_getter(cx, &location, "search", |cx, _call| {
-        location_part(cx, |url| match url.query() {
-            Some(query) if !query.is_empty() => format!("?{query}"),
-            _ => String::new(),
-        })
-    })?;
-    define_location_getter(cx, &location, "hash", |cx, _call| {
-        location_part(cx, |url| match url.fragment() {
-            Some(fragment) if !fragment.is_empty() => format!("#{fragment}"),
-            _ => String::new(),
-        })
-    })?;
-
-    define_fn(cx, &location, "toString", 0, |cx, _call| {
-        Ok(JsValue::String(location_href(cx)))
-    })?;
-
-    cx.scope
-        .set(global, "location", &JsValue::Object(location))
-        .map_err(JsThrow::from)?;
+    let history = cx.new_history()?;
+    *cx.state.history_js.borrow_mut() = Some(history);
+    cx.define_getter(global, "history", window_history)?;
 
     // `document.location` returns the same Location object as `window.location`
     // — but only for the document that *has* a browsing context. A document from
@@ -1266,17 +1162,34 @@ fn install_location(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<
             if this != cx.state.dom.borrow().document() {
                 return Ok(JsValue::Null);
             }
-            let global = {
-                let js = cx.state.js.borrow();
-                js.as_ref()
-                    .ok_or_else(|| JsThrow::Type("bootstrap not installed".into()))?
-                    .global
-                    .clone()
-            };
-            cx.scope.get(&global, "location").map_err(JsThrow::from)
+            window_location(cx, call)
         })?;
     }
     Ok(())
+}
+
+fn window_location(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.state
+        .location_js
+        .borrow()
+        .clone()
+        .ok_or_else(|| JsThrow::Type("Location is not installed".into()))
+}
+
+/// `window.location = "/x"` — HTML's `[PutForwards=href]`, i.e. an
+/// `assign()`, not a rebinding of the property.
+fn window_set_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let url = cx.arg_dom_string(call, 0)?;
+    imp::location::assign(cx, 0, url)?;
+    Ok(JsValue::Undefined)
+}
+
+fn window_history(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.state
+        .history_js
+        .borrow()
+        .clone()
+        .ok_or_else(|| JsThrow::Type("History is not installed".into()))
 }
 
 fn console_write(

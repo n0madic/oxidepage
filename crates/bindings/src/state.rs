@@ -144,6 +144,191 @@ pub(crate) enum HostData {
         element: oxidepage_base::NodeId,
         attr: oxidepage_dom::LocalName,
     },
+    /// `window.location`: a brand with no state of its own — a Location *is*
+    /// the document URL, which lives in the DOM tree.
+    Location,
+    /// `window.history`: a brand; the entry list lives in
+    /// [`PageState::history`].
+    History,
+}
+
+/// A navigation script has asked for but the page has not yet performed.
+///
+/// Navigation cannot happen inline: a `location.href` write runs under live
+/// `RefCell` borrows on the DOM, style and layout engines, and committing a
+/// document replaces all three. So it is a task source, drained by the page's
+/// event loop exactly like [`PageState::pending_scroll_targets`].
+pub enum PendingNavigation {
+    /// A load of `url`, which is already absolute. `replace` overwrites the
+    /// current session-history entry instead of pushing a new one.
+    Load {
+        url: String,
+        replace: bool,
+        body: Option<NavigationBody>,
+        /// `location.reload()`: skip the HTTP cache.
+        reload: bool,
+    },
+    /// `history.go(delta)`. The entry list lives here in the bindings, but a
+    /// traversal may need a document load, so the page performs the move.
+    Traverse { delta: i32 },
+}
+
+/// The request body of a form submission that navigates.
+pub struct NavigationBody {
+    pub method: String,
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+}
+
+/// One session-history entry.
+pub struct HistoryEntry {
+    pub url: String,
+    /// The `history.state` for this entry (a structured clone taken at
+    /// `pushState`/`replaceState` time).
+    pub state: JsValue,
+    /// Which loaded document this entry belongs to. Traversing to an entry
+    /// whose sequence differs from the current one needs a document load.
+    pub document_seq: u64,
+}
+
+/// The session history of the page's one browsing context.
+///
+/// Bounded on purpose: an entry holds a live `JsValue` state across
+/// navigations, so an unbounded list is an unbounded JS retention.
+pub struct SessionHistory {
+    entries: Vec<HistoryEntry>,
+    index: usize,
+    /// Bumped on every cross-document commit; stamped onto the entry that
+    /// commit produces. This is what makes "is the target entry in the
+    /// document I am looking at?" a single integer comparison.
+    document_seq: u64,
+    /// `history.scrollRestoration`. Stored and reflected, nothing more —
+    /// there is no bfcache to restore a scroll position from.
+    scroll_restoration: String,
+}
+
+/// The longest session history the page keeps. Older entries fall off the
+/// front (the index moves with them), which is what a browser's own cap does.
+pub const MAX_HISTORY_ENTRIES: usize = 50;
+
+impl SessionHistory {
+    fn new(url: String) -> Self {
+        Self {
+            entries: vec![HistoryEntry {
+                url,
+                state: JsValue::Null,
+                document_seq: 0,
+            }],
+            index: 0,
+            document_seq: 0,
+            scroll_restoration: "auto".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    #[must_use]
+    pub fn document_seq(&self) -> u64 {
+        self.document_seq
+    }
+
+    #[must_use]
+    pub fn current(&self) -> Option<&HistoryEntry> {
+        self.entries.get(self.index)
+    }
+
+    #[must_use]
+    pub fn entry(&self, index: usize) -> Option<&HistoryEntry> {
+        self.entries.get(index)
+    }
+
+    #[must_use]
+    pub fn scroll_restoration(&self) -> &str {
+        &self.scroll_restoration
+    }
+
+    pub fn set_scroll_restoration(&mut self, value: &str) {
+        if value == "auto" || value == "manual" {
+            self.scroll_restoration = value.to_owned();
+        }
+    }
+
+    /// The index `delta` steps away, or `None` when that is out of range (the
+    /// spec's "if there is no such entry, then return" — a silent no-op).
+    #[must_use]
+    pub fn target_of(&self, delta: i32) -> Option<usize> {
+        let target = i64::try_from(self.index).ok()? + i64::from(delta);
+        let target = usize::try_from(target).ok()?;
+        (target < self.entries.len()).then_some(target)
+    }
+
+    /// Moves the current index without loading anything (a same-document
+    /// traversal). Returns the entry's state for `popstate`.
+    pub fn set_index(&mut self, index: usize) {
+        if index < self.entries.len() {
+            self.index = index;
+        }
+    }
+
+    /// Pushes a new entry after truncating everything forward of the current
+    /// one, and returns the new index.
+    pub fn push(&mut self, url: String, state: JsValue, document_seq: u64) {
+        self.entries.truncate(self.index + 1);
+        self.entries.push(HistoryEntry {
+            url,
+            state,
+            document_seq,
+        });
+        self.index = self.entries.len() - 1;
+        self.trim();
+    }
+
+    /// Overwrites the current entry (`replaceState`, `location.replace()`).
+    pub fn replace(&mut self, url: String, state: JsValue, document_seq: u64) {
+        if let Some(entry) = self.entries.get_mut(self.index) {
+            entry.url = url;
+            entry.state = state;
+            entry.document_seq = document_seq;
+        }
+    }
+
+    /// Re-stamps an entry with the document a traversal just loaded for it (and
+    /// the URL that load ended on, which a redirect may have moved), so a second
+    /// traversal back to it is same-document. The entry's state is preserved —
+    /// that is what distinguishes this from [`SessionHistory::replace`].
+    pub fn restamp(&mut self, index: usize, url: String, document_seq: u64) {
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.url = url;
+            entry.document_seq = document_seq;
+        }
+    }
+
+    /// Allocates the next document sequence number (one cross-document commit).
+    pub fn next_document_seq(&mut self) -> u64 {
+        self.document_seq += 1;
+        self.document_seq
+    }
+
+    fn trim(&mut self) {
+        if self.entries.len() > MAX_HISTORY_ENTRIES {
+            let drop = self.entries.len() - MAX_HISTORY_ENTRIES;
+            self.entries.drain(..drop);
+            self.index = self.index.saturating_sub(drop);
+        }
+    }
 }
 
 /// Immutable identity and capability values behind one realm's Navigator.
@@ -375,6 +560,9 @@ pub(crate) struct JsRefs {
     pub adopted_sheets_proxy: JsValue,
     pub set_to_string_tag: JsValue,
     pub make_dom_exception: JsValue,
+    /// Pristine `structuredClone` (page script may replace the global one),
+    /// used to clone `history.pushState`/`replaceState` state values.
+    pub structured_clone: JsValue,
     /// `() => {promise, resolve, reject}` (deferred-promise construction).
     pub make_promise: JsValue,
     /// `(value) => Promise.resolve(value)`.
@@ -580,6 +768,25 @@ pub struct PageState {
     /// viewport); the page's event loop drains this and dispatches `scroll`
     /// events as tasks.
     pub(crate) pending_scroll_targets: RefCell<Vec<Option<oxidepage_base::NodeId>>>,
+    /// The navigation script has asked for and the page has not yet performed.
+    ///
+    /// **Last write wins**: `location.href = a; location.href = b` in one task
+    /// navigates once, to `b` — the same collapsing a browser does when several
+    /// navigations are queued before the event loop next spins.
+    pub(crate) pending_navigation: RefCell<Option<PendingNavigation>>,
+    /// The session history of this browsing context, shared by
+    /// `history.pushState`/`go()` and the page's navigation driver.
+    pub(crate) history: RefCell<SessionHistory>,
+    /// `document.referrer`: the URL of the document this one was navigated
+    /// from, written by the page at commit time.
+    pub(crate) referrer: RefCell<String>,
+    /// Realm-stable `location` / `history` wrappers (the `navigator_js`
+    /// pattern: one object per realm, surviving navigation).
+    pub(crate) location_js: RefCell<Option<JsValue>>,
+    pub(crate) history_js: RefCell<Option<JsValue>>,
+    /// Set while a form submission is running, so an `onsubmit` handler calling
+    /// `form.submit()` cannot recurse into the same submission forever.
+    pub(crate) submitting: Cell<bool>,
     /// While the parser holds handles into the tree, detached subtrees must
     /// not be freed under it.
     pub(crate) parsing: Cell<bool>,
@@ -715,6 +922,7 @@ impl PageState {
         // `ex`/`ch`/`ic` units resolve against actual fonts (WP-H).
         style_engine.set_font_metrics_provider(layout.borrow().font_metrics_factory());
         let style = Rc::new(RefCell::new(style_engine));
+        let initial_url = dom.borrow().document_url().to_owned();
         let start = std::time::Instant::now();
         let time_origin_epoch_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -737,6 +945,12 @@ impl PageState {
             hooks,
             pending_net: RefCell::new(HashMap::new()),
             pending_scroll_targets: RefCell::new(Vec::new()),
+            pending_navigation: RefCell::new(None),
+            history: RefCell::new(SessionHistory::new(initial_url)),
+            referrer: RefCell::new(String::new()),
+            location_js: RefCell::new(None),
+            history_js: RefCell::new(None),
+            submitting: Cell::new(false),
             parsing: Cell::new(false),
             ready_state: Cell::new(ReadyState::default()),
             parser_script_active: Cell::new(false),
@@ -777,6 +991,12 @@ impl PageState {
     /// Marks the parser as owning handles into the tree (suspends freeing).
     pub fn set_parsing(&self, parsing: bool) {
         self.parsing.set(parsing);
+    }
+
+    /// True while the parser holds handles into the tree.
+    #[must_use]
+    pub fn parsing(&self) -> bool {
+        self.parsing.get()
     }
 
     /// See [`PageState::whole_document_visible`]. Set by the embedder before
@@ -920,6 +1140,11 @@ impl PageState {
         self.pending_parser_write.borrow_mut().clear();
         self.parser_write_calls.set(0);
         self.parser_write_bytes.set(0);
+        // `pending_navigation` is deliberately *not* cleared. The commit path
+        // takes the request before it starts loading, so nothing stale is left
+        // here for the incoming document — and a navigation the outgoing
+        // document's unload-time script queued must survive into the next turn
+        // of the loop rather than be dropped by the load it is chained off.
         aborted
     }
 
@@ -928,6 +1153,48 @@ impl PageState {
     #[must_use]
     pub fn take_pending_scroll_targets(&self) -> Vec<Option<oxidepage_base::NodeId>> {
         std::mem::take(&mut self.pending_scroll_targets.borrow_mut())
+    }
+
+    /// Queues a viewport `scroll` event for the page's event loop — the same
+    /// path a script scroll takes, so a fragment scroll has no event path of
+    /// its own.
+    pub fn queue_viewport_scroll_event(&self) {
+        self.pending_scroll_targets.borrow_mut().push(None);
+    }
+
+    /// Queues a navigation for the page's event loop, superseding any request
+    /// queued earlier in this task (see [`PageState::pending_navigation`]).
+    pub fn request_navigation(&self, navigation: PendingNavigation) {
+        *self.pending_navigation.borrow_mut() = Some(navigation);
+    }
+
+    /// Takes the queued navigation, if any.
+    #[must_use]
+    pub fn take_pending_navigation(&self) -> Option<PendingNavigation> {
+        self.pending_navigation.borrow_mut().take()
+    }
+
+    /// True when script has queued a navigation the page has not run yet.
+    #[must_use]
+    pub fn has_pending_navigation(&self) -> bool {
+        self.pending_navigation.borrow().is_some()
+    }
+
+    /// The session history, for the page's navigation driver.
+    #[must_use]
+    pub fn history(&self) -> std::cell::RefMut<'_, SessionHistory> {
+        self.history.borrow_mut()
+    }
+
+    /// `document.referrer` — the URL the current document was navigated from.
+    #[must_use]
+    pub fn referrer(&self) -> String {
+        self.referrer.borrow().clone()
+    }
+
+    /// Sets `document.referrer` (the page, at commit time).
+    pub fn set_referrer(&self, referrer: String) {
+        *self.referrer.borrow_mut() = referrer;
     }
 }
 

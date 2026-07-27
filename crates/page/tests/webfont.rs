@@ -204,7 +204,7 @@ fn font_src_that_404s_falls_through_to_the_next() {
         .to_owned();
     let port = spawn_server(html);
 
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         ..PageOptions::default()
     })
@@ -245,7 +245,7 @@ fn font_metrics_resolve_against_the_new_document_after_navigation() {
     );
     let port = spawn_server(html);
 
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         ..PageOptions::default()
     })
@@ -288,7 +288,7 @@ fn an_http_font_load_recascades_metric_dependent_values() {
         .to_owned();
     let port = spawn_server(html);
 
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         ..PageOptions::default()
     })
@@ -417,7 +417,7 @@ fn document_fonts_status_and_ready_track_an_in_flight_http_font_load() {
         .to_owned();
     let port = spawn_server(html);
 
-    let mut page = Page::new(PageOptions {
+    let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
         ..PageOptions::default()
     })

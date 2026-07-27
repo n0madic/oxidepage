@@ -166,7 +166,11 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         "CDATASection" => "this_cdata_section",
         "Comment" => "this_comment",
         "ProcessingInstruction" => "this_processing_instruction",
-        "Event" | "CustomEvent" => "this_event",
+        "Event" | "CustomEvent" | "PopStateEvent" | "SubmitEvent" => "this_event",
+        // Brands with no state of their own: a Location *is* the document URL,
+        // and the session history lives in `PageState::history`.
+        "Location" => "this_location",
+        "History" => "this_history",
         "NodeList" => "this_node_list",
         "HTMLCollection" => "this_html_collection",
         "NamedNodeMap" => "this_named_node_map",
@@ -1057,7 +1061,10 @@ fn emit_args(
             (ArgKind::DomString { nullable: false }, false, _) => {
                 format!("cx.arg_dom_string(call, {i})?")
             }
-            (ArgKind::DomString { nullable: true }, false, _) => {
+            // `USVString?` and `optional USVString? = null` read the same: a
+            // missing argument is `undefined`, which `arg_nullable_dom_string`
+            // maps to `None` exactly as it maps an explicit `null`.
+            (ArgKind::DomString { nullable: true }, false | true, ArgDefault::None) => {
                 format!("cx.arg_nullable_dom_string(call, {i})?")
             }
             (ArgKind::DomString { nullable: false }, true, ArgDefault::Str(s)) => {
@@ -1075,6 +1082,14 @@ fn emit_args(
             (ArgKind::U32, false, _) => format!("cx.arg_u32(call, {i})?"),
             (ArgKind::I32, false, _) => format!("cx.arg_i32(call, {i})?"),
             (ArgKind::U32, true, ArgDefault::U32(n)) => format!("cx.arg_u32_or(call, {i}, {n})?"),
+            // A negative default would not survive `ArgDefault::U32`; the only
+            // signed default in the IDL is `optional long delta = 0`.
+            (ArgKind::I32, true, ArgDefault::U32(n)) => {
+                let n = i32::try_from(*n).map_err(|_| {
+                    CodegenError(format!("{context}: long default out of i32 range"))
+                })?;
+                format!("cx.arg_i32_or(call, {i}, {n})?")
+            }
             (ArgKind::Double, false, _) => format!("cx.arg_f64(call, {i})?"),
             (ArgKind::Double, true, ArgDefault::U32(n)) => {
                 format!("cx.arg_f64_or(call, {i}, {n}f64)?")

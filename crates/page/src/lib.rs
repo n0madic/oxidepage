@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Receiver;
 use oxidepage_base::{NodeId, Rect, RequestId};
 use oxidepage_bindings::{
-    BindCx, ConsoleLevel, EventTargetKey, HostHooks, PageState, TimingMilestone,
-    is_classic_script_type,
+    BindCx, ConsoleLevel, EventTargetKey, HostHooks, NavigationBody, PageState, PendingNavigation,
+    TimingMilestone, is_classic_script_type,
 };
 use oxidepage_dom::{DomTree, ParseOptions, ParseSignal, Parser, StyleUpdate};
 use oxidepage_js::{
@@ -67,6 +67,39 @@ const MIN_NESTED_TIMER_DELAY: Duration = Duration::from_millis(4);
 /// that never existed or already fired.
 const CANCELLED_SET_PRUNE_CAP: usize = 1024;
 
+/// Consecutive navigations chained off one entry point before the page gives
+/// up. `location.href = location.href` in a `load` handler is an infinite loop
+/// in a browser too — the difference is that a browser has a user who can close
+/// the tab, and a headless engine has a caller waiting for a return.
+const MAX_CHAINED_NAVIGATIONS: usize = 20;
+
+/// Where a commit puts its session-history entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HistoryTarget {
+    /// Truncate forward entries and append (`location.assign`, a link click).
+    Push,
+    /// Overwrite the current entry (`location.replace`, `reload`).
+    Replace,
+    /// A traversal: move the index to an entry that already exists.
+    Traverse(usize),
+}
+
+/// The fragment of a URL, `None` when it has none or does not parse. Comparing
+/// these is what decides whether `hashchange` fires.
+fn fragment_of(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.fragment().map(ToOwned::to_owned))
+}
+
+/// Percent-decodes a URL fragment as UTF-8, leaving invalid sequences as-is —
+/// an `id` is matched against the decoded form (`#a%20b` finds `id="a b"`).
+fn percent_decode(value: &str) -> String {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .map_or_else(|_| value.to_owned(), |s| s.into_owned())
+}
+
 /// Converts a script-supplied `delay_ms` into a scheduler `Duration`.
 ///
 /// The HTML timeout is a signed 32-bit integer, so non-finite or out-of-range
@@ -91,6 +124,42 @@ fn clamp_timer_delay(delay_ms: f64, nesting: u32) -> Duration {
 pub struct ConsoleMessage {
     pub level: ConsoleLevel,
     pub message: String,
+}
+
+/// A milestone in the life of one navigation.
+///
+/// The stream is the engine's own record of "what happened to this page", and
+/// deliberately shaped like the protocol surface that will consume it: a CDP
+/// layer renames `Committed` to `Page.frameNavigated` and the rest to
+/// `Page.lifecycleEvent` without inventing anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NavigationEventKind {
+    /// A navigation began (before the request is made).
+    Started,
+    /// It resolved to a same-document navigation: no request, no new document.
+    SameDocument,
+    /// The response arrived and the new document replaced the old one.
+    Committed,
+    DomContentLoaded,
+    Load,
+    /// [`Page::settle`] returned having reached idle: no timer, no pending
+    /// animation frame, nothing in flight.
+    NetworkIdle,
+    /// The navigation did not happen. `error` says why; the previous document
+    /// is still the current one.
+    Failed,
+}
+
+/// One entry in the navigation event stream (see [`Page::drain_navigation_events`]).
+#[derive(Clone, Debug)]
+pub struct NavigationEvent {
+    pub kind: NavigationEventKind,
+    /// The URL the event is about — the target for `Started`/`Failed`, the
+    /// committed document URL afterwards.
+    pub url: String,
+    pub error: Option<String>,
+    /// Unix-epoch milliseconds, from the page's monotonic time origin.
+    pub timestamp: f64,
 }
 
 /// How far a [`Page::navigate`] waits before returning.
@@ -846,14 +915,29 @@ pub struct Page {
     /// [`Page::rasterize_inline_svgs`].
     last_inline_svg_scan: Cell<(u64, u64)>,
     deferred: RefCell<Vec<Deferred>>,
-    load_fired: bool,
+    /// `Cell`, not `bool`, so `load_document` can take `&self` — which is what
+    /// lets the event loop drive a navigation (ADR-0022).
+    load_fired: Cell<bool>,
+    /// Set for the whole of a document load or a chain of navigations.
+    ///
+    /// This is the single thing standing between a nested `load_document` and a
+    /// `BorrowMutError`: `load_document` runs the event loop internally (script
+    /// tasks, subresource waits), and a script that navigates from there would
+    /// otherwise re-enter `load_document` *under* the borrows the outer one
+    /// holds. Guarded, the request simply stays queued until the outer
+    /// `run_navigation` loop picks it up.
+    navigating: Cell<bool>,
+    /// The navigation milestone stream, drained by
+    /// [`Page::drain_navigation_events`].
+    navigation_events: RefCell<Vec<NavigationEvent>>,
     /// Current viewport, retained so a navigation can rebuild the style/layout
     /// engines for the fresh document.
     viewport: Cell<Viewport>,
     /// Cached display list + paint stamp (Phase 6, ADR-0007 D6).
     render: render::RenderState,
     /// Page start, used as the `requestAnimationFrame` timestamp origin.
-    start_time: Instant,
+    /// A `Cell` for the same reason as [`Page::load_fired`].
+    start_time: Cell<Instant>,
     /// Earliest time the next rendering opportunity may run (16 ms cadence).
     next_render_at: Cell<Instant>,
     /// Per-task wall-clock budget enforced through the realm's interrupt.
@@ -965,10 +1049,12 @@ impl Page {
             last_bg_scan: Cell::new((u64::MAX, u64::MAX)),
             last_inline_svg_scan: Cell::new((u64::MAX, u64::MAX)),
             deferred: RefCell::new(Vec::new()),
-            load_fired: false,
+            load_fired: Cell::new(false),
+            navigating: Cell::new(false),
+            navigation_events: RefCell::new(Vec::new()),
             viewport: Cell::new(viewport),
             render: render::RenderState::default(),
-            start_time: Instant::now(),
+            start_time: Cell::new(Instant::now()),
             next_render_at: Cell::new(Instant::now()),
             script_budget,
         })
@@ -978,22 +1064,257 @@ impl Page {
     /// URL is whatever was configured). Scripts run per the Phase 3 timing
     /// rules; external references resolve against the document URL and load
     /// over the net stack.
-    pub fn load_html(&mut self, html: &str) -> Result<(), JsError> {
-        self.load_document(html, WaitUntil::Load)
+    ///
+    /// A script in the loaded document may navigate; that navigation is chained
+    /// off this call, exactly as it would be off a `navigate`.
+    pub fn load_html(&self, html: &str) -> Result<(), JsError> {
+        let url = self.state.dom.borrow().document_url().to_owned();
+        self.commit_history(url, HistoryTarget::Replace);
+        self.load_document(html, WaitUntil::Load)?;
+        self.run_chained_navigations(WaitUntil::Load);
+        Ok(())
     }
 
     /// Navigates to `url`: fetches the document over the net stack (SSRF- and
     /// policy-checked), decodes it, and loads it. The document URL becomes
     /// the final (post-redirect) URL.
-    pub fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<(), JsError> {
-        let outcome = self
-            .net
-            .fetch_blocking(NetRequest::navigation(url))
-            .map_err(|e| JsError::Engine(e.to_string()))?;
+    ///
+    /// A network or policy failure is an `Err` here — an embedder asked for
+    /// this URL and needs to hear that it did not load. A *script*-initiated
+    /// navigation that fails keeps the current document instead, which is what
+    /// browsers do; see [`Page::run_navigation`].
+    pub fn navigate(&self, url: &str, wait_until: WaitUntil) -> Result<(), JsError> {
+        let url = self.resolve_against_document(url);
+        self.run_navigation(
+            PendingNavigation::Load {
+                url,
+                replace: false,
+                body: None,
+                reload: false,
+            },
+            wait_until,
+            /* embedder */ true,
+        )
+    }
+
+    /// Drains the navigation milestone stream (see [`NavigationEvent`]).
+    #[must_use]
+    pub fn drain_navigation_events(&self) -> Vec<NavigationEvent> {
+        std::mem::take(&mut self.navigation_events.borrow_mut())
+    }
+
+    fn record_navigation(&self, kind: NavigationEventKind, url: &str, error: Option<String>) {
+        self.navigation_events.borrow_mut().push(NavigationEvent {
+            kind,
+            url: url.to_owned(),
+            error,
+            timestamp: self.state.epoch_now_ms(),
+        });
+    }
+
+    /// Resolves a possibly-relative URL against the current document URL.
+    fn resolve_against_document(&self, url: &str) -> String {
+        let base = self.state.dom.borrow().document_url().to_owned();
+        url::Url::parse(&base)
+            .and_then(|base| base.join(url))
+            .map_or_else(|_| url.to_owned(), |u| u.to_string())
+    }
+
+    // === Navigation (ADR-0022) ===
+
+    /// Performs `first`, then any navigation it chained off itself, up to
+    /// [`MAX_CHAINED_NAVIGATIONS`].
+    ///
+    /// `navigating` is held for the whole chain: `load_document` runs the event
+    /// loop internally, and the loop's own navigation drain must stay out of the
+    /// way until this returns.
+    fn run_navigation(
+        &self,
+        first: PendingNavigation,
+        wait_until: WaitUntil,
+        embedder: bool,
+    ) -> Result<(), JsError> {
+        let was_navigating = self.navigating.replace(true);
+        let result = self.run_navigation_chain(first, wait_until, embedder);
+        self.navigating.set(was_navigating);
+        result
+    }
+
+    fn run_navigation_chain(
+        &self,
+        first: PendingNavigation,
+        wait_until: WaitUntil,
+        embedder: bool,
+    ) -> Result<(), JsError> {
+        let mut pending = Some(first);
+        let mut performed = 0usize;
+        while let Some(navigation) = pending.take() {
+            performed += 1;
+            if performed > MAX_CHAINED_NAVIGATIONS {
+                let url = self.state.dom.borrow().document_url().to_owned();
+                let message = format!(
+                    "navigation: more than {MAX_CHAINED_NAVIGATIONS} consecutive \
+                     script-driven navigations; the chain was stopped"
+                );
+                self.hooks
+                    .console_message(ConsoleLevel::Error, message.clone());
+                self.record_navigation(NavigationEventKind::Failed, &url, Some(message));
+                return Ok(());
+            }
+            match navigation {
+                PendingNavigation::Load {
+                    url,
+                    replace,
+                    body,
+                    reload,
+                } => {
+                    let target = if replace {
+                        HistoryTarget::Replace
+                    } else {
+                        HistoryTarget::Push
+                    };
+                    // A fragment-only change, a form POST and a reload are three
+                    // different things and only the first stays in the document.
+                    if body.is_none() && !reload && self.is_same_document(&url) {
+                        self.commit_same_document(&url, target, None);
+                    } else {
+                        self.commit_document(&url, target, body, reload, wait_until, embedder)?;
+                    }
+                }
+                PendingNavigation::Traverse { delta } => {
+                    self.commit_traversal(delta, wait_until, embedder)?;
+                }
+            }
+            pending = self.state.take_pending_navigation();
+        }
+        Ok(())
+    }
+
+    /// Performs whatever navigation script has queued, if any. The entry point
+    /// for callers that are not themselves a navigation (`load_html`).
+    fn run_chained_navigations(&self, wait_until: WaitUntil) {
+        if let Some(navigation) = self.state.take_pending_navigation() {
+            // A script-initiated navigation never propagates its failure: the
+            // page stays on the document it has.
+            let _ = self.run_navigation(navigation, wait_until, /* embedder */ false);
+        }
+    }
+
+    /// HTML's fragment-navigation test: `url` differs from the current document
+    /// URL only in its fragment, **and** has a fragment.
+    ///
+    /// The second half is not a detail. `location.href = "page.html"` from
+    /// `page.html#x` has no fragment, and HTML makes that a real (re-)load, not
+    /// a silent fragment removal.
+    fn is_same_document(&self, url: &str) -> bool {
+        let current = self.state.dom.borrow().document_url().to_owned();
+        let (Ok(target), Ok(mut current)) = (url::Url::parse(url), url::Url::parse(&current))
+        else {
+            return false;
+        };
+        if target.fragment().is_none() {
+            return false;
+        }
+        let mut target = target;
+        target.set_fragment(None);
+        current.set_fragment(None);
+        target == current
+    }
+
+    /// A same-document navigation: the URL moves, the document does not.
+    ///
+    /// `popstate` carries the state of the entry a traversal landed on;
+    /// `hashchange` fires whenever the fragment actually changed. Both are
+    /// dispatched after the scroll, per HTML's "apply the history step".
+    fn commit_same_document(&self, url: &str, target: HistoryTarget, popstate: Option<JsValue>) {
+        let previous = self.state.dom.borrow().document_url().to_owned();
+        self.state.dom.borrow_mut().set_document_url(url.to_owned());
+        {
+            let mut history = self.state.history();
+            let seq = history.document_seq();
+            match target {
+                HistoryTarget::Push => history.push(url.to_owned(), JsValue::Null, seq),
+                HistoryTarget::Replace => history.replace(url.to_owned(), JsValue::Null, seq),
+                HistoryTarget::Traverse(index) => history.set_index(index),
+            }
+        }
+        self.record_navigation(NavigationEventKind::SameDocument, url, None);
+        self.scroll_to_fragment(url);
+
+        if let Some(state) = popstate {
+            self.with_cx(|cx| {
+                if let Err(e) = oxidepage_bindings::fire_pop_state(cx, state) {
+                    report_throw(&self.hooks, e);
+                }
+            });
+        }
+        if fragment_of(&previous) != fragment_of(url) {
+            // `hashchange` is a plain `Event`: `HashChangeEvent` is not
+            // implemented, so `e.oldURL` is honestly `undefined` (P6) rather
+            // than a value we would have to invent.
+            self.with_cx(|cx| {
+                if let Err(e) = oxidepage_bindings::fire_simple_event(
+                    cx,
+                    EventTargetKey::Window,
+                    "hashchange",
+                    false,
+                ) {
+                    report_throw(&self.hooks, e);
+                }
+            });
+        }
+    }
+
+    /// A cross-document navigation: fetch, decode, and replace the document.
+    fn commit_document(
+        &self,
+        url: &str,
+        target: HistoryTarget,
+        body: Option<NavigationBody>,
+        reload: bool,
+        wait_until: WaitUntil,
+        embedder: bool,
+    ) -> Result<(), JsError> {
+        self.record_navigation(NavigationEventKind::Started, url, None);
+        // The referrer of the new document is the URL of the one it left. An
+        // embedder-driven navigation has no predecessor, so it sends none.
+        let referrer = (!embedder).then(|| self.state.dom.borrow().document_url().to_owned());
+        let request = match body {
+            Some(body) => NetRequest::form_navigation(
+                url.to_owned(),
+                body.bytes,
+                body.content_type,
+                referrer.clone(),
+            ),
+            None => NetRequest::navigation_with(url.to_owned(), referrer.clone(), reload),
+        };
+        let outcome = match self.net.fetch_blocking(request) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let message = error.to_string();
+                self.record_navigation(NavigationEventKind::Failed, url, Some(message.clone()));
+                if embedder {
+                    return Err(JsError::Engine(message));
+                }
+                // A failed script-initiated navigation keeps the current
+                // document — the page is not blanked, it simply did not move.
+                self.hooks.console_message(
+                    ConsoleLevel::Error,
+                    format!("navigation to `{url}` failed: {message}"),
+                );
+                return Ok(());
+            }
+        };
+
+        let final_url = outcome.head.final_url.clone();
+        self.state.set_referrer(referrer.unwrap_or_default());
         self.state
             .dom
             .borrow_mut()
-            .set_document_url(outcome.head.final_url.clone());
+            .set_document_url(final_url.clone());
+        self.commit_history(final_url.clone(), target);
+        self.record_navigation(NavigationEventKind::Committed, &final_url, None);
+
         // Decode with full spec sniffing (BOM > HTTP charset > `<meta charset>`)
         // rather than the transport charset alone.
         let transport = header_content_type(&outcome.head.headers)
@@ -1001,7 +1322,134 @@ impl Page {
             .and_then(content_type_charset)
             .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()));
         let decoded = oxidepage_dom::decode::decode_document_bytes(&outcome.body, transport);
-        self.load_document(&decoded.text, wait_until)
+        self.load_document(&decoded.text, wait_until)?;
+        self.scroll_to_fragment(&final_url);
+        Ok(())
+    }
+
+    /// `history.go(delta)`. The target entry is reachable without a load iff it
+    /// belongs to the document currently loaded.
+    ///
+    /// There is no bfcache, so leaving the current document and coming back is
+    /// a **reload** — correct, just slower than a browser, and the entry is
+    /// re-stamped with the freshly loaded document so a second traversal back
+    /// to it stays in-document.
+    fn commit_traversal(
+        &self,
+        delta: i32,
+        wait_until: WaitUntil,
+        embedder: bool,
+    ) -> Result<(), JsError> {
+        let Some((index, url, state, same_document)) = ({
+            let history = self.state.history();
+            history.target_of(delta).and_then(|index| {
+                history.entry(index).map(|entry| {
+                    (
+                        index,
+                        entry.url.clone(),
+                        entry.state.clone(),
+                        entry.document_seq == history.document_seq(),
+                    )
+                })
+            })
+        }) else {
+            return Ok(());
+        };
+        if same_document {
+            self.commit_same_document(&url, HistoryTarget::Traverse(index), Some(state));
+            return Ok(());
+        }
+        self.commit_document(
+            &url,
+            HistoryTarget::Traverse(index),
+            None,
+            /* reload */ false,
+            wait_until,
+            embedder,
+        )
+    }
+
+    /// Records the session-history effect of a cross-document commit: a fresh
+    /// document sequence, and the entry it belongs to.
+    fn commit_history(&self, url: String, target: HistoryTarget) {
+        let mut history = self.state.history();
+        let seq = history.next_document_seq();
+        match target {
+            // The initial `about:blank` entry is replaced, never left behind —
+            // a fresh tab that loads a page has one entry, not two.
+            HistoryTarget::Push if seq > 1 => history.push(url, JsValue::Null, seq),
+            HistoryTarget::Push | HistoryTarget::Replace => {
+                history.replace(url, JsValue::Null, seq);
+            }
+            HistoryTarget::Traverse(index) => {
+                history.set_index(index);
+                history.restamp(index, url, seq);
+            }
+        }
+    }
+
+    /// HTML's **"scroll to the fragment"**: `#id`, then `<a name>`, with an
+    /// empty fragment and `#top` meaning the document origin.
+    ///
+    /// The `scroll` event goes through the *existing* path — a `None` target
+    /// pushed onto `pending_scroll_targets`, which `drain_scroll_events`
+    /// dispatches as a task. Firing it here would run script under the layout
+    /// borrows this function takes.
+    fn scroll_to_fragment(&self, url: &str) {
+        let Ok(parsed) = url::Url::parse(url) else {
+            return;
+        };
+        let Some(fragment) = parsed.fragment() else {
+            return;
+        };
+        let fragment = percent_decode(fragment);
+        self.flush_layout();
+        let changed = if fragment.is_empty() || fragment.eq_ignore_ascii_case("top") {
+            self.state
+                .layout
+                .borrow_mut()
+                .set_viewport_scroll(0.0, 0.0)
+                .changed
+        } else {
+            let Some(node) = self.fragment_target(&fragment) else {
+                return;
+            };
+            let layout = self.state.layout.borrow();
+            let Some(rect) = layout.border_box(node) else {
+                return;
+            };
+            // `border_box` is viewport-relative, so adding the current scroll
+            // gives the document-absolute position to scroll the element to.
+            let current = layout.viewport_scroll();
+            let (x, y) = (current.x + rect.origin.x, current.y + rect.origin.y);
+            drop(layout);
+            self.state
+                .layout
+                .borrow_mut()
+                .set_viewport_scroll(x, y)
+                .changed
+        };
+        if changed {
+            self.state.queue_viewport_scroll_event();
+        }
+    }
+
+    /// The fragment's target element: `id` first, then a named `<a>`.
+    fn fragment_target(&self, fragment: &str) -> Option<NodeId> {
+        let dom = self.state.dom.borrow();
+        if let Some(node) = dom.element_by_id(fragment) {
+            return Some(node);
+        }
+        let document = dom.document();
+        dom.inclusive_descendants(document).find(|&id| {
+            dom.get(id).and_then(|n| n.as_element()).is_some_and(|el| {
+                el.is_html_element()
+                    && &**el.local_name() == "a"
+                    && el
+                        .attr(&oxidepage_dom::node::attr_name("name".into()))
+                        .is_some_and(|v| v == fragment)
+            })
+        })
     }
 
     /// Tears down the previous document so a fresh parse starts clean: aborts
@@ -1010,7 +1458,7 @@ impl Page {
     /// style/layout engines. A new parse would otherwise append into the old
     /// document (the sink's `get_document()` returns the existing root), and a
     /// stale completion would drive the in-flight counter negative (H-page-2).
-    fn reset_document_state(&mut self) {
+    fn reset_document_state(&self) {
         // Abort every in-flight subresource from the previous document so a
         // late completion cannot apply to — or corrupt the counters of — the
         // next one.
@@ -1047,10 +1495,10 @@ impl Page {
         self.last_fontface_scan.set(u64::MAX);
         self.last_bg_scan.set((u64::MAX, u64::MAX));
         self.last_inline_svg_scan.set((u64::MAX, u64::MAX));
-        self.load_fired = false;
+        self.load_fired.set(false);
         self.render.reset();
         // The rAF timestamp origin restarts at navigation.
-        self.start_time = Instant::now();
+        self.start_time.set(Instant::now());
         self.next_render_at.set(Instant::now());
 
         // Replace the document tree and rebuild the style/layout engines so the
@@ -1085,7 +1533,19 @@ impl Page {
     }
 
     /// Streaming parse + script timing + lifecycle events.
-    fn load_document(&mut self, html: &str, wait_until: WaitUntil) -> Result<(), JsError> {
+    ///
+    /// Holds the `navigating` guard for its whole extent: this function runs the
+    /// event loop (parser scripts, `await_subresources`, the trailing
+    /// `run_until_stalled`), and a navigation started from there must not
+    /// re-enter here under the borrows already held.
+    fn load_document(&self, html: &str, wait_until: WaitUntil) -> Result<(), JsError> {
+        let was_navigating = self.navigating.replace(true);
+        let result = self.load_document_inner(html, wait_until);
+        self.navigating.set(was_navigating);
+        result
+    }
+
+    fn load_document_inner(&self, html: &str, wait_until: WaitUntil) -> Result<(), JsError> {
         // Fully tear down any previous document before parsing the new one.
         self.reset_document_state();
         self.state.set_parsing(true);
@@ -1153,6 +1613,7 @@ impl Page {
             oxidepage_bindings::microtask_checkpoint(cx);
         });
         self.state.mark_timing(TimingMilestone::DomContentLoadedEnd);
+        self.record_document_milestone(NavigationEventKind::DomContentLoaded);
         self.run_until_stalled();
 
         if wait_until == WaitUntil::DomContentLoaded {
@@ -1176,9 +1637,16 @@ impl Page {
             oxidepage_bindings::microtask_checkpoint(cx);
         });
         self.state.mark_timing(TimingMilestone::LoadEnd);
-        self.load_fired = true;
+        self.load_fired.set(true);
+        self.record_document_milestone(NavigationEventKind::Load);
         self.run_until_stalled();
         Ok(())
+    }
+
+    /// Records a lifecycle milestone of the document now loaded.
+    fn record_document_milestone(&self, kind: NavigationEventKind) {
+        let url = self.state.dom.borrow().document_url().to_owned();
+        self.record_navigation(kind, &url, None);
     }
 
     /// Dispatches `readystatechange` on the document after a readiness
@@ -1605,6 +2073,24 @@ impl Page {
     fn run_until_stalled_until(&self, deadline: Instant) {
         loop {
             self.process_finalized();
+            // A navigation queued by script (ADR-0022). It comes first because
+            // it invalidates everything below it: the document, and with it
+            // every queued update keyed on a node of the outgoing tree.
+            //
+            // The `navigating` guard keeps `load_document`'s own internal loop
+            // runs from starting a second load under the first; the `parsing`
+            // guard keeps a parser-inserted script from pulling the tree out
+            // from under the parser holding handles into it. In both cases the
+            // request simply stays queued for the outer driver.
+            if !self.navigating.get()
+                && !self.state.parsing()
+                && let Some(navigation) = self.state.take_pending_navigation()
+            {
+                let _ = self.run_navigation(navigation, WaitUntil::Load, /* embedder */ false);
+                // The document is gone; restart the drain order against the
+                // new one rather than finishing this pass over the old.
+                continue;
+            }
             // Tasks (timers, event handlers) may have inserted/removed
             // `<style>`/`<link>` elements; apply those to the style engine.
             self.drain_style_updates();
@@ -1675,6 +2161,9 @@ impl Page {
                 && self.in_flight.get() == 0
                 && self.state.net_pending() == 0
             {
+                // Idle reached rather than the budget running out — the
+                // distinction a `NetworkIdle` milestone is there to record.
+                self.record_document_milestone(NavigationEventKind::NetworkIdle);
                 return;
             }
             let now = Instant::now();
@@ -2910,7 +3399,7 @@ impl Page {
     /// True once the `load` event has fired.
     #[must_use]
     pub fn is_loaded(&self) -> bool {
-        self.load_fired
+        self.load_fired.get()
     }
 
     /// Direct read access to the document tree.
@@ -3148,7 +3637,7 @@ fn report_throw(hooks: &LoopHooks, throw: oxidepage_js::JsThrow) {
 
 /// Convenience: build a page and load `html` in one call.
 pub fn load_html_page(html: &str, options: PageOptions) -> Result<Page, JsError> {
-    let mut page = Page::new(options)?;
+    let page = Page::new(options)?;
     page.load_html(html)?;
     Ok(page)
 }

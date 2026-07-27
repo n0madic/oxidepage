@@ -575,7 +575,7 @@
         }
         throw cloneError();
     };
-    globalThis.structuredClone = function structuredClone(value, options) {
+    const structuredClone = function structuredClone(value, options) {
         if (options !== null && options !== undefined) {
             const transfer = options.transfer;
             if (transfer !== null && transfer !== undefined) {
@@ -587,6 +587,7 @@
         }
         return structuredCloneInner(value, new MapCtor());
     };
+    globalThis.structuredClone = structuredClone;
 
     // Deferred-promise construction: fetch/XHR completions (delivered from
     // Rust) call the captured resolve/reject.
@@ -778,9 +779,8 @@
 
         // Native helpers installed by `install_native_helpers`, captured here and
         // deleted from the global so page script never sees the `__oxide_*`
-        // surface. `randomBytes` backs `crypto`; `setDocumentUrl` backs `history`.
+        // surface. `randomBytes` backs `crypto`.
         const nativeRandomBytes = globalThis.__oxide_randomBytes;
-        const nativeSetDocumentUrl = globalThis.__oxide_setDocumentUrl;
 
         const def = (target, name, value) => {
             reflectDefineProperty(target, name, {
@@ -1092,70 +1092,6 @@
             reflectDefineProperty(StorageEvent.prototype, Symbol.toStringTag,
                 { value: "StorageEvent", writable: false, enumerable: false, configurable: true });
             defGlobal("StorageEvent", StorageEvent);
-        }
-
-        // === History API (pushState / replaceState / state / popstate) ===
-        // A JS session-history stack. `pushState`/`replaceState` update the
-        // document URL in place via the native same-origin hook (no navigation);
-        // `go`/`back`/`forward` walk the stack and fire `popstate`.
-        if (typeof nativeSetDocumentUrl === "function" && globalThis.history === undefined) {
-            const cloneState = (state) => state === undefined ? null : globalThis.structuredClone(state);
-            const startHref = globalThis.location.href;
-            const stack = [{ state: null, href: startHref }];
-            let index = 0;
-            let scrollRestoration = "auto";
-            const resolveUrl = (url) => {
-                if (url === undefined || url === null || url === "") return null;
-                return new URL(StringCtor(url), globalThis.location.href).href;
-            };
-            const firePopState = (state) => {
-                let event;
-                try { event = new Event("popstate"); } catch (_e) { return; }
-                reflectDefineProperty(event, "state", { value: state, enumerable: true, configurable: true });
-                globalThis.dispatchEvent(event);
-            };
-            const history = objectCreate(ObjectProto);
-            reflectDefineProperty(history, "length", { get() { return stack.length; }, enumerable: true, configurable: true });
-            reflectDefineProperty(history, "state", { get() { return stack[index].state; }, enumerable: true, configurable: true });
-            reflectDefineProperty(history, "scrollRestoration", {
-                get() { return scrollRestoration; },
-                set(v) { if (v === "auto" || v === "manual") scrollRestoration = v; },
-                enumerable: true, configurable: true,
-            });
-            def(history, "pushState", function pushState(state, unused, url) {
-                const cloned = cloneState(state);
-                const resolved = resolveUrl(url);
-                if (resolved !== null && !nativeSetDocumentUrl(resolved)) {
-                    throw new DOMException(
-                        "Failed to execute 'pushState' on 'History': cross-origin URL.", "SecurityError");
-                }
-                stack.length = index + 1;
-                stack.push({ state: cloned, href: globalThis.location.href });
-                index = stack.length - 1;
-            });
-            def(history, "replaceState", function replaceState(state, unused, url) {
-                const cloned = cloneState(state);
-                const resolved = resolveUrl(url);
-                if (resolved !== null && !nativeSetDocumentUrl(resolved)) {
-                    throw new DOMException(
-                        "Failed to execute 'replaceState' on 'History': cross-origin URL.", "SecurityError");
-                }
-                stack[index] = { state: cloned, href: globalThis.location.href };
-            });
-            def(history, "go", function go(delta) {
-                const d = delta === undefined ? 0 : (Number(delta) | 0);
-                if (d === 0) return; // reload — no-op in a headless engine
-                const target = index + d;
-                if (target < 0 || target >= stack.length) return;
-                index = target;
-                nativeSetDocumentUrl(stack[index].href);
-                firePopState(stack[index].state);
-            });
-            def(history, "back", function back() { history.go(-1); });
-            def(history, "forward", function forward() { history.go(1); });
-            reflectDefineProperty(globalThis, "history", {
-                value: history, writable: false, enumerable: true, configurable: true,
-            });
         }
 
         // === NodeIterator / TreeWalker ===
@@ -1483,7 +1419,6 @@
 
         // The `__oxide_*` helpers have been captured into locals; hide them.
         reflectDeleteProperty(globalThis, "__oxide_randomBytes");
-        reflectDeleteProperty(globalThis, "__oxide_setDocumentUrl");
     };
 
     // URLSearchParams pair iteration, built on a native `snapshot(params)`
@@ -1511,7 +1446,7 @@
     return {
         newWrapperMap, cacheGet, cacheSet,
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
-        setToStringTag, makeDomException,
+        setToStringTag, makeDomException, structuredClone,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
         bytesToArrayBuffer, freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
         ceConstruct, installLateGlobals, enqueueMicrotask,

@@ -112,7 +112,7 @@ fn inline_style_element_applies() {
 #[test]
 fn style_elements_freed_before_drain_are_not_fatal() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html("<div id=c></div><div>x</div>").unwrap();
     page.eval_to_string(&format!(
         "const c = document.getElementById('c');\
@@ -133,7 +133,7 @@ fn style_elements_freed_before_drain_are_not_fatal() {
 #[test]
 fn external_link_stylesheet_loads() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<link rel=stylesheet href='http://127.0.0.1:{port}/a.css'><div>x</div>"
     ))
@@ -148,7 +148,7 @@ fn external_link_stylesheet_loads() {
 #[test]
 fn non_success_stylesheet_response_is_not_applied() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<link rel=stylesheet href='http://127.0.0.1:{port}/broken.css'><div>x</div>"
     ))
@@ -164,7 +164,7 @@ fn non_success_stylesheet_response_is_not_applied() {
 #[test]
 fn a_link_stylesheet_fires_load_when_its_sheet_arrives() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<script>\
            globalThis.fired = [];\
@@ -190,7 +190,7 @@ fn a_link_stylesheet_fires_error_when_its_fetch_fails() {
     // at all — the failure was only reported to the host — so a page (or a WPT
     // test) waiting on `link.onerror` waited forever.
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<script>\
            globalThis.fired = [];\
@@ -213,7 +213,7 @@ fn a_link_stylesheet_fires_error_when_its_fetch_fails() {
 #[test]
 fn later_stylesheet_wins_in_document_order() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<link rel=stylesheet href='http://127.0.0.1:{port}/a.css'>\
          <link rel=stylesheet href='http://127.0.0.1:{port}/b.css'><div>x</div>"
@@ -230,7 +230,7 @@ fn later_stylesheet_wins_in_document_order() {
 #[test]
 fn import_from_linked_sheet_loads() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<link rel=stylesheet href='http://127.0.0.1:{port}/imports.css'><div>x</div>"
     ))
@@ -255,7 +255,7 @@ fn media_toggle_link_stylesheet_does_not_refetch_in_a_loop() {
 
     let hits = Arc::new(AtomicUsize::new(0));
     let port = spawn_counting_server(Arc::clone(&hits));
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<link rel=stylesheet media=print onload=\"this.media='all'\" \
          href='http://127.0.0.1:{port}/loop.css'><div>x</div>"
@@ -330,7 +330,7 @@ fn spawn_counting_server(hits: std::sync::Arc<std::sync::atomic::AtomicUsize>) -
 #[test]
 fn broken_link_does_not_hang_load() {
     let port = spawn_server();
-    let mut page = loopback_page();
+    let page = loopback_page();
     page.load_html(&format!(
         "<link rel=stylesheet href='http://127.0.0.1:{port}/missing.css'><div>x</div>"
     ))
