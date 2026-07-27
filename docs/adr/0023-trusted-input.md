@@ -217,6 +217,31 @@ DOM and partially-visible cases.
 equal to `pageX` — and `pageX` tracks the document scroll at read time, so it
 cannot be precomputed. `mouseEvent.html` pins exactly this.
 
+### `relatedTarget` retargeting
+
+DOM's **retarget** algorithm now runs on dispatch: while the related target is a
+node whose root is a shadow root, and the dispatch target is not a
+shadow-including descendant of that root, the related target becomes the root's
+host. A listener in the light tree therefore sees the *host*, never the node the
+pointer actually came from — which is the entire point of a closed tree.
+
+"Clear targets" is decided **before** the dispatch, not after: a listener is
+free to move the target out of its shadow tree mid-dispatch, and the decision
+has to reflect where it was when the event started. It is applied before the
+activation behavior, which the spec orders the same way.
+
+The retargeting is not gated on "a shadow root is involved" as originally
+planned — the guard turned out to be the retarget loop itself, which returns
+immediately for a related target that is not in a shadow tree. That leaves the
+common path a single `containing_shadow_root` call rather than a branch.
+
+**Not implemented, and tracked as three WPT failures:** the early-return branch
+of dispatch step 5 (when the target and the retargeted related target coincide)
+— the spec text and the test's expectations did not reconcile under inspection,
+and guessing at it is worse than a recorded gap. One further failure needs
+`XMLHttpRequest` to be an `EventTarget`, which it is not here yet; that is
+orthogonal to this stage.
+
 ### Wheel
 
 `Page::dispatch_wheel` fires a **cancelable** `wheel` and respects the answer: a

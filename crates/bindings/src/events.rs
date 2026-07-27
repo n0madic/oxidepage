@@ -413,6 +413,56 @@ pub(crate) fn target_to_js(cx: &BindCx<'_>, key: EventTargetKey) -> Result<JsVal
     }
 }
 
+/// DOM's **retarget** algorithm: while `a` is a node whose root is a shadow
+/// root and `b` is not a shadow-including inclusive descendant of that root,
+/// replace `a` with the root's host.
+///
+/// This is what stops a `relatedTarget` inside a closed shadow tree from
+/// leaking out of it: a listener in the light tree sees the *host*, never the
+/// node the pointer actually came from.
+fn retarget(dom: &oxidepage_dom::DomTree, mut a: NodeId, b: Option<NodeId>) -> NodeId {
+    // Bounded by the shadow nesting depth; the guard is against a malformed
+    // tree rather than an expected case.
+    for _ in 0..64 {
+        let Some(root) = dom.containing_shadow_root(a) else {
+            return a;
+        };
+        if let Some(b) = b
+            && shadow_including_inclusive_descendant(dom, b, root)
+        {
+            return a;
+        }
+        let Some(host) = dom.shadow_host(root) else {
+            return a;
+        };
+        a = host;
+    }
+    a
+}
+
+/// Whether `node` is `ancestor` or is contained by it, crossing shadow
+/// boundaries upwards (a node in a shadow tree is a shadow-including descendant
+/// of everything its host descends from).
+fn shadow_including_inclusive_descendant(
+    dom: &oxidepage_dom::DomTree,
+    node: NodeId,
+    ancestor: NodeId,
+) -> bool {
+    let mut current = Some(node);
+    for _ in 0..1024 {
+        let Some(id) = current else { return false };
+        if id == ancestor {
+            return true;
+        }
+        current = match dom.node(id).parent() {
+            Some(parent) => Some(parent),
+            // At a root: cross to the host if this is a shadow root.
+            None => dom.shadow_host(id),
+        };
+    }
+    false
+}
+
 /// Spec `dispatch`. The propagation path is *composed*: a `composed` event
 /// crosses shadow root → host boundaries up to the document and window, a
 /// non-composed event stops at its containing shadow root. v1 limitation
@@ -468,6 +518,38 @@ pub fn dispatch_event(
             ));
         }
     }
+
+    // DOM dispatch step 4: retarget the event's related target against the
+    // target. A `relatedTarget` inside a shadow tree is reported as the host to
+    // anything outside it — which is what stops a closed tree from leaking.
+    //
+    // The target need not be a node: dispatching on an `XMLHttpRequest` or the
+    // Window still retargets, because a non-node can never be a
+    // shadow-including descendant of a shadow root.
+    let target_node = match target {
+        EventTargetKey::Node(node) => Some(node),
+        _ => None,
+    };
+    let related = event.borrow().ui.as_deref().and_then(ui_related_target);
+    if let Some(related) = related {
+        let retargeted = {
+            let dom = cx.state.dom.borrow();
+            retarget(&dom, related, target_node)
+        };
+        if retargeted != related {
+            set_ui_related_target(&mut event.borrow_mut(), Some(retargeted));
+        }
+    }
+
+    // "Clear targets" is decided **now**, not after the dispatch: a listener is
+    // free to move the target out of its shadow tree mid-dispatch, and the
+    // decision must reflect where it was when the event started.
+    let clear_targets = {
+        let dom = cx.state.dom.borrow();
+        let related = event.borrow().ui.as_deref().and_then(ui_related_target);
+        target_node.is_some_and(|t| dom.containing_shadow_root(t).is_some())
+            || related.is_some_and(|r| dom.containing_shadow_root(r).is_some())
+    };
 
     // Build the propagation path: target, ancestors, then the window when
     // the target lives in the document tree (HTML event loop integration).
@@ -552,10 +634,40 @@ pub fn dispatch_event(
         ev.canceled
     };
 
+    // The last step of dispatch: if the target or the related target was rooted
+    // in a shadow tree, null both out. A script that retained the event object
+    // must not be able to read a node out of a closed tree afterwards. This
+    // runs **before** the activation behavior, which the spec orders the same
+    // way — an activation handler must not see them either.
+    if clear_targets {
+        let mut ev = event.borrow_mut();
+        ev.target = None;
+        set_ui_related_target(&mut ev, None);
+    }
+
     if let Some(state) = activation {
         crate::imp::interaction::finish_activation(cx, state, !canceled)?;
     }
     Ok(!canceled)
+}
+
+/// The `relatedTarget` of a UI payload, whichever interface carries it.
+fn ui_related_target(payload: &UiPayload) -> Option<NodeId> {
+    match &payload.kind {
+        UiKind::Mouse(m) => m.related,
+        UiKind::Focus { related } => *related,
+        _ => None,
+    }
+}
+
+fn set_ui_related_target(event: &mut EventData, related: Option<NodeId>) {
+    if let Some(payload) = event.ui.as_deref_mut() {
+        match &mut payload.kind {
+            UiKind::Mouse(m) => m.related = related,
+            UiKind::Focus { related: slot } => *slot = related,
+            _ => {}
+        }
+    }
 }
 
 /// Whether this event is the one that triggers activation behavior: type

@@ -3004,17 +3004,12 @@ dom/events/passive-by-default.html	wheel listener is passive with {passive:undef
 dom/events/pointer-event-document-move.html	Moving a node to new document should move the registered event listeners together	TIMEOUT
 dom/events/pointer-event-document-move.html	__harness__	TIMEOUT
 dom/events/preventDefault-during-activation-behavior.html	__harness__	OK
-dom/events/relatedTarget.window.js	Reset if target pointed to a shadow tree	FAIL
-dom/events/relatedTarget.window.js	Reset if target pointed to a shadow tree pre-dispatch	FAIL
 dom/events/relatedTarget.window.js	Reset targets before activation behavior	FAIL
 dom/events/relatedTarget.window.js	Reset targets on early return	FAIL
 dom/events/relatedTarget.window.js	Retarget a shadow-tree relatedTarget	FAIL
-dom/events/relatedTarget.window.js	Retarget a shadow-tree relatedTarget, part 2	FAIL
 dom/events/relatedTarget.window.js	__harness__	OK
 dom/events/remove-all-listeners.html	__harness__	OK
 dom/events/shadow-relatedTarget.html	__harness__	OK
-dom/events/shadow-relatedTarget.html	relatedTarget should not leak at capturing phase, at window object.	FAIL
-dom/events/shadow-relatedTarget.html	relatedTarget should not leak at target.	FAIL
 dom/events/window-composed-path.html	__harness__	OK
 dom/events/window-event-restored-after-throwing-onerror.html	__harness__	OK
 dom/events/window-event-restored-after-throwing-onerror.html	window.event is restored after a throwing window.onerror handler	FAIL

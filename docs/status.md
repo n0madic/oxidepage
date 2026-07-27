@@ -387,6 +387,8 @@ v1 limits.
   `Page::dispatch_wheel` fires a cancelable `wheel` and scrolls the nearest
   ancestor that can move; `document.hasFocus()` is real (false for a document
   with no browsing context).
+  `relatedTarget` is retargeted across shadow boundaries, so a closed tree does
+  not leak the node the pointer came from.
   **Not implemented:** touch and gesture events,
   `Selection`/`Range` over arbitrary DOM, `contenteditable`, drag-and-drop,
   clipboard, IME composition *generation* (the interface exists), smooth
