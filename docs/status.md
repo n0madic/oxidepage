@@ -408,4 +408,35 @@ v1 limits.
   clipboard, IME composition *generation* (the interface exists), smooth
   scrolling (`scrollIntoView` treats it as instant), and `:focus-visible`.
   Decisions and the one accepted WPT divergence: ADR-0023.
+- **Dialogs and structured page events**: done — stage 3 of the automation
+  roadmap. `window.alert`/`confirm`/`prompt` exist, so a page that calls one no
+  longer dies on a `ReferenceError`. They are **embedder-mediated**: a
+  synchronous `DialogHandler` (installed via `PageOptions::dialog_handler`, which
+  parse-time scripts need, or `Page::set_dialog_handler`) answers each one, and
+  every dialog lands in `Page::drain_dialog_events` with both the ask and the
+  answer. With no handler the policy is auto-dismiss — `alert` returns,
+  `confirm` → `false`, `prompt` → `null` — which is what Puppeteer and
+  Playwright do. Because the handler is synchronous on the page thread, HTML's
+  "pause the page" comes free: no timer, frame callback or network event can
+  interleave. `ConsoleMessage` now carries one bounded **`ValuePreview` per
+  argument** (eager and owned, so nothing retains a live `JsObject` past the
+  document that made it), the call site, a `console.group` depth and a
+  timestamp; objects render as `{a: 1}` instead of `[object Object]`, `Date`,
+  `RegExp` and `URL` keep their string form, format specifiers
+  (`%s %d %i %f %o %O %c %%`) are applied, and
+  `console.trace/assert/dir/group/groupCollapsed/groupEnd` exist.
+  `Page::drain_errors` returns `ScriptError`s with a `name`, a bare message,
+  parsed `StackFrame`s and a `kind` (`Uncaught`, `Callback`,
+  `UnhandledRejection`, `ScriptBudget`, `Resource`) — so a `TypeError` is
+  finally reported as one, and a script-budget abort names the function that
+  looped. Previews are capped at depth 4 / 100 entries / 8 KiB / 2048 nodes, so
+  a hostile object graph cannot wedge the page thread. Every stream is bounded
+  (1024 console, 1024 errors, 1024 pending rejections, 256 dialogs; front-drop)
+  and, like console output, **survives navigation**: a navigation must not erase
+  the errors that caused it. **Not implemented:** `beforeunload` dialogs, `window.print`,
+  HTTP auth dialogs, `ErrorEvent`/`window.onerror` and
+  `PromiseRejectionEvent`/`unhandledrejection` dispatch (errors reach the
+  embedder, not page script), `console.count`/`time`/`timeEnd`/`table`,
+  `Map`/`Set` preview contents, and document-relative line numbers for inline
+  scripts. Decisions and v1 limits: ADR-0025.
 - Phases 8+ (GPU raster, C ABI, CDP, …): not started.

@@ -5,17 +5,24 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use oxidepage_base::{RequestId, id::FIRST_GENERATION};
-use oxidepage_bindings::{BindCx, ConsoleLevel, HostHooks, PageState, install};
+use oxidepage_bindings::{
+    BindCx, ConsoleLevel, ConsoleMessage, DialogEvent, DialogRequest, DialogResponse, HostHooks,
+    PageState, ScriptError, install,
+};
 use oxidepage_dom::{ParseOptions, parse_document};
 use oxidepage_js::{JsEngine, JsRealm, JsValue, QuickJsEngine, RealmOptions};
 use oxidepage_net::{CookieJar, NetEvent, NetRequest, ResponseType};
 
 /// Test hooks with a real cookie jar (no network); fetch/XHR are not started.
 struct TestHooks {
-    console: RefCell<Vec<(ConsoleLevel, String)>>,
-    errors: RefCell<Vec<String>>,
+    console: RefCell<Vec<ConsoleMessage>>,
+    errors: RefCell<Vec<ScriptError>>,
     cookies: RefCell<CookieJar>,
     next_id: std::cell::Cell<u32>,
+    /// Answers handed to `alert`/`confirm`/`prompt`, oldest first; the
+    /// auto-dismiss default applies once it runs out.
+    dialog_answers: RefCell<std::collections::VecDeque<DialogResponse>>,
+    dialogs: RefCell<Vec<DialogEvent>>,
 }
 
 impl Default for TestHooks {
@@ -25,17 +32,35 @@ impl Default for TestHooks {
             errors: RefCell::new(Vec::new()),
             cookies: RefCell::new(CookieJar::new()),
             next_id: std::cell::Cell::new(1),
+            dialog_answers: RefCell::new(std::collections::VecDeque::new()),
+            dialogs: RefCell::new(Vec::new()),
         }
     }
 }
 
 impl HostHooks for TestHooks {
-    fn console_message(&self, level: ConsoleLevel, message: String) {
-        self.console.borrow_mut().push((level, message));
+    fn console_message(&self, message: ConsoleMessage) {
+        self.console.borrow_mut().push(message);
     }
 
-    fn report_error(&self, message: String) {
-        self.errors.borrow_mut().push(message);
+    fn report_error(&self, error: ScriptError) {
+        self.errors.borrow_mut().push(error);
+    }
+
+    fn run_dialog(&self, request: DialogRequest) -> DialogResponse {
+        let response = self
+            .dialog_answers
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_default();
+        self.dialogs.borrow_mut().push(DialogEvent {
+            kind: request.kind,
+            message: request.message,
+            default_value: request.default_value,
+            response: response.clone(),
+            timestamp: 0.0,
+        });
+        response
     }
 
     fn schedule_timer(
@@ -1002,7 +1027,7 @@ fn event_listener_passive() {
             .console
             .borrow()
             .iter()
-            .any(|(level, msg)| *level == ConsoleLevel::Warn && msg.contains("passive"))
+            .any(|m| m.level == ConsoleLevel::Warn && m.message.contains("passive"))
     );
 }
 
@@ -1178,8 +1203,14 @@ fn console_and_dom_exception_surface() {
     h.eval("console.log('hello', 1, true)").unwrap();
     h.eval("console.error('bad')").unwrap();
     let console = h.hooks.console.borrow();
-    assert_eq!(console[0], (ConsoleLevel::Log, "hello 1 true".to_owned()));
-    assert_eq!(console[1], (ConsoleLevel::Error, "bad".to_owned()));
+    assert_eq!(
+        (console[0].level, console[0].message.as_str()),
+        (ConsoleLevel::Log, "hello 1 true")
+    );
+    assert_eq!(
+        (console[1].level, console[1].message.as_str()),
+        (ConsoleLevel::Error, "bad")
+    );
     drop(console);
 
     assert!(h.eval_bool(
@@ -1212,7 +1243,7 @@ fn listener_errors_are_reported_not_fatal() {
             .errors
             .borrow()
             .iter()
-            .any(|e| e.contains("listener boom"))
+            .any(|e| e.message.contains("listener boom"))
     );
 }
 

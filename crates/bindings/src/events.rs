@@ -837,7 +837,7 @@ fn invoke_listeners(
         drop(_passive_guard);
         if let Err(error) = result {
             // Spec: report the exception; dispatch continues.
-            cx.report_callback_error(error);
+            cx.report_callback_error(&error);
         }
 
         // No microtask checkpoint here: the JS execution stack is not empty
@@ -868,7 +868,7 @@ fn invoke_listeners(
             .scope
             .call(&handler, &this, std::slice::from_ref(event_value))
         {
-            Err(error) => cx.report_callback_error(error),
+            Err(error) => cx.report_callback_error(&error),
             // HTML's **event handler processing algorithm**, step 5: a handler
             // that returns `false` cancels the event. This is the `onsubmit=
             // "…; return false"` / `onclick="return false"` idiom, and it is

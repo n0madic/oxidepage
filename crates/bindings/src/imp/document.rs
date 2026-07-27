@@ -39,10 +39,7 @@ fn write_text(cx: &BindCx<'_>, text: String) -> Result<(), JsThrow> {
     match cx.state.queue_parser_write(&text) {
         Ok(true) => Ok(()),
         Ok(false) => {
-            cx.state.hooks.console_message(
-                crate::state::ConsoleLevel::Warn,
-                "document.write outside an active parser script was ignored".to_owned(),
-            );
+            cx.warn("document.write outside an active parser script was ignored");
             Ok(())
         }
         Err(message) => Err(JsThrow::Range(message.to_owned())),

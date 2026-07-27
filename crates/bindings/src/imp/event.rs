@@ -138,10 +138,7 @@ pub(crate) fn set_canceled_flag(cx: &BindCx<'_>, this: &EventRef) {
     }
     if ev.in_passive_listener {
         drop(ev);
-        cx.state.hooks.console_message(
-            crate::state::ConsoleLevel::Warn,
-            "Unable to preventDefault inside passive event listener invocation.".to_owned(),
-        );
+        cx.warn("Unable to preventDefault inside passive event listener invocation.");
         return;
     }
     ev.canceled = true;

@@ -101,7 +101,13 @@ pub(crate) fn run_pending_inline_scripts(cx: &BindCx<'_>) {
         let result = cx.scope.eval(&source, &url);
         cx.state.current_script.set(previous);
         if let Err(error) = result {
-            cx.state.hooks.report_error(error.to_string());
+            cx.state
+                .hooks
+                .report_error(crate::console::ScriptError::from_js(
+                    crate::console::ScriptErrorKind::Uncaught,
+                    &error,
+                    cx.state.epoch_now_ms(),
+                ));
         }
     }
 }

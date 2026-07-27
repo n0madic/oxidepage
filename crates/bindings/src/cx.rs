@@ -251,7 +251,11 @@ impl BindCx<'_> {
     pub(crate) fn warn(&self, message: &str) {
         self.state
             .hooks
-            .console_message(crate::state::ConsoleLevel::Warn, message.to_owned());
+            .console_message(crate::console::ConsoleMessage::engine(
+                crate::console::ConsoleLevel::Warn,
+                message.to_owned(),
+                self.state.epoch_now_ms(),
+            ));
     }
 
     /// Builds a real `DOMException` throw from an engine-side error.
@@ -2183,7 +2187,30 @@ impl BindCx<'_> {
 
     /// Reports a callback exception without unwinding (spec "report the
     /// exception").
-    pub(crate) fn report_callback_error(&self, error: oxidepage_js::JsError) {
-        self.state.hooks.report_error(error.to_string());
+    pub(crate) fn report_callback_error(&self, error: &oxidepage_js::JsError) {
+        self.state
+            .hooks
+            .report_error(crate::console::ScriptError::from_js(
+                crate::console::ScriptErrorKind::Callback,
+                error,
+                self.state.epoch_now_ms(),
+            ));
+    }
+
+    /// Reports an engine-side failure — no JS exception to structure, only a
+    /// reason the engine could not proceed (an observer entry object that
+    /// would not build).
+    ///
+    /// `Resource`, not `Callback`: nothing threw. A driver routes this to a
+    /// log entry, and telling it an exception was thrown when none was is
+    /// exactly what the `kind` discriminant exists to prevent.
+    pub(crate) fn report_engine_error(&self, message: String) {
+        self.state
+            .hooks
+            .report_error(crate::console::ScriptError::engine(
+                crate::console::ScriptErrorKind::Resource,
+                message,
+                self.state.epoch_now_ms(),
+            ));
     }
 }

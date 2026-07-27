@@ -10,14 +10,17 @@
 //!   the pin contract: unpinned detached trees are freed.
 
 mod collections;
+pub mod console;
 mod cssdata;
 mod customreg;
 pub mod cx;
+pub mod dialog;
 pub mod events;
 mod generated;
 mod handlers;
 pub mod imp;
 mod netdata;
+pub mod preview;
 mod script;
 pub mod state;
 
@@ -28,17 +31,23 @@ use oxidepage_js::{HostCall, JsError, JsObject, JsRealm, JsScope, JsThrow, JsVal
 use oxidepage_net::{Credentials, NetEvent, NetRequest, RequestMode, ResponseType};
 use oxidepage_style::Viewport;
 
+pub use console::{ConsoleLevel, ConsoleMessage, ScriptError, ScriptErrorKind};
 pub use cx::BindCx;
+pub use dialog::{DialogEvent, DialogHandler, DialogKind, DialogRequest, DialogResponse};
 pub use events::{EventTargetKey, Modifiers, dispatch_event, fire_pop_state, fire_simple_event};
 pub use imp::input_synth::{
     KeyEventKind, KeyInput, MouseEventKind, MouseInput, WheelInput,
     dispatch_key as imp_dispatch_key, dispatch_mouse as imp_dispatch_mouse,
     dispatch_wheel as imp_dispatch_wheel, insert_text as imp_insert_text,
 };
+pub use preview::{
+    PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, ValuePreview,
+    format_message, render as render_preview, render_top as render_preview_top,
+};
 pub use script::is_classic_script_type;
 pub use state::{
-    ConsoleLevel, HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState,
-    PendingNavigation, ReadyState, ScreenData, SessionHistory, TimingMilestone,
+    HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState, PendingNavigation,
+    ReadyState, ScreenData, SessionHistory, TimingMilestone,
 };
 
 use netdata::{HeadersData, PendingNet, PendingResponse, ResponseData};
@@ -1196,46 +1205,123 @@ fn window_history(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow>
         .ok_or_else(|| JsThrow::Type("History is not installed".into()))
 }
 
+/// Snapshots every argument, renders the line, and records it.
+///
+/// `formatted` is false for the methods the console spec does not run its
+/// Formatter over (`console.dir`), where a leading `"%s"` is data, not a
+/// directive.
 fn console_write(
     cx: &BindCx<'_>,
-    call: &HostCall,
+    args: &[JsValue],
     level: ConsoleLevel,
+    formatted: bool,
 ) -> Result<JsValue, JsThrow> {
-    let mut parts = Vec::with_capacity(call.args.len());
-    for arg in &call.args {
-        let text = match arg {
-            JsValue::String(s) => s.clone(),
-            other => cx
-                .scope
-                .coerce_string(other)
-                .unwrap_or_else(|_| "<unprintable>".to_owned()),
-        };
-        parts.push(text);
-    }
-    cx.state.hooks.console_message(level, parts.join(" "));
+    let previews: Vec<ValuePreview> = args.iter().map(|arg| preview::encode(cx, arg)).collect();
+    let message = if formatted {
+        preview::format_message(&previews)
+    } else {
+        previews
+            .iter()
+            .map(preview::render)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    record_console(cx, level, message, previews);
     Ok(JsValue::Undefined)
+}
+
+/// Records one console line at the call site's location and group depth.
+fn record_console(cx: &BindCx<'_>, level: ConsoleLevel, message: String, args: Vec<ValuePreview>) {
+    // The innermost *script* frame: the console host function itself is a
+    // native frame, which the capture already drops. Only one frame is kept,
+    // so only one is parsed — this runs on every console call.
+    let location = cx.scope.capture_location();
+    cx.state.hooks.console_message(ConsoleMessage {
+        level,
+        message,
+        args,
+        location,
+        group_depth: cx.state.console_group_depth.get(),
+        timestamp: cx.state.epoch_now_ms(),
+    });
 }
 
 fn install_console(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<(), JsThrow> {
     let console = cx.scope.new_object().map_err(JsThrow::from)?;
     define_fn(cx, &console, "log", 0, |cx, call| {
-        console_write(cx, call, ConsoleLevel::Log)
+        console_write(cx, &call.args, ConsoleLevel::Log, true)
     })?;
     define_fn(cx, &console, "info", 0, |cx, call| {
-        console_write(cx, call, ConsoleLevel::Info)
+        console_write(cx, &call.args, ConsoleLevel::Info, true)
     })?;
     define_fn(cx, &console, "warn", 0, |cx, call| {
-        console_write(cx, call, ConsoleLevel::Warn)
+        console_write(cx, &call.args, ConsoleLevel::Warn, true)
     })?;
     define_fn(cx, &console, "error", 0, |cx, call| {
-        console_write(cx, call, ConsoleLevel::Error)
+        console_write(cx, &call.args, ConsoleLevel::Error, true)
     })?;
     define_fn(cx, &console, "debug", 0, |cx, call| {
-        console_write(cx, call, ConsoleLevel::Debug)
+        console_write(cx, &call.args, ConsoleLevel::Debug, true)
+    })?;
+    // `trace` is `log` at its own level: the stack every message now carries
+    // is exactly what the method exists to show.
+    define_fn(cx, &console, "trace", 0, |cx, call| {
+        let args = if call.args.is_empty() {
+            vec![JsValue::String("console.trace".to_owned())]
+        } else {
+            call.args.clone()
+        };
+        console_write(cx, &args, ConsoleLevel::Trace, true)
+    })?;
+    define_fn(cx, &console, "assert", 0, |cx, call| {
+        if call.arg(0).truthy() {
+            return Ok(JsValue::Undefined);
+        }
+        // Spec: "Assertion failed" alone, or with the rest appended after a
+        // colon — and when the first of the rest is a format string, it is
+        // *prefixed*, not passed through as an argument.
+        let rest = call.args.get(1..).unwrap_or_default();
+        let previews: Vec<ValuePreview> = rest.iter().map(|arg| preview::encode(cx, arg)).collect();
+        let message = if previews.is_empty() {
+            "Assertion failed".to_owned()
+        } else {
+            format!("Assertion failed: {}", preview::format_message(&previews))
+        };
+        record_console(cx, ConsoleLevel::Error, message, previews);
+        Ok(JsValue::Undefined)
+    })?;
+    // `dir` shows the object's structure, so no format pass and no
+    // string shortcut.
+    define_fn(cx, &console, "dir", 0, |cx, call| {
+        console_write(
+            cx,
+            &call.args[..call.args.len().min(1)],
+            ConsoleLevel::Log,
+            false,
+        )
+    })?;
+    define_fn(cx, &console, "group", 0, console_group)?;
+    define_fn(cx, &console, "groupCollapsed", 0, console_group)?;
+    define_fn(cx, &console, "groupEnd", 0, |cx, _call| {
+        let depth = cx.state.console_group_depth.get();
+        cx.state.console_group_depth.set(depth.saturating_sub(1));
+        Ok(JsValue::Undefined)
     })?;
     cx.scope
         .set(global, "console", &JsValue::Object(console))
         .map_err(JsThrow::from)
+}
+
+/// `console.group` / `groupCollapsed`: emit the label at the *outer* depth,
+/// then indent. Collapsing is a devtools affordance with no headless meaning,
+/// so the two methods are the same method.
+fn console_group(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    if !call.args.is_empty() {
+        console_write(cx, &call.args, ConsoleLevel::Log, true)?;
+    }
+    let depth = cx.state.console_group_depth.get();
+    cx.state.console_group_depth.set(depth.saturating_add(1));
+    Ok(JsValue::Undefined)
 }
 
 fn schedule_timer(cx: &BindCx<'_>, call: &HostCall, repeat: bool) -> Result<JsValue, JsThrow> {
@@ -1297,7 +1383,7 @@ pub fn fire_raf_callback(cx: &BindCx<'_>, callback: &JsValue, timestamp: f64) {
             .scope
             .call(callback, &JsValue::Undefined, &[JsValue::Number(timestamp)]);
         if let Err(error) = result {
-            cx.state.hooks.report_error(error.to_string());
+            cx.report_callback_error(&error);
         }
     }
     microtask_checkpoint(cx);
@@ -1310,7 +1396,7 @@ pub fn microtask_checkpoint(cx: &BindCx<'_>) {
     loop {
         let outcome = cx.scope.pump_jobs();
         for error in outcome.errors {
-            cx.state.hooks.report_error(error);
+            cx.report_callback_error(&error);
         }
         // Reactions run before observer delivery: an upgrade or lifecycle
         // callback may mutate the DOM, and those mutations must be visible to
@@ -1470,7 +1556,7 @@ pub(crate) fn upgrade_element(cx: &BindCx<'_>, node: oxidepage_base::NodeId) {
             .dom
             .borrow_mut()
             .set_custom_state(node, CustomElementState::Failed);
-        cx.state.hooks.report_error(error.to_string());
+        cx.report_callback_error(&error);
         return;
     }
     cx.state
@@ -1547,7 +1633,7 @@ fn deliver_lifecycle(cx: &BindCx<'_>, node: oxidepage_base::NodeId, which: Lifec
         return;
     };
     if let Err(error) = cx.scope.call(&callback, &wrapper, &[]) {
-        cx.state.hooks.report_error(error.to_string());
+        cx.report_callback_error(&error);
     }
 }
 
@@ -1584,7 +1670,7 @@ fn deliver_attribute_changed(
         namespace.map_or(JsValue::Null, |ns| JsValue::String(ns.to_owned())),
     ];
     if let Err(error) = cx.scope.call(&callback, &wrapper, &args) {
-        cx.state.hooks.report_error(error.to_string());
+        cx.report_callback_error(&error);
     }
 }
 
@@ -1603,9 +1689,7 @@ pub fn reevaluate_media_queries(cx: &BindCx<'_>) {
         if let Err(error) =
             fire_simple_event(cx, EventTargetKey::MediaQueryList(key), "change", false)
         {
-            cx.state
-                .hooks
-                .report_error(format!("MediaQueryList change dispatch failed: {error:?}"));
+            cx.report_engine_error(format!("MediaQueryList change dispatch failed: {error:?}"));
         }
     }
 }
@@ -1788,9 +1872,7 @@ pub fn deliver_observations(cx: &BindCx<'_>) -> bool {
             }
         }
         if build_failed {
-            cx.state
-                .hooks
-                .report_error("failed to build IntersectionObserverEntry".into());
+            cx.report_engine_error("failed to build IntersectionObserverEntry".into());
             continue;
         }
         let array = match cx.scope.new_array(&entry_values) {
@@ -1807,7 +1889,7 @@ pub fn deliver_observations(cx: &BindCx<'_>) -> bool {
             .scope
             .call(&observer.callback, &wrapper, &[array, wrapper.clone()])
         {
-            cx.state.hooks.report_error(error.to_string());
+            cx.report_callback_error(&error);
         }
     }
     for (observer, entries) in work {
@@ -1823,9 +1905,7 @@ pub fn deliver_observations(cx: &BindCx<'_>) -> bool {
             }
         }
         if build_failed {
-            cx.state
-                .hooks
-                .report_error("failed to build ResizeObserverEntry".into());
+            cx.report_engine_error("failed to build ResizeObserverEntry".into());
             continue;
         }
         let array = match cx.scope.new_array(&entry_values) {
@@ -1842,7 +1922,7 @@ pub fn deliver_observations(cx: &BindCx<'_>) -> bool {
             .scope
             .call(&observer.callback, &wrapper, &[array, wrapper.clone()])
         {
-            cx.state.hooks.report_error(error.to_string());
+            cx.report_callback_error(&error);
         }
     }
     delivered
@@ -2101,13 +2181,10 @@ fn deliver_mutation_observers(cx: &BindCx<'_>) -> bool {
                     .scope
                     .call(&callback, &wrapper, &[array, wrapper.clone()])
                 {
-                    cx.state.hooks.report_error(error.to_string());
+                    cx.report_callback_error(&error);
                 }
             }
-            Err(_) => cx
-                .state
-                .hooks
-                .report_error("failed to build MutationRecord array".into()),
+            Err(_) => cx.report_engine_error("failed to build MutationRecord array".into()),
         }
     }
     delivered
@@ -2371,7 +2448,7 @@ pub fn resolve_font_ready(cx: &BindCx<'_>) {
                 cx.scope
                     .call(&resolve, &JsValue::Undefined, std::slice::from_ref(&value))
             {
-                cx.state.hooks.report_error(error.to_string());
+                cx.report_callback_error(&error);
             }
         }
     }
@@ -2384,7 +2461,7 @@ pub fn resolve_font_ready(cx: &BindCx<'_>) {
             cx.scope
                 .call(&resolve, &JsValue::Undefined, std::slice::from_ref(&empty))
         {
-            cx.state.hooks.report_error(error.to_string());
+            cx.report_callback_error(&error);
         }
     }
     microtask_checkpoint(cx);
@@ -2399,7 +2476,7 @@ pub fn fire_timer_callback(cx: &BindCx<'_>, callback: &JsValue, args: &[JsValue]
         _ => Ok(JsValue::Undefined),
     };
     if let Err(error) = result {
-        cx.state.hooks.report_error(error.to_string());
+        cx.report_callback_error(&error);
     }
     microtask_checkpoint(cx);
 }

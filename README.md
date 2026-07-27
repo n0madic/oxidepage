@@ -29,6 +29,11 @@ rasterization.
   setting `location.href` navigates for real, with session history
   (`back`/`forward`/`pushState`) and `popstate`/`hashchange` — so you can
   script your way through a multi-page flow, not just one document.
+- **Watch what the page says.** `alert`/`confirm`/`prompt` work and are
+  answered by a handler you install (auto-dismissed by default), and the
+  console output and uncaught errors come back as structured data — argument
+  values, source locations, error names and parsed stack frames — not as
+  flattened strings.
 - **Fetch safely.** Networking is SSRF-guarded by default (loopback,
   private, link-local and cloud-metadata addresses are blocked unless you
   opt in), with a real cookie jar, HTTP caching, redirects, and CORS.
@@ -109,7 +114,7 @@ All commands accept:
 | `--allow-private` | Permit loopback/private hosts, for pointing at a local dev server (off by default) |
 | `--max-bytes <sz>` / `--max-requests <n>` | Per-page network budget (e.g. `--max-bytes 1G`) |
 | `--lazy-images` / `--no-lazy-images` | Fetch `<img>` only near the viewport, or always eagerly |
-| `--quiet` | Suppress page `console.*` output on stderr |
+| `--quiet` | Suppress page `console.*` output on stderr (script errors and dialogs still print) |
 
 `render` additionally takes `--format <png\|pdf\|html>`, `--dpr <N>` (PNG
 pixel density), and `--full-page` (capture the whole document instead of
@@ -137,6 +142,41 @@ page.settle(Duration::from_secs(5));
 
 let title = page.eval_to_string("document.title")?;
 let png_bytes = page.screenshot(1.0);
+```
+
+Dialogs are answered by a handler you install; without one they are
+auto-dismissed (`alert` returns, `confirm` is `false`, `prompt` is `null`).
+Pass it in `PageOptions` if the page may open one from a script that runs
+during the load:
+
+```rust
+use oxidepage_page::{DialogResponse, PageOptions};
+use std::rc::Rc;
+
+let page = Page::new(PageOptions {
+    dialog_handler: Some(Rc::new(|request| {
+        println!("{}: {}", request.kind.as_str(), request.message);
+        DialogResponse::Accept
+    })),
+    ..PageOptions::default()
+})?;
+```
+
+What the page said, and what went wrong, is pulled from three streams:
+
+```rust
+for message in page.drain_console() {
+    // `message.args` holds a bounded preview of each argument's value;
+    // `message.location` is the call site.
+    println!("[{}] {}", message.level.as_str(), message.message);
+}
+for error in page.drain_errors() {
+    // `error.kind`, `error.name` and `error.stack` are structured data.
+    println!("{error}");
+}
+for dialog in page.drain_dialog_events() {
+    println!("{}: {}", dialog.kind.as_str(), dialog.message);
+}
 ```
 
 ## Documentation

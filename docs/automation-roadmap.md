@@ -37,14 +37,13 @@ Ready to be exposed almost as-is:
 | viewport / DPR emulation | `Page::set_viewport`, `Viewport { dpr }` |
 | user agent | `NavigatorProfile` |
 | cookies | RFC 6265bis jar, `NetService::cookies()` |
-| console, errors | `Page::drain_console` / `drain_errors` (`crates/page/src/lib.rs:2893`) |
+| console, errors, dialogs | `Page::drain_console` / `drain_errors` / `drain_dialog_events` (`crates/page/src/lib.rs:3654`) |
 | DOM queries, geometry | arena + `querySelector*` + CSSOM-View surface |
 | `evaluate` | `Page::eval` (by value only) |
 | load lifecycle | `WaitUntil`, `readyState`, `Page::settle` |
 | navigation, history, lifecycle events | stage 1, ADR-0022 |
 
-Missing outright: every UI event interface, dialogs, multiple pages, remote
-object handles, request interception, isolated worlds, frames, and the whole
+Missing outright: multiple pages, remote object handles, request interception, isolated worlds, frames, and the whole
 `cdp` crate (`crates/cdp/src/lib.rs` is a three-line stub; so is
 `crates/engine/src/lib.rs`).
 
@@ -53,8 +52,8 @@ object handles, request interception, isolated worlds, frames, and the whole
 | # | Stage | Unblocks | ADR | Est. |
 |---|---|---|---|---|
 | 1 | Navigation & session history — **landed** | "click a link and wait" | ADR-0022 | 3–4 w |
-| 2 | Trusted input (mouse/keyboard/focus/typing) | `click`, `type`, `press`, `hover` | yes | 5–7 w |
-| 3 | Dialogs & structured page events | real sites stop throwing on `alert` | no | 1–2 w |
+| 2 | Trusted input (mouse/keyboard/focus/typing) — **landed** | `click`, `type`, `press`, `hover` | ADR-0023 | 5–7 w |
+| 3 | Dialogs & structured page events — **landed** | real sites stop throwing on `alert` | ADR-0025 | 1–2 w |
 | 4 | Transform-aware geometry, capture completeness | correct click points, `page.pdf()` | yes | 3–4 w |
 | 5 | `engine`: Browser, contexts, multi-page, async commands | anything protocol-shaped | yes | 4–5 w |
 | 6 | CDP transport + Target/Page/Runtime/Network/Log | **Puppeteer basic green** | yes | 5–7 w |
@@ -230,7 +229,7 @@ depend on is recorded in ADR-0023 rather than guessed at.
 
 ---
 
-## Stage 3 — Dialogs and structured page events
+## Stage 3 — Dialogs and structured page events — **landed (ADR-0025)**
 
 **Why here.** Cheap, and it stops real sites from dying. `alert`, `confirm` and
 `prompt` do not exist, so a page that calls one throws — before any protocol is
@@ -249,8 +248,36 @@ involved.
   `page.on('console')` / `page.on('pageerror')`, and both are worth having in the
   CLI on their own.
 
+**What landed beyond the plan.** Console **format specifiers**
+(`%s %d %i %f %o %O %c %%`) and the missing
+`console.trace/assert/dir/group/groupCollapsed/groupEnd`, both at the user's
+request. Three things the structure then made free: an error carries its `name`
+(the old rendering dropped it, so a `TypeError` reached the CLI as a bare
+sentence); a script-budget abort names the function that looped instead of
+reporting an opaque `InternalError`; and `console.log` of an object shows the
+object rather than `[object Object]`. The signature change also forced ~11
+open-coded `report_error(error.to_string())` sites in `crates/bindings/src/lib.rs`
+through one helper, so they all report `Callback` with real frames.
+
+**Deviations.** Two additions to the plan, both recorded in the ADR: a fourth
+engine primitive (`JsScope::symbol_description`, because `ToString` on a symbol
+throws and the preview needs the description), and a fifth `ScriptErrorKind`
+(`Resource`, because the ~15 event-loop sites that report a stylesheet 404 or an
+unresolvable module specifier are none of the four the plan named, and filing
+them under `Uncaught` would make `kind` untrustworthy). One accepted spec
+divergence: `alert(undefined)` shows `""` where Chrome shows `"undefined"`, the
+code generator having no overload support.
+
 **Non-goals.** `beforeunload` dialogs, `window.print`, HTTP auth dialogs (they
-arrive with `Fetch.authRequired` in stage 8).
+arrive with `Fetch.authRequired` in stage 8). Also deferred, and a real P6 hole
+recorded as such: `ErrorEvent`/`window.onerror` and
+`PromiseRejectionEvent`/`unhandledrejection` *dispatch* — errors reach the
+embedder, not page script.
+
+**Verification.** `crates/page/tests/dialogs.rs`,
+`crates/bindings/tests/console.rs`, `crates/page/tests/console.rs`,
+`crates/js/tests/quickjs.rs`. WPT cannot cover this stage: the relevant
+directories are not vendored (ADR-0025, Consequences).
 
 ---
 

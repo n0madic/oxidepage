@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use oxidepage_bindings::ConsoleLevel;
 use oxidepage_js::JsValue;
-use oxidepage_page::{NavigatorProfile, Page, PageOptions, ScreenProfile, load_html_page};
+use oxidepage_page::{
+    NavigatorProfile, Page, PageOptions, ScreenProfile, ScriptErrorKind, load_html_page,
+};
 
 fn eval_string(page: &Page, source: &str) -> String {
     page.eval_to_string(source).expect("eval")
@@ -923,11 +925,15 @@ fn script_errors_are_reported_and_do_not_stop_the_parse() {
     )
     .unwrap();
     assert_eq!(eval_string(&page, "after"), "true");
+    let errors = page.drain_errors();
     assert!(
-        page.drain_errors()
-            .iter()
-            .any(|e| e.contains("boom in script"))
+        errors.iter().any(|e| e.kind == ScriptErrorKind::Uncaught
+            && e.name.as_deref() == Some("Error")
+            && e.message == "boom in script"),
+        "got {errors:?}"
     );
+    // The throw site is data now, not a blob glued onto the message.
+    assert!(errors[0].location().is_some(), "got {errors:?}");
 }
 
 /// A promise that rejects with nobody listening is how a broken page fails
@@ -955,11 +961,12 @@ fn unhandled_promise_rejections_are_reported() {
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("unhandled promise rejection") && e.contains("nobody catches me")),
+            .any(|e| e.kind == ScriptErrorKind::UnhandledRejection
+                && e.message == "nobody catches me"),
         "expected the unhandled rejection to be reported, got {errors:?}"
     );
     assert!(
-        !errors.iter().any(|e| e.contains("caught later")),
+        !errors.iter().any(|e| e.message.contains("caught later")),
         "a rejection handled on a later turn is not an error, got {errors:?}"
     );
 }
@@ -983,10 +990,13 @@ fn runaway_script_is_aborted_by_the_execution_budget() {
     .unwrap();
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(eval_string(&page, "after"), "true");
+    let errors = page.drain_errors();
     assert!(
-        page.drain_errors()
+        errors
             .iter()
-            .any(|e| e.contains("50 ms execution budget"))
+            .any(|e| e.kind == ScriptErrorKind::ScriptBudget
+                && e.message.contains("50 ms execution budget")),
+        "got {errors:?}"
     );
 }
 

@@ -2041,6 +2041,9 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
 
     let proto_window = cx.begin_interface("Window", Some("EventTarget"))?;
     cx.define_method(&proto_window, "matchMedia", 1, gen_window_match_media)?;
+    cx.define_method(&proto_window, "alert", 0, gen_window_alert)?;
+    cx.define_method(&proto_window, "confirm", 0, gen_window_confirm)?;
+    cx.define_method(&proto_window, "prompt", 0, gen_window_prompt)?;
     cx.define_accessor(
         &proto_window,
         "onabort",
@@ -9188,6 +9191,29 @@ fn gen_window_match_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
     let this = cx.this_window(&call.this)?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::window::match_media(cx, this, a0)
+}
+
+fn gen_window_alert(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    let a0 = cx.arg_dom_string_or(call, 0, "")?;
+    imp::window::alert(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_window_confirm(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    let a0 = cx.arg_dom_string_or(call, 0, "")?;
+    Ok(JsValue::Bool(imp::window::confirm(cx, this, a0)?))
+}
+
+fn gen_window_prompt(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    let a0 = cx.arg_dom_string_or(call, 0, "")?;
+    let a1 = cx.arg_dom_string_or(call, 1, "")?;
+    Ok(match imp::window::prompt(cx, this, a0, a1)? {
+        Some(s) => JsValue::String(s),
+        None => JsValue::Null,
+    })
 }
 
 fn gen_window_get_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

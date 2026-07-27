@@ -23,17 +23,18 @@ use rquickjs::context::EvalOptions;
 use rquickjs::function::{Constructor, Rest, This};
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::Declared;
+use rquickjs::object::Filter;
 use rquickjs::prelude::Coerced;
 use rquickjs::{
-    Array, ArrayBuffer, Context, Ctx, Exception, Function, JsLifetime, Module, Object, Persistent,
-    Runtime, Value, qjs,
+    Array, ArrayBuffer, Atom, Context, Ctx, Exception, Function, JsLifetime, Module, Object,
+    Persistent, Runtime, Type, Value, qjs,
 };
 
-use crate::error::{JsError, JsThrow};
+use crate::error::{JsError, JsThrow, StackFrame, parse_stack};
 use crate::value::{JsObject, JsValue};
 use crate::{
     HostCall, HostFn, JobsOutcome, JsEngine, JsRealm, JsScope, ModuleSource, PromiseState,
-    PropertyDef, RealmOptions,
+    PropertyDef, RealmOptions, ValueKind,
 };
 
 /// The QuickJS-NG engine backend.
@@ -132,11 +133,15 @@ impl JsRealm for QuickJsRealm {
                 Ok(false) => break,
                 Err(job_error) => {
                     out.executed += 1;
-                    let message = job_error.0.with(|ctx| {
-                        let caught = ctx.catch();
-                        render_exception(&caught)
+                    let error = job_error.0.with(|ctx| {
+                        let scope = QuickScope {
+                            ctx,
+                            inner: Rc::clone(&self.inner),
+                        };
+                        let caught = scope.ctx.catch();
+                        scope.exception_from(caught)
                     });
-                    out.errors.push(message);
+                    out.errors.push(error);
                 }
             }
         }
@@ -159,14 +164,27 @@ impl JsRealm for QuickJsRealm {
         self.inner.rt.set_interrupt_handler(callback);
     }
 
-    fn set_rejection_tracker(&self, callback: Option<Box<dyn Fn(String, bool)>>) {
+    fn set_rejection_tracker(&self, callback: Option<Box<dyn Fn(JsError, bool)>>) {
         match callback {
             Some(callback) => self
                 .inner
                 .rt
                 .set_host_promise_rejection_tracker(Some(Box::new(
                     move |_ctx, _promise, reason, is_handled| {
-                        callback(render_exception(&reason), is_handled);
+                        // No `value`: the tracker must not capture the realm
+                        // (the runtime owns this closure, so a strong
+                        // reference back would be a cycle), and importing the
+                        // reason needs a scope built from it.
+                        let (name, message, stack) = split_exception(&reason);
+                        callback(
+                            JsError::Exception {
+                                name,
+                                message,
+                                stack,
+                                value: None,
+                            },
+                            is_handled,
+                        );
                     },
                 ))),
             None => self.inner.rt.set_host_promise_rejection_tracker(None),
@@ -345,12 +363,20 @@ impl<'js> QuickScope<'js> {
     fn error_from(&self, err: rquickjs::Error) -> JsError {
         if err.is_exception() || self.ctx.has_exception() {
             let caught = self.ctx.catch();
-            JsError::Exception {
-                message: render_exception(&caught),
-                value: Some(self.import(caught)),
-            }
+            self.exception_from(caught)
         } else {
             JsError::Engine(err.to_string())
+        }
+    }
+
+    /// Structures an already-caught exception value, keeping the value itself.
+    fn exception_from(&self, caught: Value<'js>) -> JsError {
+        let (name, message, stack) = split_exception(&caught);
+        JsError::Exception {
+            name,
+            message,
+            stack,
+            value: Some(self.import(caught)),
         }
     }
 
@@ -391,6 +417,18 @@ impl<'js> QuickScope<'js> {
             },
         )
         .map_err(|e| self.error_from(e))
+    }
+
+    /// The engine's backtrace text for the current stack.
+    ///
+    /// `JS_NewError` builds a backtrace unconditionally, so minting a
+    /// throw-away `Error` is the way to read the stack without throwing.
+    /// Nothing is left pending: `from_message` constructs an object, it does
+    /// not raise it.
+    fn backtrace(&self) -> Option<String> {
+        Exception::from_message(self.ctx.clone(), "")
+            .ok()
+            .and_then(|exception| exception.stack())
     }
 
     fn helpers<T>(&self, f: impl FnOnce(&Helpers) -> T) -> Result<T, JsError> {
@@ -696,6 +734,91 @@ impl<'js> JsScope for QuickScope<'js> {
         }
     }
 
+    fn value_kind(&self, value: &JsValue) -> ValueKind {
+        let object = match value {
+            JsValue::Undefined => return ValueKind::Undefined,
+            JsValue::Null => return ValueKind::Null,
+            JsValue::Bool(_) => return ValueKind::Bool,
+            JsValue::Number(_) => return ValueKind::Number,
+            JsValue::String(_) => return ValueKind::String,
+            JsValue::Object(o) => o,
+        };
+        let Ok(value) = self.export_obj(object) else {
+            return ValueKind::Object;
+        };
+        match value.type_of() {
+            Type::Uninitialized | Type::Undefined => ValueKind::Undefined,
+            Type::Null => ValueKind::Null,
+            Type::Bool => ValueKind::Bool,
+            Type::Int | Type::Float => ValueKind::Number,
+            Type::BigInt => ValueKind::BigInt,
+            Type::String => ValueKind::String,
+            Type::Symbol => ValueKind::Symbol,
+            // A class is a function too, and reads better as one.
+            Type::Function | Type::Constructor => ValueKind::Function,
+            Type::Array => ValueKind::Array,
+            Type::Exception => ValueKind::Error,
+            Type::Promise => ValueKind::Promise,
+            Type::Object | Type::Proxy | Type::Module | Type::Unknown => ValueKind::Object,
+        }
+    }
+
+    fn own_enumerable_keys(
+        &self,
+        obj: &JsObject,
+        limit: usize,
+    ) -> Result<(Vec<String>, usize), JsError> {
+        let object = self.export_object(obj)?;
+        // `Filter::default()` is string-keyed + enumerable-only, i.e. exactly
+        // `Object.keys`.
+        //
+        // Only the first `limit` atoms are turned into Rust strings. The rest
+        // are still counted — the caller needs the true total to report an
+        // honest truncation — but an object with five million keys must not
+        // cost five million `String` allocations for a preview that keeps a
+        // hundred of them.
+        let mut keys = Vec::new();
+        let mut total = 0usize;
+        for key in object.own_keys::<Atom<'js>>(Filter::default()) {
+            let atom = key.map_err(|e| self.error_from(e))?;
+            total += 1;
+            if keys.len() < limit {
+                match atom.to_js_string() {
+                    Ok(s) => keys.push(string_to_lossy(&s)),
+                    Err(e) => return Err(self.error_from(e)),
+                }
+            }
+        }
+        Ok((keys, total))
+    }
+
+    fn symbol_description(&self, value: &JsValue) -> Option<String> {
+        let JsValue::Object(o) = value else {
+            return None;
+        };
+        let value = self.export_obj(o).ok()?;
+        let symbol = value.as_symbol()?;
+        // `Symbol()` has an undefined description; the empty string is a
+        // *different*, real description, so only `undefined` maps to `None`.
+        match symbol.description().ok()? {
+            d if d.is_undefined() => None,
+            d => d.as_string().map(string_to_lossy),
+        }
+    }
+
+    fn capture_stack(&self) -> Vec<StackFrame> {
+        self.backtrace().map_or_else(Vec::new, |s| parse_stack(&s))
+    }
+
+    fn capture_location(&self) -> Option<StackFrame> {
+        // Separate from `capture_stack` because every console call takes this
+        // path and keeps exactly one frame: parsing the whole backtrace to
+        // drop all but the first is pure allocation.
+        self.backtrace()
+            .as_deref()
+            .and_then(crate::error::parse_first_frame)
+    }
+
     fn strict_equals(&self, a: &JsValue, b: &JsValue) -> bool {
         match (a, b) {
             (JsValue::Object(a), JsValue::Object(b)) => {
@@ -764,7 +887,7 @@ impl<'js> JsScope for QuickScope<'js> {
             out.executed += 1;
             if self.ctx.has_exception() {
                 let caught = self.ctx.catch();
-                out.errors.push(render_exception(&caught));
+                out.errors.push(self.exception_from(caught));
             }
         }
         out
@@ -853,19 +976,64 @@ impl Loader for SourceLoader {
     }
 }
 
-/// Renders a caught exception value into a human-readable message.
-fn render_exception(caught: &Value<'_>) -> String {
-    if let Some(exception) = caught.as_exception() {
-        let message = exception.message().unwrap_or_else(|| "<no message>".into());
-        match exception.stack() {
-            Some(stack) if !stack.is_empty() => format!("{message}\n{stack}"),
-            _ => message,
+/// Splits a caught exception value into `(name, message, stack)`.
+///
+/// A thrown non-`Error` (`throw "boom"`, `throw {}`) has no name and no stack,
+/// so it degrades to its string coercion — the same text the old single-string
+/// rendering produced.
+fn split_exception(caught: &Value<'_>) -> (Option<String>, String, Vec<StackFrame>) {
+    let Some(exception) = caught.as_exception() else {
+        return (None, render_thrown_value(caught), Vec::new());
+    };
+    let message = exception.message().unwrap_or_else(|| "<no message>".into());
+    let stack = exception.stack().map_or_else(Vec::new, |s| parse_stack(&s));
+    (exception_name(exception), message, stack)
+}
+
+/// Renders a thrown non-`Error` value (`throw "boom"`, `throw {}`).
+///
+/// `ToString` **throws** on a symbol, and the resulting `TypeError` would be
+/// left pending on the context for whatever inspects it next to pick up and
+/// blame on unrelated script (the hazard `QuickScope::as_host_object`
+/// documents). So a symbol is named directly, and any other coercion failure
+/// clears what it raised.
+fn render_thrown_value(caught: &Value<'_>) -> String {
+    if let Some(symbol) = caught.as_symbol() {
+        let description = symbol
+            .description()
+            .ok()
+            .filter(|d| !d.is_undefined())
+            .and_then(|d| d.as_string().map(string_to_lossy))
+            .unwrap_or_default();
+        return format!("Symbol({description})");
+    }
+    let ctx = caught.ctx().clone();
+    match caught.clone().get::<Coerced<String>>() {
+        Ok(text) => text.0,
+        Err(_) => {
+            if ctx.has_exception() {
+                let _ = ctx.catch();
+            }
+            "<unrenderable exception>".into()
         }
-    } else {
-        caught
-            .clone()
-            .get::<Coerced<String>>()
-            .map(|c| c.0)
-            .unwrap_or_else(|_| "<unrenderable exception>".into())
+    }
+}
+
+/// The exception's `name` (`"TypeError"`), inherited from its prototype.
+///
+/// Reading it runs a property get, which a page can turn into a throwing
+/// accessor; leaving *that* exception pending would surface later, blamed on
+/// unrelated script (the hazard `QuickScope::as_host_object` documents), so it
+/// is swallowed here.
+fn exception_name<'js>(exception: &Exception<'js>) -> Option<String> {
+    let ctx = exception.ctx().clone();
+    match exception.get::<_, Option<Coerced<String>>>("name") {
+        Ok(name) => name.map(|c| c.0).filter(|n| !n.is_empty()),
+        Err(_) => {
+            if ctx.has_exception() {
+                let _ = ctx.catch();
+            }
+            None
+        }
     }
 }

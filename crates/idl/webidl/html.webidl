@@ -6,8 +6,15 @@
 // full HTML surface); `defaultView` is typed `any` because the code generator
 // does not yet return interface-typed attributes.
 
+// HTML §8.9 "User prompts". The spec declares two `alert` overloads
+// (`alert()` and `alert(DOMString)`); the code generator has no overload
+// support, so the optional-argument form stands in — see ADR-0025 for the one
+// expression that diverges (`alert(undefined)`).
 interface Window : EventTarget {
   any matchMedia(DOMString query);
+  undefined alert(optional DOMString message = "");
+  boolean confirm(optional DOMString message = "");
+  DOMString? prompt(optional DOMString message = "", optional DOMString defaultValue = "");
 };
 
 // Event handler IDL attributes (HTML §8.1.7). `EventHandler` is a type the

@@ -8,9 +8,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use oxidepage_bindings::ConsoleLevel;
 use oxidepage_dom::decode::decode_document_bytes;
-use oxidepage_page::{Page, PageOptions, WaitUntil};
+use oxidepage_page::{DialogResponse, Page, PageOptions, WaitUntil};
 
 /// The viewport every command renders at without `--viewport`. A desktop-class
 /// size, because 800×600 puts most of the modern web into its mobile layout;
@@ -566,22 +565,58 @@ fn eval_command(args: &[String]) -> ExitCode {
     }
 }
 
-/// Prints captured console output and script errors to stderr.
+/// Stack frames printed under one error before the rest are summarized.
+const MAX_PRINTED_FRAMES: usize = 10;
+
+/// Indentation levels rendered for `console.group` nesting.
+///
+/// The page's group depth is uncapped — `console.group()` with no label costs
+/// it nothing — so the *renderer* clamps. Without this, a page that opens a
+/// million groups makes every subsequent line allocate a multi-megabyte indent.
+const MAX_GROUP_INDENT: usize = 16;
+
+/// Prints captured console output, dialogs and script errors to stderr.
+///
+/// `--quiet` suppresses console chatter only. Errors and dialogs always print:
+/// a dialog is an interaction the page expected and did not get, which is a
+/// diagnosis rather than noise.
 fn flush_page_output(page: &Page, quiet: bool) {
     if !quiet {
         for message in page.drain_console() {
-            let level = match message.level {
-                ConsoleLevel::Log => "log",
-                ConsoleLevel::Info => "info",
-                ConsoleLevel::Warn => "warn",
-                ConsoleLevel::Error => "error",
-                ConsoleLevel::Debug => "debug",
-            };
-            eprintln!("[console.{level}] {}", message.message);
+            let indent = "  ".repeat((message.group_depth as usize).min(MAX_GROUP_INDENT));
+            let level = message.level.as_str();
+            match &message.location {
+                Some(at) => eprintln!(
+                    "[console.{level}] {indent}{} ({}:{}:{})",
+                    message.message, at.url, at.line, at.column
+                ),
+                None => eprintln!("[console.{level}] {indent}{}", message.message),
+            }
         }
+    }
+    for dialog in page.drain_dialog_events() {
+        let answer = match &dialog.response {
+            DialogResponse::Dismiss => "dismissed".to_owned(),
+            DialogResponse::Accept => "accepted".to_owned(),
+            DialogResponse::AcceptWith(text) => format!("accepted with {text:?}"),
+        };
+        eprintln!(
+            "[dialog.{}] {} -> {answer}",
+            dialog.kind.as_str(),
+            dialog.message
+        );
     }
     for error in page.drain_errors() {
         eprintln!("[script error] {error}");
+        for frame in error.stack.iter().take(MAX_PRINTED_FRAMES) {
+            eprintln!("    {frame}");
+        }
+        if error.stack.len() > MAX_PRINTED_FRAMES {
+            eprintln!(
+                "    … {} more frames",
+                error.stack.len() - MAX_PRINTED_FRAMES
+            );
+        }
     }
 }
 

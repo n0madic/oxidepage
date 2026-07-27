@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use oxidepage_js::{
     HostFn, JsEngine, JsRealm, JsThrow, JsValue, PropertyDef, QuickJsEngine, RealmOptions,
+    ValueKind,
 };
 
 fn realm() -> impl JsRealm {
@@ -35,10 +36,19 @@ fn eval_exception_carries_message_and_value() {
     let realm = realm();
     realm.with_scope(|s| {
         let err = s.eval("throw new TypeError('boom')", "t").unwrap_err();
-        let oxidepage_js::JsError::Exception { message, value } = err else {
+        let oxidepage_js::JsError::Exception {
+            name,
+            message,
+            stack,
+            value,
+        } = err
+        else {
             panic!("expected an exception");
         };
-        assert!(message.contains("boom"), "message was: {message}");
+        assert_eq!(name.as_deref(), Some("TypeError"));
+        // The message is *bare* now — the stack is data beside it, not glued on.
+        assert_eq!(message, "boom");
+        assert_eq!(stack.first().map(|f| f.url.as_str()), Some("t"));
         assert!(value.is_some());
         // The realm must stay usable after an exception.
         assert!(matches!(s.eval("2", "t").unwrap(), JsValue::Number(n) if n == 2.0));
@@ -207,7 +217,7 @@ fn unhandled_rejections_are_tracked() {
     let seen: Rc<std::cell::RefCell<Vec<(String, bool)>>> = Rc::default();
     let sink = Rc::clone(&seen);
     realm.set_rejection_tracker(Some(Box::new(move |reason, is_handled| {
-        sink.borrow_mut().push((reason, is_handled));
+        sink.borrow_mut().push((reason.rendered(), is_handled));
     })));
     realm.with_scope(|s| {
         s.eval(
@@ -463,5 +473,226 @@ fn lone_surrogate_string_imports_lossy() {
             matches!(v2, JsValue::String(ref x) if x == "x\u{1F600}y"),
             "got {v2:?}"
         );
+    });
+}
+
+#[test]
+fn exception_splits_into_name_message_and_frames() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        let err = s
+            .eval(
+                "function inner(){ [1].forEach(function cb(){ throw new TypeError('boom') }) }\n\
+                 function outer(){ inner() }\n\
+                 outer()",
+                "http://x/t.js",
+            )
+            .unwrap_err();
+        assert_eq!(err.name(), Some("TypeError"));
+        assert_eq!(err.to_string(), "boom");
+        let functions: Vec<_> = err
+            .stack()
+            .iter()
+            .map(|f| f.function.as_deref().unwrap_or(""))
+            .collect();
+        // Innermost first, and `forEach`'s native frame is gone.
+        assert_eq!(functions, ["cb", "inner", "outer", "<eval>"]);
+        assert!(err.stack().iter().all(|f| f.url == "http://x/t.js"));
+        assert_eq!(err.stack()[0].line, 1);
+        assert!(err.stack()[0].column > 0);
+        // `rendered()` puts the two halves back together.
+        let rendered = err.rendered();
+        assert!(
+            rendered.starts_with("boom\n    at cb (http://x/t.js:1:"),
+            "{rendered}"
+        );
+    });
+}
+
+#[test]
+fn a_thrown_non_error_has_no_name_or_stack() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        let err = s.eval("throw 'plain'", "t").unwrap_err();
+        assert_eq!(err.name(), None);
+        assert_eq!(err.to_string(), "plain");
+        assert!(err.stack().is_empty());
+    });
+}
+
+#[test]
+fn tracked_rejections_keep_their_name_and_stack() {
+    // The page crate reports these as errors and retracts them by identity, so
+    // the tracker must carry the same structure an uncaught throw does.
+    let realm = realm();
+    let seen: Rc<std::cell::RefCell<Vec<oxidepage_js::JsError>>> = Rc::default();
+    let sink = Rc::clone(&seen);
+    realm.set_rejection_tracker(Some(Box::new(move |reason, is_handled| {
+        if !is_handled {
+            sink.borrow_mut().push(reason);
+        }
+    })));
+    realm.with_scope(|s| {
+        s.eval(
+            "Promise.resolve().then(function reaction(){ throw new RangeError('late') })",
+            "http://x/j.js",
+        )
+        .unwrap();
+    });
+    realm.pump_jobs();
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1, "got {seen:?}");
+    assert_eq!(seen[0].name(), Some("RangeError"));
+    assert_eq!(seen[0].to_string(), "late");
+    assert_eq!(
+        seen[0].stack().first().and_then(|f| f.function.as_deref()),
+        Some("reaction")
+    );
+}
+
+#[test]
+fn value_kind_separates_the_object_subtypes() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        let kind = |src: &str| s.value_kind(&s.eval(src, "t").unwrap());
+        assert_eq!(kind("undefined"), ValueKind::Undefined);
+        assert_eq!(kind("null"), ValueKind::Null);
+        assert_eq!(kind("true"), ValueKind::Bool);
+        assert_eq!(kind("1.5"), ValueKind::Number);
+        assert_eq!(kind("'s'"), ValueKind::String);
+        assert_eq!(kind("10n"), ValueKind::BigInt);
+        assert_eq!(kind("Symbol('d')"), ValueKind::Symbol);
+        assert_eq!(kind("(function f(){})"), ValueKind::Function);
+        assert_eq!(kind("(class C {})"), ValueKind::Function);
+        assert_eq!(kind("[1]"), ValueKind::Array);
+        assert_eq!(kind("new TypeError('x')"), ValueKind::Error);
+        assert_eq!(kind("Promise.resolve()"), ValueKind::Promise);
+        assert_eq!(kind("({})"), ValueKind::Object);
+        assert_eq!(kind("new Date()"), ValueKind::Object);
+    });
+}
+
+#[test]
+fn symbol_description_reads_what_tostring_cannot() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        let sym = s.eval("Symbol('desc')", "t").unwrap();
+        // The reason this primitive exists: `ToString` on a symbol throws.
+        assert!(s.coerce_string(&sym).is_err());
+        assert_eq!(s.symbol_description(&sym).as_deref(), Some("desc"));
+        let bare = s.eval("Symbol()", "t").unwrap();
+        assert_eq!(s.symbol_description(&bare), None);
+        assert_eq!(s.symbol_description(&JsValue::Number(1.0)), None);
+    });
+}
+
+#[test]
+fn own_enumerable_keys_are_object_keys() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        let obj = s
+            .eval(
+                "const o = { b: 1, a: 2, 2: 'two', 1: 'one' };\n\
+                 Object.defineProperty(o, 'hidden', { value: 3, enumerable: false });\n\
+                 o[Symbol('s')] = 4;\n\
+                 Object.setPrototypeOf(o, { inherited: 5 });\n\
+                 o",
+                "t",
+            )
+            .unwrap();
+        let JsValue::Object(obj) = obj else {
+            panic!("expected an object");
+        };
+        // Integer-like keys ascending first, then insertion order — and
+        // nothing non-enumerable, symbol-keyed or inherited.
+        let (keys, total) = s.own_enumerable_keys(&obj, 100).unwrap();
+        assert_eq!(keys, ["1", "2", "b", "a"]);
+        assert_eq!(total, 4);
+        // The limit bounds what is *materialized*, but the total is still
+        // reported, so a caller can truncate honestly.
+        let (keys, total) = s.own_enumerable_keys(&obj, 2).unwrap();
+        assert_eq!(keys, ["1", "2"]);
+        assert_eq!(total, 4);
+        assert_eq!(s.own_enumerable_keys(&obj, 0).unwrap(), (Vec::new(), 4));
+    });
+}
+
+#[test]
+fn capture_stack_sees_the_caller_from_a_host_callback() {
+    let realm = realm();
+    let seen: Rc<std::cell::RefCell<Vec<String>>> = Rc::default();
+    let sink = Rc::clone(&seen);
+    realm.with_scope(|s| {
+        // Nothing on the JS stack yet.
+        assert!(s.capture_stack().is_empty());
+        let probe: HostFn = Rc::new(move |scope, _call| {
+            sink.borrow_mut().extend(
+                scope
+                    .capture_stack()
+                    .into_iter()
+                    .map(|f| format!("{}@{}:{}", f.function.unwrap_or_default(), f.url, f.line)),
+            );
+            Ok(JsValue::Undefined)
+        });
+        let f = s.new_function("probe", 0, probe).unwrap();
+        let global = s.global();
+        s.set(&global, "probe", &JsValue::Object(f)).unwrap();
+        s.eval("function caller(){ probe() }\ncaller()", "http://x/p.js")
+            .unwrap();
+    });
+    let seen = seen.borrow();
+    assert_eq!(
+        seen.as_slice(),
+        ["caller@http://x/p.js:1", "<eval>@http://x/p.js:2"],
+        "capture_stack must drop the native frame and keep the JS callers"
+    );
+}
+
+#[test]
+fn capture_location_is_the_innermost_frame() {
+    let realm = realm();
+    let seen: Rc<std::cell::RefCell<Vec<Option<oxidepage_js::StackFrame>>>> = Rc::default();
+    let sink = Rc::clone(&seen);
+    realm.with_scope(|s| {
+        assert!(s.capture_location().is_none());
+        let probe: HostFn = Rc::new(move |scope, _call| {
+            sink.borrow_mut().push(scope.capture_location());
+            Ok(JsValue::Undefined)
+        });
+        let f = s.new_function("probe", 0, probe).unwrap();
+        let global = s.global();
+        s.set(&global, "probe", &JsValue::Object(f)).unwrap();
+        s.eval("function caller(){ probe() }\ncaller()", "http://x/p.js")
+            .unwrap();
+    });
+    let seen = seen.borrow();
+    let frame = seen[0].as_ref().expect("a frame");
+    assert_eq!(frame.function.as_deref(), Some("caller"));
+    assert_eq!(frame.url, "http://x/p.js");
+}
+
+#[test]
+fn a_thrown_symbol_is_named_and_leaves_no_pending_exception() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        // `ToString` on a symbol throws; naming it must not leave *that*
+        // exception pending for unrelated script to be blamed for.
+        let err = s.eval("throw Symbol('boom')", "t").unwrap_err();
+        assert_eq!(err.to_string(), "Symbol(boom)");
+        assert!(matches!(s.eval("1 + 1", "t").unwrap(), JsValue::Number(n) if n == 2.0));
+        let err = s.eval("throw Symbol()", "t").unwrap_err();
+        assert_eq!(err.to_string(), "Symbol()");
+    });
+}
+
+#[test]
+fn capture_stack_leaves_no_pending_exception() {
+    let realm = realm();
+    realm.with_scope(|s| {
+        s.eval("globalThis.x = 1", "t").unwrap();
+        let _ = s.capture_stack();
+        // A stack capture that left a pending exception would surface here,
+        // blamed on unrelated script.
+        assert!(matches!(s.eval("x + 1", "t").unwrap(), JsValue::Number(n) if n == 2.0));
     });
 }

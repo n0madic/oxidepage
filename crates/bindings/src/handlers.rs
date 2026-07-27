@@ -241,7 +241,7 @@ fn compile(cx: &BindCx<'_>, element: NodeId, event_type: &str, source: &str) -> 
         Ok(factory) => factory,
         Err(error) => {
             // Spec: a handler that does not compile is reported and left null.
-            cx.report_callback_error(error);
+            cx.report_callback_error(&error);
             return None;
         }
     };
@@ -252,7 +252,7 @@ fn compile(cx: &BindCx<'_>, element: NodeId, event_type: &str, source: &str) -> 
         Ok(handler) if cx.scope.is_function(&handler) => Some(handler),
         Ok(_) => None,
         Err(error) => {
-            cx.report_callback_error(error);
+            cx.report_callback_error(&error);
             None
         }
     }

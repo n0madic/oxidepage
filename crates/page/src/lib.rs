@@ -19,14 +19,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 use oxidepage_base::{NodeId, Rect, RequestId};
 use oxidepage_bindings::{
-    BindCx, ConsoleLevel, EventTargetKey, HostHooks, NavigationBody, PageState, PendingNavigation,
+    BindCx, EventTargetKey, HostHooks, NavigationBody, PageState, PendingNavigation,
     TimingMilestone, is_classic_script_type,
 };
 use oxidepage_dom::{DomTree, ParseOptions, ParseSignal, Parser, StyleUpdate};
@@ -42,6 +42,16 @@ use style::stylesheets::Origin;
 
 mod render;
 
+// The observable page-event vocabulary is built in `bindings` (the call sites
+// are the only places with a JS scope) but is an embedder-facing part of
+// *this* crate's API, so it is re-exported wholesale: one import path, no
+// `oxidepage_bindings` dependency in an embedder's Cargo.toml (ADR-0025 D9).
+pub use oxidepage_bindings::{
+    ConsoleLevel, ConsoleMessage, DialogEvent, DialogHandler, DialogKind, DialogRequest,
+    DialogResponse, PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING,
+    ScriptError, ScriptErrorKind, ValuePreview, render_preview, render_preview_top,
+};
+pub use oxidepage_js::{StackFrame, parse_stack};
 pub use oxidepage_layout::disable_system_fonts;
 pub use oxidepage_net::ResourcePolicy;
 pub use oxidepage_paint::DisplayList;
@@ -82,6 +92,14 @@ const MAX_CHAINED_NAVIGATIONS: usize = 20;
 /// the session history — the newest events are the ones a driver acts on, so
 /// the front of the stream is what gets dropped.
 const MAX_NAVIGATION_EVENTS: usize = 1024;
+
+/// Console lines, script errors and dialogs retained before the oldest are
+/// dropped. Bounded for the reason [`MAX_NAVIGATION_EVENTS`] is — draining is
+/// the embedder's job and nothing forces it — and more urgently here, because
+/// a console message now retains an owned tree of argument previews.
+pub const MAX_CONSOLE_MESSAGES: usize = 1024;
+pub const MAX_SCRIPT_ERRORS: usize = 1024;
+pub const MAX_DIALOG_EVENTS: usize = 256;
 
 /// Where a commit puts its session-history entry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,13 +145,6 @@ fn clamp_timer_delay(delay_ms: f64, nesting: u32) -> Duration {
         delay = MIN_NESTED_TIMER_DELAY;
     }
     delay
-}
-
-/// A console line captured from page script.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConsoleMessage {
-    pub level: ConsoleLevel,
-    pub message: String,
 }
 
 /// A milestone in the life of one navigation.
@@ -378,6 +389,14 @@ pub struct PageOptions {
     /// from the capture. This is the script-driven twin of the `lazy_images` /
     /// [`Page::load_deferred_images`] problem, and wants the same answer.
     pub whole_document_visible: bool,
+    /// Answers `window.alert`/`confirm`/`prompt`. `None` auto-dismisses, which
+    /// is the policy both Puppeteer and Playwright apply when no `dialog`
+    /// listener is attached.
+    ///
+    /// Here rather than only on [`Page::set_dialog_handler`] because
+    /// [`load_html_page`] runs inline scripts *during* the call: a
+    /// post-construction setter cannot answer a dialog raised at parse time.
+    pub dialog_handler: Option<DialogHandler>,
 }
 
 /// Default wall-clock budget for a single task's stay in JavaScript.
@@ -489,16 +508,31 @@ struct LoopHooks {
     /// no timer callback is on the stack). Timers scheduled during a callback
     /// inherit `current + 1`.
     timer_nesting: Cell<u32>,
-    console: RefCell<Vec<ConsoleMessage>>,
-    errors: RefCell<Vec<String>>,
-    /// Rejected promises that have no handler *yet*, rendered. A rejection is
-    /// only an error if nothing ever handles it, and a handler may attach long
-    /// after the rejection (`p = fetch(…)` now, `p.catch(…)` next tick), so
-    /// these are held here and reported only if they survive to
-    /// [`Page::drain_errors`]. Keyed by rendered reason: the engine-neutral
-    /// tracker carries no promise identity, and two rejections that render
-    /// identically are indistinguishable anyway.
-    pending_rejections: RefCell<Vec<String>>,
+    console: RefCell<VecDeque<ConsoleMessage>>,
+    errors: RefCell<VecDeque<ScriptError>>,
+    /// Rejected promises that have no handler *yet*. A rejection is only an
+    /// error if nothing ever handles it, and a handler may attach long after
+    /// the rejection (`p = fetch(…)` now, `p.catch(…)` next tick), so these
+    /// are held here and reported only if they survive to
+    /// [`Page::drain_errors`]. Keyed by `JsError::rendered()`: the
+    /// engine-neutral tracker carries no promise identity, and message plus
+    /// stack is exactly the discriminating power it does have. (The bare
+    /// message alone would retract more aggressively than the engine
+    /// rejected.)
+    pending_rejections: RefCell<VecDeque<(String, ScriptError)>>,
+    /// The embedder's answer for `alert`/`confirm`/`prompt`; `None`
+    /// auto-dismisses.
+    dialog_handler: RefCell<Option<DialogHandler>>,
+    dialogs: RefCell<VecDeque<DialogEvent>>,
+    /// Time origin for the payload timestamps the hooks stamp themselves.
+    ///
+    /// Seeded provisionally at construction and then **replaced with
+    /// `PageState`'s** once the bindings are installed (`Page::new`), because
+    /// the hooks exist before the state does. Sharing one origin is what makes
+    /// a console message, an engine warning and a dialog event comparable:
+    /// two independently-seeded clocks would order a merged view wrongly.
+    start: Cell<Instant>,
+    time_origin_epoch_ms: Cell<f64>,
     /// The net service, installed after the hooks (which the bindings
     /// captured) are created.
     net: RefCell<Option<Rc<NetService>>>,
@@ -515,9 +549,19 @@ impl Default for LoopHooks {
             next_raf_id: Cell::new(1),
             raf_cancelled: RefCell::new(HashSet::new()),
             timer_nesting: Cell::new(0),
-            console: RefCell::new(Vec::new()),
-            errors: RefCell::new(Vec::new()),
-            pending_rejections: RefCell::new(Vec::new()),
+            console: RefCell::new(VecDeque::new()),
+            errors: RefCell::new(VecDeque::new()),
+            pending_rejections: RefCell::new(VecDeque::new()),
+            dialog_handler: RefCell::new(None),
+            dialogs: RefCell::new(VecDeque::new()),
+            start: Cell::new(Instant::now()),
+            time_origin_epoch_ms: Cell::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    * 1000.0,
+            ),
             net: RefCell::new(None),
         }
     }
@@ -526,6 +570,36 @@ impl Default for LoopHooks {
 impl LoopHooks {
     fn set_net(&self, net: Rc<NetService>) {
         *self.net.borrow_mut() = Some(net);
+    }
+
+    /// Adopts the bindings' time origin, so every payload timestamp — console
+    /// lines from script, engine warnings, dialogs — comes off one clock.
+    fn adopt_time_origin(&self, origin: (Instant, f64)) {
+        self.start.set(origin.0);
+        self.time_origin_epoch_ms.set(origin.1);
+    }
+
+    /// A monotonic Unix-epoch timestamp in milliseconds — the same clock and
+    /// origin as `PageState::epoch_now_ms`, hence as `NavigationEvent`.
+    fn now_ms(&self) -> f64 {
+        self.time_origin_epoch_ms.get() + self.start.get().elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// Reports an engine-side failure with no JS exception behind it: a
+    /// subresource that would not load, a module specifier that would not
+    /// resolve.
+    fn report_resource_error(&self, message: String) {
+        self.report_error(ScriptError::engine(
+            ScriptErrorKind::Resource,
+            message,
+            self.now_ms(),
+        ));
+    }
+
+    /// Records an engine-originated console line (no JS arguments, no call
+    /// site) — the event loop's own diagnostics.
+    fn engine_console(&self, level: ConsoleLevel, message: String) {
+        self.console_message(ConsoleMessage::engine(level, message, self.now_ms()));
     }
 
     fn next_seq(&self) -> u64 {
@@ -602,15 +676,65 @@ impl LoopHooks {
     }
 }
 
+/// Drops from the front so an undrained stream cannot grow without bound; the
+/// newest entries are the ones an embedder acts on.
+///
+/// A `VecDeque`, not a `Vec`: once a stream is at capacity every further push
+/// evicts one entry, and `Vec::drain(..1)` would memmove the whole retained
+/// buffer each time — O(cap) per console line, on the path a chatty page hits
+/// hardest.
+fn push_bounded<T>(stream: &RefCell<VecDeque<T>>, cap: usize, item: T) {
+    let mut stream = stream.borrow_mut();
+    while stream.len() >= cap {
+        stream.pop_front();
+    }
+    stream.push_back(item);
+}
+
+/// Empties a bounded stream into the `Vec` the embedder gets, oldest first.
+fn drain_stream<T>(stream: &RefCell<VecDeque<T>>) -> Vec<T> {
+    stream.borrow_mut().drain(..).collect()
+}
+
 impl HostHooks for LoopHooks {
-    fn console_message(&self, level: ConsoleLevel, message: String) {
-        self.console
-            .borrow_mut()
-            .push(ConsoleMessage { level, message });
+    fn console_message(&self, message: ConsoleMessage) {
+        push_bounded(&self.console, MAX_CONSOLE_MESSAGES, message);
     }
 
-    fn report_error(&self, message: String) {
-        self.errors.borrow_mut().push(message);
+    fn report_error(&self, error: ScriptError) {
+        push_bounded(&self.errors, MAX_SCRIPT_ERRORS, error);
+    }
+
+    fn run_dialog(&self, request: DialogRequest) -> DialogResponse {
+        // Clone the handler out and *drop the borrow* before calling it: the
+        // handler is embedder code, and one that reinstalls itself would
+        // otherwise panic on the borrow. (It cannot reach the page any other
+        // way — see `DialogHandler`.)
+        let handler = self.dialog_handler.borrow().clone();
+        let response = match handler {
+            Some(handler) => handler(&request),
+            // The default policy, and what both drivers do with no listener
+            // attached.
+            None => DialogResponse::Dismiss,
+        };
+        let DialogRequest {
+            kind,
+            message,
+            default_value,
+            ..
+        } = request;
+        push_bounded(
+            &self.dialogs,
+            MAX_DIALOG_EVENTS,
+            DialogEvent {
+                kind,
+                message,
+                default_value,
+                response: response.clone(),
+                timestamp: self.now_ms(),
+            },
+        );
+        response
     }
 
     fn schedule_timer(
@@ -944,7 +1068,7 @@ pub struct Page {
     navigating: Cell<bool>,
     /// The navigation milestone stream, drained by
     /// [`Page::drain_navigation_events`].
-    navigation_events: RefCell<Vec<NavigationEvent>>,
+    navigation_events: RefCell<VecDeque<NavigationEvent>>,
     /// Current viewport, retained so a navigation can rebuild the style/layout
     /// engines for the fresh document.
     viewport: Cell<Viewport>,
@@ -972,6 +1096,7 @@ impl Page {
             script_budget,
             lazy_images,
             whole_document_visible,
+            dialog_handler,
         } = options;
         let viewport = viewport.unwrap_or_default();
         let screen = screen.unwrap_or_else(|| ScreenProfile::from_viewport(viewport));
@@ -999,6 +1124,7 @@ impl Page {
         }
         let dom = Rc::new(RefCell::new(tree));
         let hooks = Rc::new(LoopHooks::default());
+        *hooks.dialog_handler.borrow_mut() = dialog_handler;
         {
             // A promise that rejects with nobody listening is how a broken page
             // fails *silently*: the module evaluated, the app never mounted, and
@@ -1007,15 +1133,26 @@ impl Page {
             // them in, so they become reported errors instead.
             let hooks = Rc::clone(&hooks);
             realm.set_rejection_tracker(Some(Box::new(move |reason, is_handled| {
-                let mut pending = hooks.pending_rejections.borrow_mut();
+                let key = reason.rendered();
                 if is_handled {
                     // A handler attached after the fact: retract the rejection.
-                    if let Some(at) = pending.iter().position(|r| *r == reason) {
+                    let mut pending = hooks.pending_rejections.borrow_mut();
+                    if let Some(at) = pending.iter().position(|(k, _)| *k == key) {
                         pending.remove(at);
                     }
-                } else {
-                    pending.push(reason);
+                    return;
                 }
+                let error = ScriptError::from_js(
+                    ScriptErrorKind::UnhandledRejection,
+                    &reason,
+                    hooks.now_ms(),
+                );
+                // Bounded like every other stream: these are held until
+                // `drain_errors`, and a page that rejects in a loop must not
+                // grow them without limit. Dropping the oldest costs the
+                // ability to retract it, which is the same trade the other
+                // streams make.
+                push_bounded(&hooks.pending_rejections, MAX_SCRIPT_ERRORS, (key, error));
             })));
         }
         let state = oxidepage_bindings::install_with_profiles(
@@ -1027,6 +1164,7 @@ impl Page {
             screen_data,
         )?;
         state.set_whole_document_visible(whole_document_visible);
+        hooks.adopt_time_origin(state.time_origin());
 
         let policy = policy.unwrap_or_default();
         let (net, net_rx) = NetService::new_with_defaults(policy, request_defaults)
@@ -1067,7 +1205,7 @@ impl Page {
             load_fired: Cell::new(false),
             network_idle_recorded: Cell::new(false),
             navigating: Cell::new(false),
-            navigation_events: RefCell::new(Vec::new()),
+            navigation_events: RefCell::new(VecDeque::new()),
             viewport: Cell::new(viewport),
             render: render::RenderState::default(),
             start_time: Cell::new(Instant::now()),
@@ -1182,23 +1320,20 @@ impl Page {
     /// Drains the navigation milestone stream (see [`NavigationEvent`]).
     #[must_use]
     pub fn drain_navigation_events(&self) -> Vec<NavigationEvent> {
-        std::mem::take(&mut self.navigation_events.borrow_mut())
+        drain_stream(&self.navigation_events)
     }
 
     fn record_navigation(&self, kind: NavigationEventKind, url: &str, error: Option<String>) {
-        let mut events = self.navigation_events.borrow_mut();
-        if events.len() >= MAX_NAVIGATION_EVENTS {
-            // Drop from the front: an undrained stream must not grow without
-            // bound, and the newest milestones are the useful ones.
-            let overflow = events.len() + 1 - MAX_NAVIGATION_EVENTS;
-            events.drain(..overflow);
-        }
-        events.push(NavigationEvent {
-            kind,
-            url: url.to_owned(),
-            error,
-            timestamp: self.state.epoch_now_ms(),
-        });
+        push_bounded(
+            &self.navigation_events,
+            MAX_NAVIGATION_EVENTS,
+            NavigationEvent {
+                kind,
+                url: url.to_owned(),
+                error,
+                timestamp: self.state.epoch_now_ms(),
+            },
+        );
     }
 
     /// Resolves a possibly-relative URL against the current document URL.
@@ -1246,7 +1381,7 @@ impl Page {
                      script-driven navigations; the chain was stopped"
                 );
                 self.hooks
-                    .console_message(ConsoleLevel::Error, message.clone());
+                    .engine_console(ConsoleLevel::Error, message.clone());
                 self.record_navigation(NavigationEventKind::Failed, &url, Some(message));
                 return Ok(());
             }
@@ -1433,7 +1568,7 @@ impl Page {
                 }
                 // A failed script-initiated navigation keeps the current
                 // document — the page is not blanked, it simply did not move.
-                self.hooks.console_message(
+                self.hooks.engine_console(
                     ConsoleLevel::Error,
                     format!("navigation to `{url}` failed: {message}"),
                 );
@@ -1858,7 +1993,7 @@ impl Page {
                         .push(Deferred::ModuleExternal { url }),
                     None => self
                         .hooks
-                        .report_error(format!("cannot resolve module src `{src}`")),
+                        .report_resource_error(format!("cannot resolve module src `{src}`")),
                 },
                 None => {
                     let url = self.state.dom.borrow().document_url().to_owned();
@@ -1881,7 +2016,7 @@ impl Page {
         };
         let Some(url) = self.resolve_url(&src) else {
             self.hooks
-                .report_error(format!("cannot resolve script src `{src}`"));
+                .report_resource_error(format!("cannot resolve script src `{src}`"));
             return;
         };
         if is_async {
@@ -1949,10 +2084,13 @@ impl Page {
                             let source = decode_charset(&out.body, ct.as_deref());
                             self.eval_module(&source, &out.head.final_url);
                         }
-                        Ok(out) => self
+                        Ok(out) => self.hooks.report_resource_error(format!(
+                            "module `{url}`: HTTP {}",
+                            out.head.status
+                        )),
+                        Err(e) => self
                             .hooks
-                            .report_error(format!("module `{url}`: HTTP {}", out.head.status)),
-                        Err(e) => self.hooks.report_error(format!("module `{url}`: {e}")),
+                            .report_resource_error(format!("module `{url}`: {e}")),
                     }
                 }
             }
@@ -1975,8 +2113,10 @@ impl Page {
             }
             Ok(out) => self
                 .hooks
-                .report_error(format!("script `{url}`: HTTP {}", out.head.status)),
-            Err(e) => self.hooks.report_error(format!("script `{url}`: {e}")),
+                .report_resource_error(format!("script `{url}`: HTTP {}", out.head.status)),
+            Err(e) => self
+                .hooks
+                .report_resource_error(format!("script `{url}`: {e}")),
         }
     }
 
@@ -2011,7 +2151,7 @@ impl Page {
                         Some(error) => self.report_script_error(&error),
                         None => self
                             .hooks
-                            .report_error(format!("module `{url}` evaluation rejected")),
+                            .report_resource_error(format!("module `{url}` evaluation rejected")),
                     }
                 }
             }
@@ -2112,7 +2252,7 @@ impl Page {
 
         let Some(url) = self.resolve_url(&src) else {
             self.hooks
-                .report_error(format!("cannot resolve dynamic script src `{src}`"));
+                .report_resource_error(format!("cannot resolve dynamic script src `{src}`"));
             self.fire_element_event(node, "error");
             return;
         };
@@ -2157,7 +2297,7 @@ impl Page {
                 }
             }
             Err(message) => {
-                self.hooks.report_error(message);
+                self.hooks.report_resource_error(message);
                 self.fire_element_event(completed.node, "error");
             }
         }
@@ -2777,7 +2917,7 @@ impl Page {
                 let pending = self.pending_images.borrow_mut().remove(&id);
                 if let Some(pending) = pending {
                     self.hooks
-                        .report_error(format!("image `{}`: {error}", pending.url));
+                        .report_resource_error(format!("image `{}`: {error}", pending.url));
                     self.mark_image_broken(&pending.url);
                     self.decr_in_flight();
                     self.net.finish(id);
@@ -2978,7 +3118,7 @@ impl Page {
                 let pending = self.pending_fonts.borrow_mut().remove(&id);
                 if let Some(pending) = pending {
                     self.hooks
-                        .report_error(format!("web font `{}`: {error}", pending.url));
+                        .report_resource_error(format!("web font `{}`: {error}", pending.url));
                     self.start_font_load(&pending.family, &pending.fallbacks, pending.attrs);
                     self.decr_in_flight();
                     self.net.finish(id);
@@ -3077,7 +3217,7 @@ impl Page {
                             Ok(source) => {
                                 let _ = self.eval_classic(&source, &script.url, Some(script.node));
                             }
-                            Err(message) => self.hooks.report_error(message),
+                            Err(message) => self.hooks.report_resource_error(message),
                         }
                     }
                 }
@@ -3102,7 +3242,7 @@ impl Page {
                             self.finish_dynamic_script(completed);
                         }
                     } else {
-                        self.hooks.report_error(match completed.result {
+                        self.hooks.report_resource_error(match completed.result {
                             Ok(_) => unreachable!(),
                             Err(message) => message,
                         });
@@ -3222,7 +3362,7 @@ impl Page {
         };
         let Some(url) = self.resolve_url(&href) else {
             self.hooks
-                .report_error(format!("cannot resolve stylesheet href `{href}`"));
+                .report_resource_error(format!("cannot resolve stylesheet href `{href}`"));
             return;
         };
         let url = url.to_string();
@@ -3341,7 +3481,7 @@ impl Page {
                     // A non-success status delivers an error page, not CSS; per
                     // the HTML spec the sheet load is a network error (skip it).
                     let ok = if pending.status >= 400 {
-                        self.hooks.report_error(format!(
+                        self.hooks.report_resource_error(format!(
                             "stylesheet `{}`: HTTP {}",
                             pending.url, pending.status
                         ));
@@ -3369,7 +3509,7 @@ impl Page {
                 if let Some(pending) = pending {
                     // A broken stylesheet must not hang the load.
                     self.hooks
-                        .report_error(format!("stylesheet `{}`: {error}", pending.url));
+                        .report_resource_error(format!("stylesheet `{}`: {error}", pending.url));
                     self.decr_stylesheet(id);
                     self.fire_element_event(pending.node, "error");
                 }
@@ -3491,8 +3631,9 @@ impl Page {
             // parser's DOM mutations become visible to Window named access.
             // A no-op unless the document's element ids changed.
             if let Err(error) = oxidepage_bindings::sync_named_properties(&cx) {
-                self.hooks
-                    .report_error(format!("failed to sync window named properties: {error:?}"));
+                self.hooks.report_resource_error(format!(
+                    "failed to sync window named properties: {error:?}"
+                ));
             }
             f(&cx)
         });
@@ -3506,12 +3647,22 @@ impl Page {
     /// The engine surfaces an interrupt as an opaque `InternalError`, which
     /// says nothing about why the script stopped.
     fn report_script_error(&self, error: &JsError) {
+        let now = self.state.epoch_now_ms();
         if self.script_budget.tripped() {
+            // The aborted script's own frames still name the function that
+            // looped, which the opaque `InternalError` never did.
             let ms = self.script_budget.limit.as_millis();
-            self.hooks
-                .report_error(format!("script exceeded the {ms} ms execution budget"));
+            self.hooks.report_error(ScriptError {
+                // Not the engine's placeholder `InternalError`: the frames are
+                // the new information, and a driver reading `name` must not be
+                // told the abort was an internal error.
+                name: None,
+                message: format!("script exceeded the {ms} ms execution budget"),
+                ..ScriptError::from_js(ScriptErrorKind::ScriptBudget, error, now)
+            });
         } else {
-            self.hooks.report_error(error.to_string());
+            self.hooks
+                .report_error(ScriptError::from_js(ScriptErrorKind::Uncaught, error, now));
         }
     }
 
@@ -3530,20 +3681,39 @@ impl Page {
 
     /// Drains console output captured so far.
     pub fn drain_console(&self) -> Vec<ConsoleMessage> {
-        std::mem::take(&mut self.hooks.console.borrow_mut())
+        drain_stream(&self.hooks.console)
     }
 
     /// Drains reported script errors (uncaught exceptions in scripts,
     /// listeners, and timer callbacks), plus every promise rejection still
     /// unhandled at this point — the last moment a handler could have attached.
-    pub fn drain_errors(&self) -> Vec<String> {
-        let mut errors = std::mem::take(&mut *self.hooks.errors.borrow_mut());
+    #[must_use]
+    pub fn drain_errors(&self) -> Vec<ScriptError> {
+        let mut errors = drain_stream(&self.hooks.errors);
         errors.extend(
-            std::mem::take(&mut *self.hooks.pending_rejections.borrow_mut())
+            drain_stream(&self.hooks.pending_rejections)
                 .into_iter()
-                .map(|reason| format!("unhandled promise rejection: {reason}")),
+                .map(|(_key, error)| error),
         );
         errors
+    }
+
+    /// Drains the dialog stream: every `alert`/`confirm`/`prompt` the page
+    /// opened, with the answer it got.
+    #[must_use]
+    pub fn drain_dialog_events(&self) -> Vec<DialogEvent> {
+        drain_stream(&self.hooks.dialogs)
+    }
+
+    /// Installs (or removes) the handler that answers `alert`/`confirm`/
+    /// `prompt`. `None` restores the auto-dismiss default.
+    ///
+    /// For a dialog raised by a *parse-time* inline script this is too late —
+    /// `load_html`/`navigate` run those scripts inside the call. Use
+    /// [`PageOptions::dialog_handler`] for that case; this mirrors
+    /// [`Page::set_viewport`] for a page already alive.
+    pub fn set_dialog_handler(&self, handler: Option<DialogHandler>) {
+        *self.hooks.dialog_handler.borrow_mut() = handler;
     }
 
     /// True once the `load` event has fired.
@@ -3777,12 +3947,22 @@ fn content_type_charset(content_type: &str) -> Option<String> {
     })
 }
 
+/// Reports a throw escaping a lifecycle-event dispatch (`load`, `popstate`,
+/// `scroll`, a synthesized input sequence).
+///
+/// `Callback`, not `Resource`: page script ran and raised this, even in the
+/// `JsThrow::Value` arm where the value cannot be structured from here — the
+/// dispatch helpers hand back a `JsThrow`, not a caught `JsError`.
 fn report_throw(hooks: &LoopHooks, throw: oxidepage_js::JsThrow) {
     let message = match throw {
         oxidepage_js::JsThrow::Type(m) | oxidepage_js::JsThrow::Range(m) => m,
         oxidepage_js::JsThrow::Value(_) => "exception while firing a lifecycle event".to_owned(),
     };
-    hooks.report_error(message);
+    hooks.report_error(ScriptError::engine(
+        ScriptErrorKind::Callback,
+        message,
+        hooks.now_ms(),
+    ));
 }
 
 /// Convenience: build a page and load `html` in one call.

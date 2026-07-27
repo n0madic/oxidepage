@@ -18,8 +18,10 @@ use oxidepage_net::NetRequest;
 use oxidepage_style::{StyleEngine, Viewport};
 
 use crate::collections::CollectionData;
+use crate::console::{ConsoleMessage, ScriptError};
 use crate::cssdata::{RuleData, RuleListData, SheetData, StyleDeclData};
 use crate::customreg::CustomElementRegistry;
+use crate::dialog::{DialogRequest, DialogResponse};
 use crate::events::{EventData, ListenerRegistry};
 use crate::netdata::{
     FormDataData, HeadersData, PendingNet, RequestData, ResponseData, UrlData, UrlSearchParamsData,
@@ -30,23 +32,24 @@ use crate::netdata::{
 pub(crate) const TAG_NODE: u32 = 1;
 pub(crate) const TAG_SLAB: u32 = 2;
 
-/// Console message severity, mirroring the console API methods.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ConsoleLevel {
-    Log,
-    Info,
-    Warn,
-    Error,
-    Debug,
-}
-
 /// Embedder hooks the bindings call out to (implemented by the page crate's
 /// event loop).
 pub trait HostHooks {
-    fn console_message(&self, level: ConsoleLevel, message: String);
+    /// Records one console line. The whole payload is built here, at the call
+    /// site — it is the only place with a scope to read argument values and
+    /// capture a stack from.
+    fn console_message(&self, message: ConsoleMessage);
     /// Reports an error that must not break control flow (listener throws,
     /// observer callback throws).
-    fn report_error(&self, message: String);
+    fn report_error(&self, error: ScriptError);
+
+    /// Runs a `window.alert` / `confirm` / `prompt` and answers it.
+    ///
+    /// Synchronous by construction: these three return a value to the calling
+    /// script, and the engine cannot suspend a running script. That is also
+    /// where HTML's "pause the page" comes from — the event loop never
+    /// regains control while the dialog is open.
+    fn run_dialog(&self, request: DialogRequest) -> DialogResponse;
     /// Schedules a timer; returns its id.
     fn schedule_timer(
         &self,
@@ -822,6 +825,10 @@ pub struct PageState {
     /// Per-document bounds for parser writes.
     pub(crate) parser_write_calls: Cell<usize>,
     pub(crate) parser_write_bytes: Cell<usize>,
+    /// `console.group` nesting depth. Grouping has no other observable effect
+    /// in a headless console, so the depth *is* the feature — it rides on
+    /// every `ConsoleMessage` and the CLI indents by it.
+    pub(crate) console_group_depth: Cell<u32>,
     /// The classic `<script>` element whose source is currently evaluating.
     /// Modules and callbacks outside direct script evaluation observe `None`.
     pub current_script: Cell<Option<NodeId>>,
@@ -977,6 +984,7 @@ impl PageState {
             pending_parser_write: RefCell::new(String::new()),
             parser_write_calls: Cell::new(0),
             parser_write_bytes: Cell::new(0),
+            console_group_depth: Cell::new(0),
             current_script: Cell::new(None),
             navigator: Rc::new(navigator),
             navigator_js: RefCell::new(None),
@@ -1022,6 +1030,17 @@ impl PageState {
     /// the page runs, so the observers script installs at startup see it.
     pub fn set_whole_document_visible(&self, whole: bool) {
         self.whole_document_visible.set(whole);
+    }
+
+    /// The time origin behind [`PageState::epoch_now_ms`]: the monotonic base
+    /// and the wall-clock reading paired with it.
+    ///
+    /// Exposed so the embedder's own event loop can stamp its payloads off the
+    /// *same* clock — a second, independently-seeded origin would put console
+    /// lines and loop-emitted events on timescales that cannot be merged.
+    #[must_use]
+    pub fn time_origin(&self) -> (std::time::Instant, f64) {
+        (self.start, self.time_origin_epoch_ms)
     }
 
     /// A monotonic Unix-epoch timestamp in milliseconds (time origin plus the
@@ -1159,6 +1178,8 @@ impl PageState {
         self.pending_parser_write.borrow_mut().clear();
         self.parser_write_calls.set(0);
         self.parser_write_bytes.set(0);
+        // A group the outgoing document opened must not indent the next one.
+        self.console_group_depth.set(0);
         // `pending_navigation` is deliberately *not* cleared. The commit path
         // takes the request before it starts loading, so nothing stale is left
         // here for the incoming document — and a navigation the outgoing

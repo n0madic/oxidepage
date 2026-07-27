@@ -21,7 +21,7 @@ pub mod value;
 use std::any::Any;
 use std::rc::Rc;
 
-pub use error::{JsError, JsThrow};
+pub use error::{JsError, JsThrow, StackFrame, parse_first_frame, parse_stack};
 pub use quickjs::{QuickJsEngine, QuickJsRealm};
 pub use value::{JsObject, JsValue};
 
@@ -47,6 +47,31 @@ pub enum PromiseState {
     Rejected,
 }
 
+/// The engine-neutral shape of a value.
+///
+/// Richer than `typeof`, because the *subtype* is what an inspector needs: a
+/// value preview (and, later, CDP's `RemoteObject.subtype`) renders an array,
+/// an `Error` and a plain object completely differently, and `typeof` calls
+/// all three `"object"`. [`JsValue::Object`] likewise covers functions,
+/// symbols and BigInts, none of which a preview may coerce to a string
+/// blindly — `ToString` on a symbol throws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ValueKind {
+    Undefined,
+    Null,
+    Bool,
+    Number,
+    BigInt,
+    String,
+    Symbol,
+    Function,
+    Array,
+    Error,
+    Promise,
+    /// Anything else with object identity, including proxies and host objects.
+    Object,
+}
+
 /// A JavaScript engine backend, producing realms.
 pub trait JsEngine: 'static {
     type Realm: JsRealm;
@@ -69,8 +94,10 @@ pub struct RealmOptions {
 pub struct JobsOutcome {
     /// Number of jobs executed (including ones that threw).
     pub executed: usize,
-    /// Rendered messages of exceptions thrown by jobs.
-    pub errors: Vec<String>,
+    /// Exceptions thrown by jobs. Structured, not rendered: a promise
+    /// reaction that throws is reported to the embedder exactly like an
+    /// uncaught script exception, so it needs the same stack.
+    pub errors: Vec<JsError>,
 }
 
 impl JobsOutcome {
@@ -191,8 +218,41 @@ pub trait JsScope {
 
     fn is_function(&self, value: &JsValue) -> bool;
     fn is_array(&self, value: &JsValue) -> bool;
+    /// The shape of `value` (see [`ValueKind`]).
+    fn value_kind(&self, value: &JsValue) -> ValueKind;
     /// JS `===` (for object identity; primitives compare structurally).
     fn strict_equals(&self, a: &JsValue, b: &JsValue) -> bool;
+
+    /// The object's own enumerable string-keyed properties, in property-order
+    /// (integer-like keys ascending, then insertion order) — the keys
+    /// `Object.keys` would return.
+    ///
+    /// Returns at most `limit` names plus the **total** count, so a caller
+    /// that shows a bounded preview can report an honest truncation without
+    /// paying one allocation per key of an object with millions of them.
+    fn own_enumerable_keys(
+        &self,
+        obj: &JsObject,
+        limit: usize,
+    ) -> Result<(Vec<String>, usize), JsError>;
+
+    /// The description of a `Symbol`, or `None` for any other value.
+    ///
+    /// Separate from [`JsScope::coerce_string`] on purpose: `ToString` on a
+    /// symbol *throws*, so an inspector has no other way to name one.
+    fn symbol_description(&self, value: &JsValue) -> Option<String>;
+
+    /// The current JS call stack, innermost first, native frames dropped.
+    ///
+    /// Empty when no script is on the stack. Nothing is thrown and no pending
+    /// exception is disturbed — this is for the non-throwing case
+    /// (`console.trace`, a console call's source location).
+    fn capture_stack(&self) -> Vec<StackFrame>;
+
+    /// The innermost script frame of the current call stack, `None` when no
+    /// script is on it. Cheaper than [`JsScope::capture_stack`] when that is
+    /// all the caller keeps, which is the common case.
+    fn capture_location(&self) -> Option<StackFrame>;
 
     /// JS `ToString` coercion.
     fn coerce_string(&self, value: &JsValue) -> Result<String, JsError>;
@@ -256,10 +316,12 @@ pub trait JsRealm: 'static {
     fn set_interrupt(&self, callback: Option<Box<dyn FnMut() -> bool>>);
 
     /// Installs a promise-rejection tracker. The callback receives the
-    /// rendered rejection reason and `is_handled` (`false` when a rejection
-    /// becomes unhandled, `true` when a previously-unhandled rejection gets
-    /// a handler attached after the fact).
-    fn set_rejection_tracker(&self, callback: Option<Box<dyn Fn(String, bool)>>);
+    /// rejection reason (structured like any other exception, but with no
+    /// `value`: the tracker fires outside any scope the reason could be
+    /// imported into) and `is_handled` (`false` when a rejection becomes
+    /// unhandled, `true` when a previously-unhandled rejection gets a handler
+    /// attached after the fact).
+    fn set_rejection_tracker(&self, callback: Option<Box<dyn Fn(JsError, bool)>>);
 
     fn set_memory_limit(&self, bytes: usize);
 
