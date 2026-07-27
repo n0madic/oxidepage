@@ -388,7 +388,11 @@ v1 limits.
   ancestor that can move; `document.hasFocus()` is real (false for a document
   with no browsing context).
   `relatedTarget` is retargeted across shadow boundaries, so a closed tree does
-  not leak the node the pointer came from.
+  not leak the node the pointer came from. `XMLHttpRequest` is a real
+  `EventTarget` — its events are genuine `Event` objects (so `preventDefault`,
+  `currentTarget`, `isTrusted` and `instanceof Event` work) and its listeners
+  honour `capture`/`once`/`passive`; **not** implemented there: `ProgressEvent`,
+  `xhr.upload`, `progress`/`timeout`.
   **Not implemented:** touch and gesture events,
   `Selection`/`Range` over arbitrary DOM, `contenteditable`, drag-and-drop,
   clipboard, IME composition *generation* (the interface exists), smooth

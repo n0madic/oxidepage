@@ -72,7 +72,10 @@ interface Response {
   any arrayBuffer();
 };
 
-interface XMLHttpRequest {
+// A real `EventTarget`, so `addEventListener` gets capture/`once`/`passive`,
+// `===` dedup and `handleEvent` objects, `dispatchEvent` exists, and the events
+// it fires are real `Event` objects rather than `{type, target}` stand-ins.
+interface XMLHttpRequest : EventTarget {
   constructor();
 
   const unsigned short UNSENT = 0;
@@ -103,7 +106,4 @@ interface XMLHttpRequest {
   attribute USVString responseType;
   readonly attribute USVString responseText;
   readonly attribute any response;
-
-  undefined addEventListener(USVString type, any callback);
-  undefined removeEventListener(USVString type, any callback);
 };

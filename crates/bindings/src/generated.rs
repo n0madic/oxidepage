@@ -1962,7 +1962,7 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         },
     )?;
 
-    let proto_xml_http_request = cx.begin_interface("XMLHttpRequest", None)?;
+    let proto_xml_http_request = cx.begin_interface("XMLHttpRequest", Some("EventTarget"))?;
     cx.define_constant(&proto_xml_http_request, "UNSENT", 0f64)?;
     cx.define_constant(&proto_xml_http_request, "OPENED", 1f64)?;
     cx.define_constant(&proto_xml_http_request, "HEADERS_RECEIVED", 2f64)?;
@@ -2070,18 +2070,6 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         &proto_xml_http_request,
         "response",
         gen_xml_http_request_get_response,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "addEventListener",
-        2,
-        gen_xml_http_request_add_event_listener,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "removeEventListener",
-        2,
-        gen_xml_http_request_remove_event_listener,
     )?;
     cx.finish_interface(
         "XMLHttpRequest",
@@ -9196,28 +9184,6 @@ fn gen_xml_http_request_get_response_text(
 fn gen_xml_http_request_get_response(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
     imp::xml_http_request::response(cx, this)
-}
-
-fn gen_xml_http_request_add_event_listener(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_dom_string(call, 0)?;
-    let a1 = call.arg(1);
-    imp::xml_http_request::add_event_listener(cx, this, a0, a1)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_remove_event_listener(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_dom_string(call, 0)?;
-    let a1 = call.arg(1);
-    imp::xml_http_request::remove_event_listener(cx, this, a0, a1)?;
-    Ok(JsValue::Undefined)
 }
 
 fn gen_xml_http_request_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

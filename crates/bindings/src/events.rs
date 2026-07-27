@@ -340,6 +340,14 @@ impl ListenerRegistry {
         }
     }
 
+    /// Drops every registration for a target. Called when a host event target
+    /// is finalized: the slab entry goes, and without this its listeners would
+    /// stay in the map forever. Slab keys are never recycled, so this is a
+    /// memory reclaim rather than a correctness fix — but an unbounded one.
+    pub fn remove_target(&mut self, target: EventTargetKey) {
+        self.map.remove(&target);
+    }
+
     pub fn snapshot(&self, target: EventTargetKey, event_type: &str) -> Vec<JsListener> {
         self.map
             .get(&target)
@@ -398,17 +406,19 @@ pub(crate) fn target_to_js(cx: &BindCx<'_>, key: EventTargetKey) -> Result<JsVal
                 .ok_or_else(|| JsThrow::Type("AbortSignal wrapper is not installed".into()))
         }
         EventTargetKey::Host(key) => {
-            let data = {
+            // Both host event targets keep their own wrapper so `event.target`
+            // hands back the very object the script holds.
+            let wrapper = {
                 let slab = cx.state.slab.borrow();
                 match slab.get(key) {
-                    Some(crate::state::HostData::EventTarget(data)) => Rc::clone(data),
+                    Some(crate::state::HostData::EventTarget(data)) => {
+                        data.wrapper.borrow().clone()
+                    }
+                    Some(crate::state::HostData::Xhr(xhr)) => xhr.borrow().wrapper.clone(),
                     _ => return Err(JsThrow::Type("stale EventTarget target".into())),
                 }
             };
-            data.wrapper
-                .borrow()
-                .clone()
-                .ok_or_else(|| JsThrow::Type("EventTarget wrapper is not installed".into()))
+            wrapper.ok_or_else(|| JsThrow::Type("EventTarget wrapper is not installed".into()))
         }
     }
 }

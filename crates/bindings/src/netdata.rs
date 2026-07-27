@@ -287,15 +287,6 @@ pub(crate) struct ResponseData {
 }
 
 /// Handler-property callbacks on an XHR (event-handler IDL attributes).
-#[derive(Default)]
-pub(crate) struct XhrHandlers {
-    pub onreadystatechange: Option<JsValue>,
-    pub onload: Option<JsValue>,
-    pub onerror: Option<JsValue>,
-    pub onloadend: Option<JsValue>,
-    pub onabort: Option<JsValue>,
-}
-
 /// An `XMLHttpRequest` object. All fields default to the UNSENT/empty state.
 #[derive(Default)]
 pub(crate) struct XhrData {
@@ -311,9 +302,11 @@ pub(crate) struct XhrData {
     pub response_headers: Vec<(String, String)>,
     pub response_body: Vec<u8>,
     pub request_id: Option<RequestId>,
-    pub handlers: XhrHandlers,
-    /// `addEventListener` registrations: `(type, callback)`.
-    pub listeners: Vec<(String, JsValue)>,
+    /// This object's slab key, which is also its
+    /// [`crate::events::EventTargetKey::Host`] identity: listeners and the
+    /// `onX` handler properties live in the shared registries under it, exactly
+    /// as they do for a `new EventTarget()`.
+    pub slab_key: u64,
     /// The wrapper object (for `event.target`); held strongly while the request
     /// has pending activity. It is released on a terminal readyState (DONE /
     /// error / abort) so a completed request is not kept alive by this

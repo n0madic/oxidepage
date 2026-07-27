@@ -679,6 +679,124 @@ fn xhr_get_fires_load() {
     );
 }
 
+/// `XMLHttpRequest` is a real `EventTarget`: the events it fires are genuine
+/// `Event` objects, `dispatchEvent` exists, and `addEventListener` honours the
+/// options the hand-rolled registry used to ignore.
+#[test]
+fn xhr_is_a_real_event_target() {
+    let port = spawn_server();
+    let page = loopback_page();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/index.html"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.log = [];
+            window.probe = null;
+            // `once` must fire exactly once; the duplicate registration of the
+            // same callback must be deduplicated by `===`; a `handleEvent`
+            // object must be accepted as a listener.
+            const dup = () => window.log.push('dup');
+            x.addEventListener('load', dup);
+            x.addEventListener('load', dup);
+            x.addEventListener('load', () => window.log.push('once'), { once: true });
+            x.addEventListener('load', { handleEvent() { window.log.push('obj'); } });
+            x.addEventListener('load', e => {
+                window.probe = [
+                    e instanceof Event,
+                    e.type,
+                    e.target === x,
+                    e.currentTarget === x,
+                    e.isTrusted,
+                    typeof e.preventDefault,
+                    typeof e.composedPath,
+                ].join(',');
+            });
+            x.onload = () => window.log.push('handler');
+            x.open('GET', '/text');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("window.probe").unwrap(),
+        "true,load,true,true,true,function,function",
+        "the event is a real Event, not a {{type, target}} stand-in; errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(
+        page.eval_to_string("window.log.join(',')").unwrap(),
+        "dup,once,obj,handler",
+        "the duplicate callback is deduplicated by === and `once` fires once"
+    );
+
+    // `dispatchEvent` exists and reaches the same listeners.
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.synthetic = [];
+            x.addEventListener('ping', e => window.synthetic.push(e.type + ':' + (e.target === x)));
+            window.dispatchResult = x.dispatchEvent(new Event('ping'));
+        })()",
+    )
+    .unwrap();
+    assert_eq!(
+        page.eval_to_string("window.synthetic.join(',')").unwrap(),
+        "ping:true"
+    );
+    assert_eq!(
+        page.eval_to_string("window.dispatchResult").unwrap(),
+        "true"
+    );
+    assert_eq!(
+        page.eval_to_string("new XMLHttpRequest() instanceof EventTarget")
+            .unwrap(),
+        "true"
+    );
+}
+
+/// The `onX` handler properties live in the shared registry now, so they must
+/// still behave like properties: readable, replaceable, and clearable.
+#[test]
+fn xhr_handler_properties_round_trip() {
+    let port = spawn_server();
+    let page = loopback_page();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/index.html"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            const f = () => {};
+            window.initial = x.onload;
+            x.onload = f;
+            window.readBack = x.onload === f;
+            x.onload = null;
+            window.cleared = x.onload;
+            // Two instances must not share a slot.
+            const y = new XMLHttpRequest();
+            x.onerror = f;
+            window.independent = y.onerror;
+        })()",
+    )
+    .unwrap();
+    assert_eq!(page.eval_to_string("window.initial").unwrap(), "null");
+    assert_eq!(page.eval_to_string("window.readBack").unwrap(), "true");
+    assert_eq!(page.eval_to_string("window.cleared").unwrap(), "null");
+    assert_eq!(
+        page.eval_to_string("window.independent").unwrap(),
+        "null",
+        "each XHR has its own handler slot"
+    );
+}
+
 #[test]
 fn set_cookie_from_load_reaches_document_cookie() {
     let port = spawn_server();

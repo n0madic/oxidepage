@@ -235,12 +235,41 @@ planned — the guard turned out to be the retarget loop itself, which returns
 immediately for a related target that is not in a shadow tree. That leaves the
 common path a single `containing_shadow_root` call rather than a branch.
 
-**Not implemented, and tracked as three WPT failures:** the early-return branch
-of dispatch step 5 (when the target and the retargeted related target coincide)
-— the spec text and the test's expectations did not reconcile under inspection,
-and guessing at it is worse than a recorded gap. One further failure needs
-`XMLHttpRequest` to be an `EventTarget`, which it is not here yet; that is
-orthogonal to this stage.
+**Not implemented, and tracked as two WPT failures:** the early-return branch of
+dispatch step 5 (when the target and the retargeted related target coincide) —
+the spec text and the test's expectations did not reconcile under inspection,
+and guessing at it is worse than a recorded gap.
+
+### `XMLHttpRequest` is a real `EventTarget`
+
+A third failure of that test needed `XMLHttpRequest.dispatchEvent`, which did
+not exist: XHR ran an entirely parallel event system — its own
+`Vec<(String, JsValue)>` of listeners, its own handler-property struct, and a
+`make_event` that built a plain `{type, target}` object.
+
+That stand-in was the real cost, well beyond the one subtest: on an XHR event
+`preventDefault()`, `stopPropagation()`, `currentTarget`, `isTrusted`,
+`composedPath()` and `instanceof Event` **all failed**, and the listener list
+supported none of `capture`, `once`, `passive`, `===` deduplication or
+`handleEvent` objects.
+
+The fix was mostly deletion, because the infrastructure was already generic: the
+listener registry and `event_handlers` map are keyed by `EventTargetKey`, and
+`dispatch_event` already had a `Host` path. `XMLHttpRequest : EventTarget` in
+the IDL, one `match` arm in `this_event_target`, and the slab key stored on
+`XhrData` as its event-target identity — the same scheme `new EventTarget()`
+uses. The `onX` properties moved into the shared registry, which is what puts
+them on equal footing with `addEventListener` rather than in a separate list
+invoked first.
+
+Slab keys are monotonic and never recycled, so a freed XHR's key can never
+alias a new one. Their registry entries *were* leaking, though — for
+`new EventTarget()` too — so finalization now drops the listeners and handlers
+under the key alongside the slab entry.
+
+Still absent, and the next honest gap: `ProgressEvent` (with `loaded`/`total`/
+`lengthComputable`), `xhr.upload`, and the `progress`/`timeout` events. XHR
+fires plain `Event`s for now.
 
 ### Wheel
 

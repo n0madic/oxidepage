@@ -2146,6 +2146,17 @@ pub fn process_finalized(state: &Rc<PageState>, finalized: Vec<(u32, u64)>) {
             }
             TAG_SLAB => {
                 state.slab.borrow_mut().remove(data);
+                // A host event target (`new EventTarget()`, `XMLHttpRequest`)
+                // keeps its listeners and `onX` handlers in the shared
+                // registries under its slab key. Nothing else will ever ask for
+                // them once the object is gone, and slab keys are never
+                // recycled, so they would simply accumulate.
+                let key = crate::events::EventTargetKey::Host(data);
+                state.listeners.borrow_mut().remove_target(key);
+                state
+                    .event_handlers
+                    .borrow_mut()
+                    .retain(|(target, _), _| *target != key);
             }
             _ => {}
         }

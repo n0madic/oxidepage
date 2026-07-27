@@ -1,9 +1,10 @@
 //! `XMLHttpRequest` implementation.
 //!
-//! Events are dispatched directly to the handler-property callbacks and
-//! `addEventListener` registrations (a minimal `{type, target}` event
-//! object), rather than through the DOM `EventTarget` machinery — a Phase 3
-//! simplification sufficient for `readystatechange`/`load`/`error`.
+//! `XMLHttpRequest` is a real `EventTarget`: its listeners and `onX` handlers
+//! live in the shared registries keyed by
+//! [`crate::events::EventTargetKey::Host`], and its events go through
+//! [`crate::events::dispatch_event`] like any other. The slab key doubles as
+//! the event-target identity, the same scheme `new EventTarget()` uses.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,6 +14,7 @@ use oxidepage_js::{HostCall, JsThrow, JsValue};
 use oxidepage_net::{Credentials, NetRequest, RequestMode};
 
 use crate::cx::BindCx;
+use crate::events::EventTargetKey;
 use crate::netdata::{PendingNet, XhrData, is_valid_header_name, is_valid_header_value};
 use crate::state::HostData;
 
@@ -24,7 +26,13 @@ const DONE: u16 = 4;
 pub(crate) fn constructor(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
     let xhr = Rc::new(RefCell::new(XhrData::default()));
     let wrapper = cx.new_net_object("XMLHttpRequest", HostData::Xhr(Rc::clone(&xhr)))?;
-    xhr.borrow_mut().wrapper = Some(wrapper.clone());
+    {
+        let mut x = xhr.borrow_mut();
+        // The slab key is this object's event-target identity for its whole
+        // life; every listener and handler is filed under it.
+        x.slab_key = cx.slab_key(&wrapper).unwrap_or_default();
+        x.wrapper = Some(wrapper.clone());
+    }
     Ok(wrapper)
 }
 
@@ -250,112 +258,79 @@ pub(crate) fn get_all_response_headers(_cx: &BindCx<'_>, this: Xhr) -> Result<St
     Ok(out)
 }
 
-pub(crate) fn add_event_listener(
-    cx: &BindCx<'_>,
-    this: Xhr,
-    event_type: String,
-    callback: JsValue,
-) -> Result<(), JsThrow> {
-    if cx.scope.is_function(&callback) {
-        this.borrow_mut().listeners.push((event_type, callback));
-    }
-    Ok(())
-}
-
-pub(crate) fn remove_event_listener(
-    cx: &BindCx<'_>,
-    this: Xhr,
-    event_type: String,
-    callback: JsValue,
-) -> Result<(), JsThrow> {
-    this.borrow_mut()
-        .listeners
-        .retain(|(t, c)| !(t == &event_type && cx.scope.strict_equals(c, &callback)));
-    Ok(())
-}
-
-// === Event-handler IDL attributes ===
-
+/// The `onX` handler properties.
+///
+/// They are stored in the shared `event_handlers` registry keyed by this
+/// object's `EventTargetKey::Host`, not on the `XhrData` — which is what puts
+/// them on the same footing as `addEventListener` registrations, so
+/// `invoke_listeners` runs them and `preventDefault` works from either.
 macro_rules! handler {
-    ($get:ident, $set:ident, $field:ident) => {
-        pub(crate) fn $get(_cx: &BindCx<'_>, this: Xhr) -> Result<JsValue, JsThrow> {
-            Ok(this
+    ($get:ident, $set:ident, $event_type:literal) => {
+        pub(crate) fn $get(cx: &BindCx<'_>, this: Xhr) -> Result<JsValue, JsThrow> {
+            Ok(cx
+                .state
+                .event_handlers
                 .borrow()
-                .handlers
-                .$field
-                .clone()
+                .get(&(target_key(&this), $event_type.to_owned()))
+                .cloned()
                 .unwrap_or(JsValue::Null))
         }
-        pub(crate) fn $set(_cx: &BindCx<'_>, this: Xhr, value: JsValue) -> Result<(), JsThrow> {
-            this.borrow_mut().handlers.$field = (!value.is_nullish()).then_some(value);
+        pub(crate) fn $set(cx: &BindCx<'_>, this: Xhr, value: JsValue) -> Result<(), JsThrow> {
+            let slot = (target_key(&this), $event_type.to_owned());
+            let mut handlers = cx.state.event_handlers.borrow_mut();
+            if value.is_nullish() {
+                handlers.remove(&slot);
+            } else {
+                handlers.insert(slot, value);
+            }
             Ok(())
         }
     };
 }
 
+/// This XHR's identity as an event target.
+fn target_key(xhr: &Xhr) -> EventTargetKey {
+    EventTargetKey::Host(xhr.borrow().slab_key)
+}
+
 handler!(
     onreadystatechange,
     set_onreadystatechange,
-    onreadystatechange
+    "readystatechange"
 );
-handler!(onload, set_onload, onload);
-handler!(onerror, set_onerror, onerror);
-handler!(onloadend, set_onloadend, onloadend);
-handler!(onabort, set_onabort, onabort);
+handler!(onload, set_onload, "load");
+handler!(onerror, set_onerror, "error");
+handler!(onloadend, set_onloadend, "loadend");
+handler!(onabort, set_onabort, "abort");
 
-/// Dispatches an XHR event to its handler property and listeners.
+/// Fires one XHR event through the real dispatch machinery.
+///
+/// The event is a genuine `Event` object, not the `{type, target}` stand-in
+/// this used to build: `preventDefault`, `stopPropagation`, `currentTarget`,
+/// `isTrusted` and `instanceof Event` all work, and every listener option
+/// (`capture`, `once`, `passive`) is honoured because the shared registry is
+/// doing the work.
 pub(crate) fn fire_event(cx: &BindCx<'_>, xhr: &Xhr, event_type: &str) {
-    let (handler, listeners, target) = {
-        let x = xhr.borrow();
-        let handler = match event_type {
-            "readystatechange" => x.handlers.onreadystatechange.clone(),
-            "load" => x.handlers.onload.clone(),
-            "error" => x.handlers.onerror.clone(),
-            "loadend" => x.handlers.onloadend.clone(),
-            "abort" => x.handlers.onabort.clone(),
-            _ => None,
-        };
-        let listeners: Vec<JsValue> = x
-            .listeners
-            .iter()
-            .filter(|(t, _)| t == event_type)
-            .map(|(_, c)| c.clone())
-            .collect();
-        (
-            handler,
-            listeners,
-            x.wrapper.clone().unwrap_or(JsValue::Undefined),
-        )
-    };
-
-    let event = match make_event(cx, event_type, &target) {
-        Ok(event) => event,
-        Err(_) => JsValue::Undefined,
-    };
-    if let Some(handler) = handler
-        && let Err(e) = cx
-            .scope
-            .call(&handler, &target, std::slice::from_ref(&event))
-    {
-        cx.report_callback_error(e);
+    let key = target_key(xhr);
+    // A wrapper is required for `event.target`; it is released on a terminal
+    // readyState, so a reused XHR can legitimately have none.
+    if xhr.borrow().wrapper.is_none() {
+        return;
     }
-    for listener in listeners {
-        if let Err(e) = cx
-            .scope
-            .call(&listener, &target, std::slice::from_ref(&event))
-        {
-            cx.report_callback_error(e);
-        }
+    let mut data = crate::events::EventData::new(
+        event_type.to_owned(),
+        /* bubbles */ false,
+        /* cancelable */ false,
+        /* composed */ false,
+    );
+    data.is_trusted = true;
+    data.time_stamp = cx.now_ms();
+    let Ok((value, data)) = cx.new_event_object("Event", data) else {
+        return;
+    };
+    if let Err(e) = crate::events::dispatch_event(cx, key, &value, &data) {
+        cx.warn(&format!(
+            "XMLHttpRequest `{event_type}` dispatch failed: {e:?}"
+        ));
     }
-}
-
-fn make_event(cx: &BindCx<'_>, event_type: &str, target: &JsValue) -> Result<JsValue, JsThrow> {
-    let obj = cx.scope.new_object().map_err(JsThrow::from)?;
-    cx.scope
-        .set(&obj, "type", &JsValue::String(event_type.to_owned()))
-        .map_err(JsThrow::from)?;
-    cx.scope
-        .set(&obj, "target", target)
-        .map_err(JsThrow::from)?;
-    Ok(JsValue::Object(obj))
 }

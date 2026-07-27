@@ -3006,7 +3006,6 @@ dom/events/pointer-event-document-move.html	__harness__	TIMEOUT
 dom/events/preventDefault-during-activation-behavior.html	__harness__	OK
 dom/events/relatedTarget.window.js	Reset targets before activation behavior	FAIL
 dom/events/relatedTarget.window.js	Reset targets on early return	FAIL
-dom/events/relatedTarget.window.js	Retarget a shadow-tree relatedTarget	FAIL
 dom/events/relatedTarget.window.js	__harness__	OK
 dom/events/remove-all-listeners.html	__harness__	OK
 dom/events/shadow-relatedTarget.html	__harness__	OK

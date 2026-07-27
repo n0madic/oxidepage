@@ -443,6 +443,15 @@ impl BindCx<'_> {
         self.scope.host_payload(value)
     }
 
+    /// The slab key behind a host wrapper, which for `EventTarget`-bearing
+    /// host objects is also their [`EventTargetKey::Host`] identity.
+    pub(crate) fn slab_key(&self, value: &JsValue) -> Option<u64> {
+        match self.payload(value) {
+            Some((TAG_SLAB, key)) => Some(key),
+            _ => None,
+        }
+    }
+
     /// `this` as a live node (any kind).
     pub fn this_node(&self, value: &JsValue) -> Result<NodeId, JsThrow> {
         let Some((TAG_NODE, data)) = self.payload(value) else {
@@ -634,10 +643,13 @@ impl BindCx<'_> {
         {
             return Ok(EventTargetKey::AbortSignal(key));
         }
+        // `new EventTarget()` and `XMLHttpRequest` share one identity scheme:
+        // the slab key *is* the event-target key, and their listeners live in
+        // the shared registry rather than on the object.
         if let Some((TAG_SLAB, key)) = self.payload(value)
             && matches!(
                 self.state.slab.borrow().get(key),
-                Some(HostData::EventTarget(_))
+                Some(HostData::EventTarget(_) | HostData::Xhr(_))
             )
         {
             return Ok(EventTargetKey::Host(key));
