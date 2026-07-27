@@ -10,6 +10,9 @@ README](../README.md) instead.
   goldens, reftests) and the `cargo xtask` runners that drive them.
 - [`status.md`](status.md) — implementation status by phase, with links to
   the ADR that recorded each phase's design decisions.
+- [`automation-roadmap.md`](automation-roadmap.md) — the staged plan from
+  today's engine to a CDP endpoint that Puppeteer, and then Playwright,
+  drive unchanged.
 - [`adr/`](adr/) — architecture decision records. ADRs record deviations from
   and refinements of the design baseline, and **win over it where they
   conflict**.
