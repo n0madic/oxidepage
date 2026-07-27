@@ -172,7 +172,7 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         // payload shape rather than on the brand.
         "Event" | "CustomEvent" | "PopStateEvent" | "SubmitEvent" | "UIEvent" | "MouseEvent"
         | "WheelEvent" | "PointerEvent" | "KeyboardEvent" | "FocusEvent" | "InputEvent"
-        | "CompositionEvent" => "this_event",
+        | "CompositionEvent" | "ProgressEvent" => "this_event",
         // Brands with no state of their own: a Location *is* the document URL,
         // and the session history lives in `PageState::history`.
         "Location" => "this_location",
@@ -206,6 +206,10 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         "FormData" => "this_form_data",
         "Response" => "this_response",
         "XMLHttpRequest" => "this_xhr",
+        // The shared base and the upload object are event-target brands: their
+        // members are the seven handler properties, which need nothing but the
+        // receiver's `EventTargetKey`.
+        "XMLHttpRequestEventTarget" | "XMLHttpRequestUpload" => "this_xhr_event_target",
         "CSSStyleDeclaration" => "this_style_decl",
         "StyleSheet" | "CSSStyleSheet" => "this_style_sheet",
         "StyleSheetList" => "this_style_sheet_list",
@@ -747,6 +751,8 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
             "Request".into(),
             "Response".into(),
             "XMLHttpRequest".into(),
+            // `xhr.upload` returns a finished `XMLHttpRequestUpload` JsValue.
+            "XMLHttpRequestUpload".into(),
             // Custom elements: the registry's imp functions receive and return
             // raw JS values (constructors, promises, options objects).
             "CustomElementRegistry".into(),

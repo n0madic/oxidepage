@@ -15,6 +15,7 @@ use crate::cssdata::{RuleData, RuleListData, SheetData, StyleDeclData};
 use crate::events::{EventData, EventTargetKey};
 use crate::netdata::{
     FormDataData, HeadersData, RequestData, ResponseData, UrlData, UrlSearchParamsData, XhrData,
+    XhrRef,
 };
 use crate::state::{
     AbortSignalData, AttrData, HostData, InterfaceEntry, IntersectionObserverData, IoEntryView,
@@ -643,13 +644,13 @@ impl BindCx<'_> {
         {
             return Ok(EventTargetKey::AbortSignal(key));
         }
-        // `new EventTarget()` and `XMLHttpRequest` share one identity scheme:
-        // the slab key *is* the event-target key, and their listeners live in
-        // the shared registry rather than on the object.
+        // `new EventTarget()`, `XMLHttpRequest` and `xhr.upload` share one
+        // identity scheme: the slab key *is* the event-target key, and their
+        // listeners live in the shared registry rather than on the object.
         if let Some((TAG_SLAB, key)) = self.payload(value)
             && matches!(
                 self.state.slab.borrow().get(key),
-                Some(HostData::EventTarget(_) | HostData::Xhr(_))
+                Some(HostData::EventTarget(_) | HostData::Xhr(_) | HostData::XhrUpload(_))
             )
         {
             return Ok(EventTargetKey::Host(key));
@@ -1060,11 +1061,55 @@ impl BindCx<'_> {
         })
     }
 
-    pub(crate) fn this_xhr(&self, value: &JsValue) -> Result<Rc<RefCell<XhrData>>, JsThrow> {
-        self.slab_data(value, "XMLHttpRequest", |data| match data {
+    /// `this` as an `XMLHttpRequest`, **paired with the receiver object**.
+    ///
+    /// The wrapper is not a convenience: it is the XHR's `event.target`, and it
+    /// is the self-root that keeps an in-flight but script-abandoned request
+    /// alive. Every terminal transition releases that root, so `open()` has to
+    /// put it back — and `open()` can only do that if it is handed the object
+    /// the call came in on.
+    pub(crate) fn this_xhr(&self, value: &JsValue) -> Result<XhrRef, JsThrow> {
+        let data = self.slab_data(value, "XMLHttpRequest", |data| match data {
             HostData::Xhr(x) => Some(Rc::clone(x)),
             _ => None,
+        })?;
+        Ok(XhrRef {
+            data,
+            wrapper: value.clone(),
         })
+    }
+
+    /// `this` as an `XMLHttpRequestEventTarget`: the XHR itself or its upload
+    /// object. Both are plain host event targets, so the members of the shared
+    /// base need nothing but the identity.
+    pub(crate) fn this_xhr_event_target(&self, value: &JsValue) -> Result<EventTargetKey, JsThrow> {
+        if let Some((TAG_SLAB, key)) = self.payload(value)
+            && matches!(
+                self.state.slab.borrow().get(key),
+                Some(HostData::Xhr(_) | HostData::XhrUpload(_))
+            )
+        {
+            return Ok(EventTargetKey::Host(key));
+        }
+        Err(JsThrow::Type(
+            "receiver is not an XMLHttpRequestEventTarget".into(),
+        ))
+    }
+
+    /// Creates the `[SameObject]` `XMLHttpRequestUpload` for an XHR.
+    ///
+    /// The slab entry holds a **`Weak`** back-reference: the owning `XhrData`
+    /// holds the upload *wrapper* strongly (that is what `[SameObject]` means),
+    /// so a strong pointer here would close a cycle — the wrapper would keep
+    /// the JS object alive, the live JS object would keep its slab entry, and
+    /// the slab entry would keep the `XhrData` that holds the wrapper. With a
+    /// `Weak`, dropping the `XhrData` drops the wrapper and the upload object
+    /// becomes collectable.
+    pub(crate) fn new_xhr_upload(
+        &self,
+        owner: std::rc::Weak<RefCell<XhrData>>,
+    ) -> Result<JsValue, JsThrow> {
+        self.new_slab_object("XMLHttpRequestUpload", HostData::XhrUpload(owner))
     }
 
     // === Phase 4 CSSOM unwraps / construction ===

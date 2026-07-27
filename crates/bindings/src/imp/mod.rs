@@ -87,6 +87,7 @@ pub(crate) mod plugin_array;
 pub(crate) mod pointer_event;
 pub(crate) mod pop_state_event;
 pub(crate) mod processing_instruction;
+pub(crate) mod progress_event;
 pub(crate) mod reflect;
 pub(crate) mod request;
 pub(crate) mod resize_observer;
@@ -110,9 +111,14 @@ pub(crate) mod url_parts;
 pub(crate) mod url_search_params;
 pub(crate) mod wheel_event;
 pub(crate) mod window;
-// The codegen derives the imp module name from `snake("XMLHttpRequest")`.
+// The codegen derives the imp module names from `snake("XMLHttpRequest")` and
+// `snake("XMLHttpRequestEventTarget")`; `XMLHttpRequestUpload` has no members
+// of its own, so it needs no module at all.
 #[path = "xhr.rs"]
 pub(crate) mod xml_http_request;
+#[path = "xhr_event_target.rs"]
+pub(crate) mod xml_http_request_event_target;
+pub(crate) use xml_http_request_event_target as xhr_event_target;
 
 use oxidepage_base::NodeId;
 use oxidepage_js::{JsThrow, JsValue};

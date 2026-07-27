@@ -120,6 +120,10 @@ pub(crate) enum HostData {
     Request(Rc<RequestData>),
     Response(Rc<ResponseData>),
     Xhr(Rc<RefCell<XhrData>>),
+    /// An `xhr.upload` object: a second event-target identity for the XHR that
+    /// owns it. The back-reference is **weak** — see
+    /// [`crate::cx::BindCx::new_xhr_upload`].
+    XhrUpload(std::rc::Weak<RefCell<XhrData>>),
     StyleDecl(Rc<StyleDeclData>),
     StyleSheet(Rc<SheetData>),
     /// `document.styleSheets`: the document node whose author sheets it lists.

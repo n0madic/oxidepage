@@ -41,6 +41,9 @@ pub enum DomExceptionKind {
     NotAllowedError,
     /// The operation is insecure (e.g. `history.pushState` to another origin).
     SecurityError,
+    /// The object does not support the operation or argument (e.g.
+    /// `XMLHttpRequest.open` with `async = false`).
+    InvalidAccessError,
 }
 
 impl DomExceptionKind {
@@ -61,6 +64,7 @@ impl DomExceptionKind {
             Self::NamespaceError => "NamespaceError",
             Self::NotAllowedError => "NotAllowedError",
             Self::SecurityError => "SecurityError",
+            Self::InvalidAccessError => "InvalidAccessError",
         }
     }
 }

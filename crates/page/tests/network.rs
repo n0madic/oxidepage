@@ -75,9 +75,34 @@ fn spawn_server() -> u16 {
                     }
                     let body = String::from_utf8_lossy(&buf[header_end..]).into_owned();
                     // `/slow` answers late enough that a navigation can happen
-                    // while the request is still in flight.
+                    // while the request is still in flight; `/delay/<ms>` is the
+                    // parameterized form, so a test can name its own latency
+                    // instead of a new hardcoded path per case.
                     if path == "/slow" || path == "/ordered-first.js" {
                         tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    if let Some(ms) = delay_ms(&path) {
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                    }
+                    // `/chunked/<n>` writes `n` chunks with a pause between
+                    // them, so the XHR progress loop can be exercised against a
+                    // real chunk *stream* — the net layer buffers whole bodies
+                    // today, but the XHR side is written for the streaming case.
+                    if let Some(chunks) = chunk_count(&path) {
+                        let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                                     Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                        let _ = sock.write_all(head).await;
+                        let _ = sock.flush().await;
+                        for i in 0..chunks {
+                            let piece = format!("chunk{i};");
+                            let framed = format!("{:x}\r\n{piece}\r\n", piece.len());
+                            let _ = sock.write_all(framed.as_bytes()).await;
+                            let _ = sock.flush().await;
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        let _ = sock.write_all(b"0\r\n\r\n").await;
+                        let _ = sock.flush().await;
+                        return;
                     }
                     let _ = sock.write_all(&route(&method, &path, &body, &head)).await;
                     let _ = sock.flush().await;
@@ -86,6 +111,22 @@ fn spawn_server() -> u16 {
         });
     });
     rx.recv().unwrap()
+}
+
+/// `/delay/<ms>` (optionally with a query string) → the delay to apply.
+fn delay_ms(path: &str) -> Option<u64> {
+    path_param(path, "/delay/")?.parse().ok()
+}
+
+/// `/chunked/<n>` → how many chunks to stream.
+fn chunk_count(path: &str) -> Option<usize> {
+    path_param(path, "/chunked/")?.parse().ok()
+}
+
+/// The single path segment following `prefix`, with any query string removed.
+fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(prefix)?;
+    Some(rest.split(['/', '?']).next().unwrap_or(rest))
 }
 
 fn route(_method: &str, path: &str, body: &str, head: &str) -> Vec<u8> {
@@ -97,6 +138,9 @@ fn route(_method: &str, path: &str, body: &str, head: &str) -> Vec<u8> {
             user_agent,
             header_value(head, "Accept-Language").unwrap_or_default(),
         ));
+    }
+    if delay_ms(path).is_some() {
+        return resp(200, "OK", "text/plain", &[], "delayed");
     }
     match path {
         "/index.html" => resp(
@@ -234,6 +278,69 @@ fn route(_method: &str, path: &str, body: &str, head: &str) -> Vec<u8> {
             &[("Location", "/index.html")],
             "",
         ),
+        // === XHR fixtures ===
+        "/xhr-redirect" => resp(302, "Found", "text/plain", &[("Location", "/text")], ""),
+        // A same-origin response carrying a `Set-Cookie`. The net layer forwards
+        // the whole header map for a `basic` response, so this is what proves
+        // XHR filters it back out.
+        "/xhr-cookie" => resp(
+            200,
+            "OK",
+            "text/plain",
+            &[("Set-Cookie", "secret=1; Path=/"), ("X-Visible", "yes")],
+            "cookie-body",
+        ),
+        // Deliberately out of alphabetical order, with one name repeated:
+        // `getAllResponseHeaders` must sort and combine.
+        "/xhr-headers" => resp(
+            200,
+            "OK",
+            "text/plain",
+            &[("X-Zebra", "z"), ("X-Alpha", "a1"), ("X-Alpha", "a2")],
+            "headers-body",
+        ),
+        // Echoes one request header, so `setRequestHeader` combining and the
+        // forbidden-name filter are observable from script.
+        "/xhr-echo-header" => {
+            let combined = header_value(head, "X-Combined").unwrap_or_default();
+            let referer = header_value(head, "Referer").unwrap_or_default();
+            resp(
+                200,
+                "OK",
+                "text/plain",
+                &[],
+                &format!("{combined}|{}", !referer.contains("evil")),
+            )
+        }
+        // A windows-1252 body with **no** charset in the `Content-Type`, so
+        // `overrideMimeType('…; charset=windows-1252')` is what makes it decode.
+        "/xhr-latin1" => {
+            let mut bytes = b"caf".to_vec();
+            bytes.push(0xE9); // 'e' with acute, in windows-1252
+            let mut out = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(&bytes);
+            out
+        }
+        "/xhr-html" => resp(
+            200,
+            "OK",
+            "text/html",
+            &[],
+            "<!doctype html><title>doc-title</title><p id=p>hello</p>",
+        ),
+        "/xhr-xml" => resp(
+            200,
+            "OK",
+            "application/xml",
+            &[],
+            "<root><item>xml-text</item></root>",
+        ),
+        "/xhr-500" => resp(500, "Internal Server Error", "text/plain", &[], "boom"),
         _ => resp(404, "Not Found", "text/plain", &[], "nope"),
     }
 }
@@ -1116,4 +1223,820 @@ fn xhr_send_formdata_is_multipart() {
     );
     assert!(echoed.contains("Content-Disposition: form-data; name=\"k\""));
     assert!(echoed.contains('v'));
+}
+
+// ===========================================================================
+// XMLHttpRequest conformance (ADR-0024)
+//
+// WPT's `xhr/` suite is not vendored — it is almost entirely server-driven
+// (`trickle.py`, `redirect.py`, `auth.py`, `.sub.` substitution) and `xtask`'s
+// `TestServer` can parse none of that. The loopback server above is far more
+// capable, so verification lives here. See ADR-0024.
+// ===========================================================================
+
+/// A loopback page, ready to run XHR script against the fixtures above.
+fn xhr_page(port: u16) -> Page {
+    let page = loopback_page();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/index.html"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page
+}
+
+/// Installs a listener for every XHR event type, logging `type:readyState` into
+/// `window.log`. `target` is the expression the listeners attach to.
+fn log_all_events(target: &str) -> String {
+    format!(
+        "['loadstart','progress','abort','error','load','timeout','loadend','readystatechange']\
+           .forEach(t => {target}.addEventListener(t, () => window.log.push(t + ':' + x.readyState)));"
+    )
+}
+
+/// The successful sequence, in order: `loadstart` at `send()`, a
+/// `readystatechange` per state, one `progress` per body chunk, then `load` and
+/// `loadend` last.
+#[test]
+fn xhr_success_event_sequence() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(&format!(
+        "(() => {{
+            const x = new XMLHttpRequest();
+            window.log = [];
+            {}
+            x.open('GET', '/text');
+            x.send();
+        }})()",
+        log_all_events("x")
+    ))
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.log.join(',')").unwrap(),
+        "readystatechange:1,loadstart:1,readystatechange:2,readystatechange:3,progress:3,\
+         readystatechange:4,load:4,loadend:4",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+}
+
+/// A network error: exactly one of the four terminal events fires, `loadend`
+/// follows it, and the response is a network error (status 0, empty body).
+#[test]
+fn xhr_error_event_sequence_and_network_error_response() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    // Port 1 refuses the connection, which is a network error rather than a
+    // failing HTTP status.
+    page.eval(&format!(
+        "(() => {{
+            const x = new XMLHttpRequest();
+            window.log = [];
+            {}
+            x.addEventListener('error', () => {{
+                window.errState = [x.status, x.statusText, x.responseText, x.getAllResponseHeaders()]
+                    .join('|');
+            }});
+            x.open('GET', 'http://127.0.0.1:1/nothing');
+            x.send();
+        }})()",
+        log_all_events("x")
+    ))
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.log.join(',')").unwrap(),
+        "readystatechange:1,loadstart:1,readystatechange:4,error:4,loadend:4",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(page.eval_to_string("window.errState").unwrap(), "0|||");
+}
+
+/// A failing HTTP *status* is not a network error: `load` fires, and the status
+/// and body are readable.
+#[test]
+fn xhr_http_error_status_still_fires_load() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(&format!(
+        "(() => {{
+            const x = new XMLHttpRequest();
+            window.log = [];
+            {}
+            x.addEventListener('loadend', () => {{
+                window.result = x.status + '|' + x.statusText + '|' + x.responseText;
+            }});
+            x.open('GET', '/xhr-500');
+            x.send();
+        }})()",
+        log_all_events("x")
+    ))
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.result").unwrap(),
+        "500|Internal Server Error|boom",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(
+        page.eval_to_string("window.log.includes('load:4')")
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        page.eval_to_string("window.log.includes('error:4')")
+            .unwrap(),
+        "false"
+    );
+}
+
+/// `abort()` on an in-flight request fires the abort sequence, resets the
+/// response, and leaves `readyState` at UNSENT afterwards. `abort()` on an XHR
+/// that was never sent fires **nothing** — it used to fire a full sequence.
+#[test]
+fn xhr_abort_resets_the_response_and_only_fires_when_in_flight() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(&format!(
+        "(() => {{
+            const x = new XMLHttpRequest();
+            window.log = [];
+            {}
+            x.addEventListener('abort', () => {{
+                window.aborted = [x.readyState, x.status, x.responseText].join('|');
+            }});
+            x.open('GET', '/delay/400');
+            x.send();
+            x.abort();
+            window.afterAbort = x.readyState;
+
+            // A fresh, never-sent XHR: abort() is a no-op.
+            const y = new XMLHttpRequest();
+            window.quiet = [];
+            ['abort','loadend','readystatechange'].forEach(
+                t => y.addEventListener(t, () => window.quiet.push(t)));
+            y.abort();
+            y.open('GET', '/text');
+            window.quietAfterOpen = window.quiet.join(',');
+        }})()",
+        log_all_events("x")
+    ))
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.log.join(',')").unwrap(),
+        "readystatechange:1,loadstart:1,readystatechange:4,abort:4,loadend:4",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    // The response is a network error by the time the `abort` listener runs.
+    assert_eq!(page.eval_to_string("window.aborted").unwrap(), "4|0|");
+    assert_eq!(page.eval_to_string("window.afterAbort").unwrap(), "0");
+    // The never-sent XHR fired nothing for `abort()`; only `open()` spoke.
+    assert_eq!(
+        page.eval_to_string("window.quietAfterOpen").unwrap(),
+        "readystatechange"
+    );
+}
+
+/// **The reuse bug.** Every terminal transition releases the XHR's self-root;
+/// `open()` has to put it back, or a second `send()` on the same object
+/// delivers zero events.
+#[test]
+fn xhr_reused_fires_events_on_its_second_request() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.bodies = [];
+            x.addEventListener('load', () => {
+                window.bodies.push(x.responseText);
+                if (window.bodies.length === 1) {
+                    // Reopened from inside the terminating sequence: the root
+                    // this request installs must survive the `loadend` that
+                    // follows.
+                    x.open('GET', '/json');
+                    x.send();
+                }
+            });
+            x.open('GET', '/text');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.bodies.join('|')").unwrap(),
+        "plain-text-body|{\"msg\":\"hi\",\"n\":42}",
+        "a reused XHR must fire events on its second request; errors: {:?}",
+        page.drain_errors()
+    );
+
+    // The same thing across two separate tasks, which is the ordinary pattern.
+    page.eval(
+        "(() => {
+            window.second = [];
+            const x = new XMLHttpRequest();
+            x.addEventListener('load', () => window.second.push(x.responseText));
+            x.open('GET', '/text');
+            x.send();
+            window.reuse = x;
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    page.eval("window.reuse.open('GET', '/json'); window.reuse.send();")
+        .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.second.length").unwrap(),
+        "2",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+}
+
+/// `open()` terminates an in-flight request: the old one must not keep writing
+/// into the reopened object.
+#[test]
+fn xhr_open_terminates_an_in_flight_request() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.loads = [];
+            x.addEventListener('load', () => window.loads.push(x.responseText));
+            x.open('GET', '/delay/400');
+            x.send();
+            // Reopened before the first response can arrive.
+            x.open('GET', '/text');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.loads.join('|')").unwrap(),
+        "plain-text-body",
+        "the terminated request must deliver nothing; errors: {:?}",
+        page.drain_errors()
+    );
+}
+
+/// `send()` twice is an `InvalidStateError` (a `DOMException`, not a bare
+/// `TypeError`), and so is `send()` before `open()`.
+#[test]
+fn xhr_send_state_errors() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const name = fn => { try { fn(); return 'no-throw'; }
+                                 catch (e) { return e instanceof DOMException ? e.name : 'TypeError'; } };
+            const x = new XMLHttpRequest();
+            window.beforeOpen = name(() => x.send());
+            x.open('GET', '/text');
+            x.send();
+            window.twice = name(() => x.send());
+            window.headerAfterSend = name(() => x.setRequestHeader('X-Late', '1'));
+            const y = new XMLHttpRequest();
+            window.headerBeforeOpen = name(() => y.setRequestHeader('X-Early', '1'));
+            window.syncMode = name(() => y.open('GET', '/text', false));
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.beforeOpen").unwrap(),
+        "InvalidStateError"
+    );
+    assert_eq!(
+        page.eval_to_string("window.twice").unwrap(),
+        "InvalidStateError"
+    );
+    assert_eq!(
+        page.eval_to_string("window.headerAfterSend").unwrap(),
+        "InvalidStateError"
+    );
+    assert_eq!(
+        page.eval_to_string("window.headerBeforeOpen").unwrap(),
+        "InvalidStateError"
+    );
+    // No synchronous mode: it would block the page thread under live DOM
+    // borrows, so it is refused rather than approximated (ADR-0024).
+    assert_eq!(
+        page.eval_to_string("window.syncMode").unwrap(),
+        "InvalidAccessError"
+    );
+}
+
+/// `ProgressEvent` is a real interface with real members, and `total` /
+/// `lengthComputable` come from `Content-Length` — never from the bytes that
+/// happen to have arrived.
+#[test]
+fn xhr_progress_event_members() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            x.addEventListener('progress', e => {
+                window.progress = [
+                    e instanceof ProgressEvent,
+                    e instanceof Event,
+                    e.type,
+                    e.lengthComputable,
+                    e.loaded,
+                    e.total,
+                    e.target === x,
+                ].join(',');
+            });
+            x.addEventListener('loadstart', e => {
+                window.start = [e.lengthComputable, e.loaded, e.total].join(',');
+            });
+            x.open('GET', '/text');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.progress").unwrap(),
+        "true,true,progress,true,15,15,true",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(page.eval_to_string("window.start").unwrap(), "false,0,0");
+    // Constructible, with the declared defaults.
+    assert_eq!(
+        page.eval_to_string(
+            "(() => { const e = new ProgressEvent('p');
+                      const f = new ProgressEvent('q', { lengthComputable: true, loaded: 5, total: 9 });
+                      return [e.lengthComputable, e.loaded, e.total, e.bubbles,
+                              f.lengthComputable, f.loaded, f.total].join(','); })()"
+        )
+        .unwrap(),
+        "false,0,0,false,true,5,9"
+    );
+}
+
+/// A chunked response with no `Content-Length`: `readyState` reaches LOADING,
+/// progress is reported per chunk, and `total` is **not** invented.
+///
+/// The net layer buffers the whole body and emits one `Chunk` today (ADR-0004),
+/// so the loop runs once — the assertions are written against the chunk stream
+/// so they stay true when it learns to stream.
+#[test]
+fn xhr_chunked_response_reaches_loading_state() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.states = [];
+            window.progressEvents = [];
+            x.addEventListener('readystatechange', () => window.states.push(x.readyState));
+            x.addEventListener('progress', e => {
+                window.progressEvents.push([e.lengthComputable, e.loaded, e.total].join(':'));
+            });
+            x.addEventListener('load', () => { window.body = x.responseText; });
+            x.open('GET', '/chunked/3');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.body").unwrap(),
+        "chunk0;chunk1;chunk2;",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(
+        page.eval_to_string("window.states.join(',')").unwrap(),
+        "1,2,3,4",
+        "readyState must reach LOADING (3)"
+    );
+    // A chunked response carries no `Content-Length`, so nothing is computable.
+    assert_eq!(
+        page.eval_to_string("window.progressEvents[0]").unwrap(),
+        "false:21:0"
+    );
+    assert_eq!(
+        page.eval_to_string(
+            "window.progressEvents.length ===  window.states.filter(s => s === 3).length"
+        )
+        .unwrap(),
+        "true",
+        "one progress event per LOADING transition"
+    );
+}
+
+/// The upload object is a second event target with its own handlers, and it
+/// fires its own `loadstart`/`progress`/`load`/`loadend` when there is a body.
+#[test]
+fn xhr_upload_events() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            window.up = [];
+            window.down = [];
+            ['loadstart','progress','load','loadend'].forEach(t => {
+                x.upload.addEventListener(t, e => window.up.push(t + ':' + (e.target === x.upload)));
+                x.addEventListener(t, () => window.down.push(t));
+            });
+            window.sameObject = x.upload === x.upload;
+            window.uploadIsTarget = x.upload instanceof XMLHttpRequestEventTarget
+                && x.upload instanceof EventTarget
+                && x instanceof XMLHttpRequestEventTarget;
+            x.open('POST', '/echo');
+            x.send('payload');
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("window.sameObject").unwrap(), "true");
+    assert_eq!(
+        page.eval_to_string("window.uploadIsTarget").unwrap(),
+        "true"
+    );
+    assert_eq!(
+        page.eval_to_string("window.up.join(',')").unwrap(),
+        "loadstart:true,progress:true,load:true,loadend:true",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    // The upload's `load` must precede the download's.
+    assert_eq!(
+        page.eval_to_string("window.down.join(',')").unwrap(),
+        "loadstart,progress,load,loadend"
+    );
+
+    // With no request body the upload object stays silent.
+    page.eval(
+        "(() => {
+            const y = new XMLHttpRequest();
+            window.noBody = [];
+            ['loadstart','progress','load','loadend'].forEach(
+                t => y.upload.addEventListener(t, () => window.noBody.push(t)));
+            y.open('GET', '/text');
+            y.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("window.noBody.length").unwrap(), "0");
+}
+
+/// `timeout` fires the timeout sequence, and clearing it before it elapses lets
+/// the request finish normally.
+#[test]
+fn xhr_timeout_fires_and_is_cancellable() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(&format!(
+        "(() => {{
+            const x = new XMLHttpRequest();
+            window.log = [];
+            {}
+            x.addEventListener('timeout', () => {{
+                window.timedOut = [x.readyState, x.status, x.responseText].join('|');
+            }});
+            x.timeout = 100;
+            x.open('GET', '/delay/900');
+            x.send();
+        }})()",
+        log_all_events("x")
+    ))
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.log.join(',')").unwrap(),
+        "readystatechange:1,loadstart:1,readystatechange:4,timeout:4,loadend:4",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(page.eval_to_string("window.timedOut").unwrap(), "4|0|");
+
+    // Cleared mid-flight: the request completes.
+    page.eval(
+        "(() => {
+            const y = new XMLHttpRequest();
+            window.cancelled = [];
+            ['timeout','load'].forEach(t => y.addEventListener(t, () => window.cancelled.push(t)));
+            y.timeout = 100;
+            y.open('GET', '/delay/300');
+            y.send();
+            y.timeout = 0;
+            window.timeoutValue = y.timeout;
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("window.timeoutValue").unwrap(), "0");
+    assert_eq!(
+        page.eval_to_string("window.cancelled.join(',')").unwrap(),
+        "load",
+        "clearing `timeout` mid-flight must disarm it; errors: {:?}",
+        page.drain_errors()
+    );
+}
+
+/// Every supported `responseType`, plus the two getters that throw for the
+/// wrong one and the `"blob"` value this engine deliberately does not have.
+#[test]
+fn xhr_response_types() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "window.get = (url, type) => new Promise(resolve => {
+             const x = new XMLHttpRequest();
+             x.open('GET', url);
+             if (type !== undefined) x.responseType = type;
+             x.addEventListener('load', () => resolve(x));
+             x.send();
+         });",
+    )
+    .unwrap();
+
+    // json
+    page.eval("window.get('/json', 'json').then(x => { window.json = x.response.msg + ':' + x.response.n; window.jsonSame = x.response === x.response; });").unwrap();
+    // arraybuffer
+    page.eval(
+        "window.get('/text', 'arraybuffer').then(x => {
+             const v = new Uint8Array(x.response);
+             window.ab = [x.response instanceof ArrayBuffer, v.length, v[0]].join(',');
+         });",
+    )
+    .unwrap();
+    // document
+    page.eval(
+        "window.get('/xhr-html', 'document').then(x => {
+             window.doc = [
+                 x.response.querySelector('#p').textContent,
+                 x.response.title,
+                 x.response === x.responseXML,
+             ].join(',');
+         });",
+    )
+    .unwrap();
+    // responseXML with the default responseType, on an XML document.
+    page.eval(
+        "window.get('/xhr-xml').then(x => {
+             window.xml = [
+                 x.responseXML !== null,
+                 x.responseXML.documentElement.textContent,
+                 x.responseText,
+             ].join('|');
+         });",
+    )
+    .unwrap();
+    // responseXML is null for a MIME type that is neither HTML nor XML.
+    page.eval("window.get('/text').then(x => { window.plainXml = x.responseXML; });")
+        .unwrap();
+    page.settle(Duration::from_secs(10));
+
+    assert_eq!(
+        page.eval_to_string("window.json").unwrap(),
+        "hi:42",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(page.eval_to_string("window.jsonSame").unwrap(), "true");
+    assert_eq!(page.eval_to_string("window.ab").unwrap(), "true,15,112");
+    assert_eq!(
+        page.eval_to_string("window.doc").unwrap(),
+        "hello,doc-title,true"
+    );
+    assert_eq!(
+        page.eval_to_string("window.xml").unwrap(),
+        "true|xml-text|<root><item>xml-text</item></root>"
+    );
+    assert_eq!(page.eval_to_string("window.plainXml").unwrap(), "null");
+
+    // The enumerated setter, `"blob"` included, and the two throwing getters.
+    page.eval(
+        "(() => {
+            const name = fn => { try { fn(); return 'no-throw'; }
+                                 catch (e) { return e instanceof DOMException ? e.name : 'TypeError'; } };
+            const x = new XMLHttpRequest();
+            x.responseType = 'json';
+            x.responseType = 'nonsense';   // outside the enumeration: ignored
+            window.afterNonsense = x.responseType;
+            x.responseType = 'blob';       // unsupported: leaves the previous value
+            window.afterBlob = x.responseType;
+            window.textThrows = name(() => x.responseText);
+            window.xmlThrows = name(() => x.responseXML);
+            // Before LOADING, `response` is the empty string for a text type.
+            const y = new XMLHttpRequest();
+            window.beforeSend = JSON.stringify(y.response);
+            y.responseType = 'json';
+            window.beforeSendJson = String(y.response);
+            y.open('GET', '/delay/300');
+            y.send();
+            window.responseTypeInFlight = name(() => { y.responseType = 'text'; });
+        })()",
+    )
+    .unwrap();
+    assert_eq!(page.eval_to_string("window.afterNonsense").unwrap(), "json");
+    assert_eq!(page.eval_to_string("window.afterBlob").unwrap(), "json");
+    assert_eq!(
+        page.eval_to_string("window.textThrows").unwrap(),
+        "InvalidStateError"
+    );
+    assert_eq!(
+        page.eval_to_string("window.xmlThrows").unwrap(),
+        "InvalidStateError"
+    );
+    assert_eq!(page.eval_to_string("window.beforeSend").unwrap(), "\"\"");
+    assert_eq!(
+        page.eval_to_string("window.beforeSendJson").unwrap(),
+        "null"
+    );
+    // OPENED is still early enough to set `responseType`.
+    assert_eq!(
+        page.eval_to_string("window.responseTypeInFlight").unwrap(),
+        "no-throw"
+    );
+    page.settle(Duration::from_secs(5));
+}
+
+/// `overrideMimeType` changes the charset `responseText` decodes with — the old
+/// code read every response as lossy UTF-8.
+#[test]
+fn xhr_override_mime_type_changes_the_decoded_charset() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            window.results = {};
+            const plain = new XMLHttpRequest();
+            plain.addEventListener('load', () => { window.results.utf8 = plain.responseText; });
+            plain.open('GET', '/xhr-latin1');
+            plain.send();
+
+            const over = new XMLHttpRequest();
+            over.addEventListener('load', () => { window.results.latin1 = over.responseText; });
+            over.open('GET', '/xhr-latin1');
+            over.overrideMimeType('text/plain; charset=windows-1252');
+            over.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    // Without the override the 0xE9 byte is not valid UTF-8 and decodes to the
+    // replacement character; with it, the text is right.
+    assert_eq!(
+        page.eval_to_string("window.results.latin1").unwrap(),
+        "café",
+        "errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(
+        page.eval_to_string("window.results.utf8 === 'café'")
+            .unwrap(),
+        "false"
+    );
+    // `overrideMimeType` is refused once the response is being delivered.
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            x.addEventListener('load', () => {
+                try { x.overrideMimeType('text/plain'); window.lateOverride = 'no-throw'; }
+                catch (e) { window.lateOverride = e.name; }
+            });
+            x.open('GET', '/text');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.lateOverride").unwrap(),
+        "InvalidStateError"
+    );
+}
+
+/// `responseURL` is the final post-redirect URL. It used to be discarded.
+#[test]
+fn xhr_response_url_after_a_redirect() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            x.addEventListener('load', () => { window.finalUrl = x.responseURL; });
+            x.open('GET', '/xhr-redirect#frag');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.finalUrl").unwrap(),
+        format!("http://127.0.0.1:{port}/text"),
+        "errors: {:?}",
+        page.drain_errors()
+    );
+}
+
+/// **`Set-Cookie` must not be readable from script.** The net layer forwards
+/// the whole header map for a same-origin (`basic`) response, so the
+/// forbidden-response-header filter has to live in XHR.
+///
+/// The same test covers `getAllResponseHeaders` sorting and combining, which
+/// reuse `HeadersData::sorted_combined`.
+#[test]
+fn xhr_response_headers_hide_set_cookie_and_are_sorted_and_combined() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const c = new XMLHttpRequest();
+            c.addEventListener('load', () => {
+                window.cookieHeader = String(c.getResponseHeader('Set-Cookie'));
+                window.cookieHeader2 = String(c.getResponseHeader('set-cookie'));
+                window.allHeaders = c.getAllResponseHeaders().toLowerCase();
+                window.visible = c.getResponseHeader('x-visible');
+            });
+            c.open('GET', '/xhr-cookie');
+            c.send();
+
+            const h = new XMLHttpRequest();
+            h.addEventListener('load', () => { window.headerBlock = h.getAllResponseHeaders(); });
+            h.open('GET', '/xhr-headers');
+            h.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.cookieHeader").unwrap(),
+        "null",
+        "Set-Cookie must not be readable; errors: {:?}",
+        page.drain_errors()
+    );
+    assert_eq!(page.eval_to_string("window.cookieHeader2").unwrap(), "null");
+    assert_eq!(
+        page.eval_to_string("window.allHeaders.includes('set-cookie')")
+            .unwrap(),
+        "false"
+    );
+    // A non-forbidden header on the same response is still readable, so the
+    // filter is a filter and not a blanket.
+    assert_eq!(page.eval_to_string("window.visible").unwrap(), "yes");
+
+    let block = page.eval_to_string("window.headerBlock").unwrap();
+    assert!(
+        block.contains("x-alpha: a1, a2\r\n"),
+        "duplicate names must be combined with `, `; got:\n{block}"
+    );
+    let alpha = block.find("x-alpha").expect("x-alpha present");
+    let zebra = block.find("x-zebra").expect("x-zebra present");
+    assert!(
+        alpha < zebra,
+        "headers must be sorted by name; got:\n{block}"
+    );
+    assert!(
+        block.ends_with("\r\n"),
+        "each field ends with CRLF; got:\n{block}"
+    );
+}
+
+/// `setRequestHeader` combines a repeated name with `, ` and silently ignores a
+/// forbidden one.
+#[test]
+fn xhr_set_request_header_combines_and_ignores_forbidden_names() {
+    let port = spawn_server();
+    let page = xhr_page(port);
+    page.eval(
+        "(() => {
+            const x = new XMLHttpRequest();
+            x.addEventListener('load', () => { window.echoed = x.responseText; });
+            x.open('GET', '/xhr-echo-header');
+            x.setRequestHeader('X-Combined', 'a');
+            x.setRequestHeader('x-combined', 'b');
+            // Forbidden: silently ignored, not an error — feature-detecting code
+            // sets these and carries on.
+            x.setRequestHeader('Referer', 'http://evil.test/');
+            x.setRequestHeader('Host', 'evil.test');
+            x.send();
+        })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.echoed").unwrap(),
+        "a, b|true",
+        "the repeated name combines and the forbidden one never reached the wire; errors: {:?}",
+        page.drain_errors()
+    );
 }

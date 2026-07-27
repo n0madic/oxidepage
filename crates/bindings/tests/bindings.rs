@@ -1613,9 +1613,11 @@ fn header_names_and_values_are_validated() {
         "(() => { try { new Headers().set('bad name', '1'); return false; } \
           catch (e) { return e instanceof TypeError; } })()"
     ));
-    // XHR.setRequestHeader rejects CRLF injection with a SyntaxError.
+    // XHR.setRequestHeader rejects CRLF injection with a SyntaxError. The URL is
+    // absolute because `open()` resolves it — the harness document is
+    // `about:blank`, against which a path-relative URL has no base.
     assert!(h.eval_bool(
-        "(() => { const x = new XMLHttpRequest(); x.open('GET', '/'); \
+        "(() => { const x = new XMLHttpRequest(); x.open('GET', 'https://example.test/'); \
           try { x.setRequestHeader('X', 'a\\r\\nHost: evil'); return false; } \
           catch (e) { return e instanceof DOMException && e.name === 'SyntaxError'; } })()"
     ));

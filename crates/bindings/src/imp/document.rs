@@ -431,6 +431,12 @@ pub(crate) fn create_event(
                 data: String::new(),
             }),
         ),
+        // `ProgressEvent` is deliberately **not** here. It exists as an
+        // interface, but DOM's `createEvent` table is a closed legacy list and
+        // WPT asserts that every event interface outside it throws — including
+        // this one by name (`Document-createEvent.https.html`). Adding it would
+        // trade a passing conformance test for a constructor that
+        // `new ProgressEvent()` already provides (ADR-0024).
         _ => {
             return Err(cx.dom_throw(
                 DomExceptionKind::NotSupportedError,

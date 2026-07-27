@@ -2195,6 +2195,17 @@ pub fn deliver_net_event(cx: &BindCx<'_>, event: NetEvent) {
                         let mut x = xhr.borrow_mut();
                         x.status = status;
                         x.status_text = status_text;
+                        // `responseURL` is the final post-redirect URL with its
+                        // fragment stripped; it used to be discarded here.
+                        x.response_url = strip_fragment(&final_url);
+                        // `lengthComputable`/`total` come from `Content-Length`
+                        // and from nowhere else: a cached or compressed response
+                        // has none, and then `total` stays 0 rather than being
+                        // invented from the bytes that happen to have arrived.
+                        x.total = headers
+                            .iter()
+                            .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                            .and_then(|(_, v)| v.trim().parse::<f64>().ok());
                         x.response_headers = headers;
                         x.ready_state = 2; // HEADERS_RECEIVED
                         Some(Rc::clone(xhr))
@@ -2202,18 +2213,31 @@ pub fn deliver_net_event(cx: &BindCx<'_>, event: NetEvent) {
                     None => None,
                 }
             };
-            if let Some(xhr) = xhr {
-                imp::xml_http_request::fire_event(cx, &xhr, "readystatechange");
+            if let Some(xhr) = xhr
+                && let Some(xhr) = imp::xml_http_request::rehydrate(&xhr)
+            {
+                // The response head is the earliest proof the request body went
+                // out, so the upload half completes here.
+                imp::xml_http_request::upload_finished(cx, &xhr);
+                imp::xml_http_request::fire_plain(cx, &xhr, "readystatechange");
             }
         }
         NetEvent::Chunk { data, .. } => {
-            let mut pending = cx.state.pending_net.borrow_mut();
-            match pending.get_mut(&id) {
-                Some(PendingNet::Fetch { response, .. }) => response.body.extend_from_slice(&data),
-                Some(PendingNet::Xhr { xhr }) => {
-                    xhr.borrow_mut().response_body.extend_from_slice(&data);
+            let xhr = {
+                let mut pending = cx.state.pending_net.borrow_mut();
+                match pending.get_mut(&id) {
+                    Some(PendingNet::Fetch { response, .. }) => {
+                        response.body.extend_from_slice(&data);
+                        None
+                    }
+                    Some(PendingNet::Xhr { xhr }) => Some(Rc::clone(xhr)),
+                    None => None,
                 }
-                None => {}
+            };
+            if let Some(xhr) = xhr
+                && let Some(xhr) = imp::xml_http_request::rehydrate(&xhr)
+            {
+                imp::xml_http_request::chunk_received(cx, &xhr, &data);
             }
         }
         NetEvent::Done { .. } => {
@@ -2242,13 +2266,13 @@ pub fn deliver_net_event(cx: &BindCx<'_>, event: NetEvent) {
                     }
                 }
                 Some(PendingNet::Xhr { xhr }) => {
-                    xhr.borrow_mut().ready_state = 4; // DONE
-                    imp::xml_http_request::fire_event(cx, &xhr, "readystatechange");
-                    imp::xml_http_request::fire_event(cx, &xhr, "load");
-                    imp::xml_http_request::fire_event(cx, &xhr, "loadend");
-                    // Terminal: release the self-referential wrapper root (set in
-                    // the constructor) so the finished request can be collected.
-                    xhr.borrow_mut().wrapper = None;
+                    if let Some(xhr) = imp::xml_http_request::rehydrate(&xhr) {
+                        // The entry is already gone from `pending_net`, so
+                        // `terminate` only has the timeout timer left to disarm.
+                        imp::xml_http_request::terminate(cx, &xhr);
+                        imp::xml_http_request::upload_finished(cx, &xhr);
+                        imp::xml_http_request::request_done(cx, &xhr);
+                    }
                 }
                 None => {}
             }
@@ -2262,19 +2286,25 @@ pub fn deliver_net_event(cx: &BindCx<'_>, event: NetEvent) {
                     let _ = cx.scope.call(&reject, &JsValue::Undefined, &[err]);
                 }
                 Some(PendingNet::Xhr { xhr }) => {
-                    xhr.borrow_mut().ready_state = 4; // DONE
-                    imp::xml_http_request::fire_event(cx, &xhr, "readystatechange");
-                    imp::xml_http_request::fire_event(cx, &xhr, "error");
-                    imp::xml_http_request::fire_event(cx, &xhr, "loadend");
-                    // Terminal: release the self-referential wrapper root so the
-                    // failed request can be collected.
-                    xhr.borrow_mut().wrapper = None;
+                    if let Some(xhr) = imp::xml_http_request::rehydrate(&xhr) {
+                        imp::xml_http_request::terminate(cx, &xhr);
+                        imp::xml_http_request::request_error(cx, &xhr, "error");
+                    }
                 }
                 None => {}
             }
         }
     }
     microtask_checkpoint(cx);
+}
+
+/// A URL with its fragment removed — what `XMLHttpRequest.responseURL` is
+/// defined to expose.
+fn strip_fragment(url: &str) -> String {
+    match url.split_once('#') {
+        Some((head, _)) => head.to_owned(),
+        None => url.to_owned(),
+    }
 }
 
 /// Builds a `Response` object from an accumulated fetch. A cross-origin opaque

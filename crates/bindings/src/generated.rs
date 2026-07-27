@@ -1962,124 +1962,6 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         },
     )?;
 
-    let proto_xml_http_request = cx.begin_interface("XMLHttpRequest", Some("EventTarget"))?;
-    cx.define_constant(&proto_xml_http_request, "UNSENT", 0f64)?;
-    cx.define_constant(&proto_xml_http_request, "OPENED", 1f64)?;
-    cx.define_constant(&proto_xml_http_request, "HEADERS_RECEIVED", 2f64)?;
-    cx.define_constant(&proto_xml_http_request, "LOADING", 3f64)?;
-    cx.define_constant(&proto_xml_http_request, "DONE", 4f64)?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "onreadystatechange",
-        gen_xml_http_request_get_onreadystatechange,
-        gen_xml_http_request_set_onreadystatechange,
-    )?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "onload",
-        gen_xml_http_request_get_onload,
-        gen_xml_http_request_set_onload,
-    )?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "onerror",
-        gen_xml_http_request_get_onerror,
-        gen_xml_http_request_set_onerror,
-    )?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "onloadend",
-        gen_xml_http_request_get_onloadend,
-        gen_xml_http_request_set_onloadend,
-    )?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "onabort",
-        gen_xml_http_request_get_onabort,
-        gen_xml_http_request_set_onabort,
-    )?;
-    cx.define_getter(
-        &proto_xml_http_request,
-        "readyState",
-        gen_xml_http_request_get_ready_state,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "open",
-        2,
-        gen_xml_http_request_open,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "setRequestHeader",
-        2,
-        gen_xml_http_request_set_request_header,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "send",
-        0,
-        gen_xml_http_request_send,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "abort",
-        0,
-        gen_xml_http_request_abort,
-    )?;
-    cx.define_getter(
-        &proto_xml_http_request,
-        "status",
-        gen_xml_http_request_get_status,
-    )?;
-    cx.define_getter(
-        &proto_xml_http_request,
-        "statusText",
-        gen_xml_http_request_get_status_text,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "getResponseHeader",
-        1,
-        gen_xml_http_request_get_response_header,
-    )?;
-    cx.define_method(
-        &proto_xml_http_request,
-        "getAllResponseHeaders",
-        0,
-        gen_xml_http_request_get_all_response_headers,
-    )?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "withCredentials",
-        gen_xml_http_request_get_with_credentials,
-        gen_xml_http_request_set_with_credentials,
-    )?;
-    cx.define_accessor(
-        &proto_xml_http_request,
-        "responseType",
-        gen_xml_http_request_get_response_type,
-        gen_xml_http_request_set_response_type,
-    )?;
-    cx.define_getter(
-        &proto_xml_http_request,
-        "responseText",
-        gen_xml_http_request_get_response_text,
-    )?;
-    cx.define_getter(
-        &proto_xml_http_request,
-        "response",
-        gen_xml_http_request_get_response,
-    )?;
-    cx.finish_interface(
-        "XMLHttpRequest",
-        &proto_xml_http_request,
-        CtorSpec::Native {
-            length: 0,
-            construct: gen_xml_http_request_constructor,
-        },
-    )?;
-
     let proto_dom_rect_read_only = cx.begin_interface("DOMRectReadOnly", None)?;
     cx.define_getter(&proto_dom_rect_read_only, "x", gen_dom_rect_read_only_get_x)?;
     cx.define_getter(&proto_dom_rect_read_only, "y", gen_dom_rect_read_only_get_y)?;
@@ -5552,6 +5434,207 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         },
     )?;
 
+    let proto_progress_event = cx.begin_interface("ProgressEvent", Some("Event"))?;
+    cx.define_getter(
+        &proto_progress_event,
+        "lengthComputable",
+        gen_progress_event_get_length_computable,
+    )?;
+    cx.define_getter(
+        &proto_progress_event,
+        "loaded",
+        gen_progress_event_get_loaded,
+    )?;
+    cx.define_getter(&proto_progress_event, "total", gen_progress_event_get_total)?;
+    cx.finish_interface(
+        "ProgressEvent",
+        &proto_progress_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_progress_event_constructor,
+        },
+    )?;
+
+    let proto_xml_http_request_event_target =
+        cx.begin_interface("XMLHttpRequestEventTarget", Some("EventTarget"))?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "onloadstart",
+        gen_xml_http_request_event_target_get_onloadstart,
+        gen_xml_http_request_event_target_set_onloadstart,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "onprogress",
+        gen_xml_http_request_event_target_get_onprogress,
+        gen_xml_http_request_event_target_set_onprogress,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "onabort",
+        gen_xml_http_request_event_target_get_onabort,
+        gen_xml_http_request_event_target_set_onabort,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "onerror",
+        gen_xml_http_request_event_target_get_onerror,
+        gen_xml_http_request_event_target_set_onerror,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "onload",
+        gen_xml_http_request_event_target_get_onload,
+        gen_xml_http_request_event_target_set_onload,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "ontimeout",
+        gen_xml_http_request_event_target_get_ontimeout,
+        gen_xml_http_request_event_target_set_ontimeout,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request_event_target,
+        "onloadend",
+        gen_xml_http_request_event_target_get_onloadend,
+        gen_xml_http_request_event_target_set_onloadend,
+    )?;
+    cx.finish_interface(
+        "XMLHttpRequestEventTarget",
+        &proto_xml_http_request_event_target,
+        CtorSpec::Illegal,
+    )?;
+
+    let proto_xml_http_request_upload =
+        cx.begin_interface("XMLHttpRequestUpload", Some("XMLHttpRequestEventTarget"))?;
+    cx.finish_interface(
+        "XMLHttpRequestUpload",
+        &proto_xml_http_request_upload,
+        CtorSpec::Illegal,
+    )?;
+
+    let proto_xml_http_request =
+        cx.begin_interface("XMLHttpRequest", Some("XMLHttpRequestEventTarget"))?;
+    cx.define_constant(&proto_xml_http_request, "UNSENT", 0f64)?;
+    cx.define_constant(&proto_xml_http_request, "OPENED", 1f64)?;
+    cx.define_constant(&proto_xml_http_request, "HEADERS_RECEIVED", 2f64)?;
+    cx.define_constant(&proto_xml_http_request, "LOADING", 3f64)?;
+    cx.define_constant(&proto_xml_http_request, "DONE", 4f64)?;
+    cx.define_accessor(
+        &proto_xml_http_request,
+        "onreadystatechange",
+        gen_xml_http_request_get_onreadystatechange,
+        gen_xml_http_request_set_onreadystatechange,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "readyState",
+        gen_xml_http_request_get_ready_state,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "open",
+        2,
+        gen_xml_http_request_open,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "setRequestHeader",
+        2,
+        gen_xml_http_request_set_request_header,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request,
+        "timeout",
+        gen_xml_http_request_get_timeout,
+        gen_xml_http_request_set_timeout,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request,
+        "withCredentials",
+        gen_xml_http_request_get_with_credentials,
+        gen_xml_http_request_set_with_credentials,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "upload",
+        gen_xml_http_request_get_upload,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "send",
+        0,
+        gen_xml_http_request_send,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "abort",
+        0,
+        gen_xml_http_request_abort,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "responseURL",
+        gen_xml_http_request_get_response_url,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "status",
+        gen_xml_http_request_get_status,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "statusText",
+        gen_xml_http_request_get_status_text,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "getResponseHeader",
+        1,
+        gen_xml_http_request_get_response_header,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "getAllResponseHeaders",
+        0,
+        gen_xml_http_request_get_all_response_headers,
+    )?;
+    cx.define_method(
+        &proto_xml_http_request,
+        "overrideMimeType",
+        1,
+        gen_xml_http_request_override_mime_type,
+    )?;
+    cx.define_accessor(
+        &proto_xml_http_request,
+        "responseType",
+        gen_xml_http_request_get_response_type,
+        gen_xml_http_request_set_response_type,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "response",
+        gen_xml_http_request_get_response,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "responseText",
+        gen_xml_http_request_get_response_text,
+    )?;
+    cx.define_getter(
+        &proto_xml_http_request,
+        "responseXML",
+        gen_xml_http_request_get_response_xml,
+    )?;
+    cx.finish_interface(
+        "XMLHttpRequest",
+        &proto_xml_http_request,
+        CtorSpec::Native {
+            length: 0,
+            construct: gen_xml_http_request_constructor,
+        },
+    )?;
+
     Ok(())
 }
 
@@ -8976,218 +9059,6 @@ fn gen_response_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
     let a0 = call.arg(0);
     let a1 = call.arg(1);
     imp::response::constructor(cx, call, a0, a1)
-}
-
-fn gen_xml_http_request_get_onreadystatechange(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::onreadystatechange(cx, this)
-}
-
-fn gen_xml_http_request_set_onreadystatechange(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = call.arg(0);
-    imp::xml_http_request::set_onreadystatechange(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_onload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::onload(cx, this)
-}
-
-fn gen_xml_http_request_set_onload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = call.arg(0);
-    imp::xml_http_request::set_onload(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_onerror(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::onerror(cx, this)
-}
-
-fn gen_xml_http_request_set_onerror(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = call.arg(0);
-    imp::xml_http_request::set_onerror(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_onloadend(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::onloadend(cx, this)
-}
-
-fn gen_xml_http_request_set_onloadend(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = call.arg(0);
-    imp::xml_http_request::set_onloadend(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::onabort(cx, this)
-}
-
-fn gen_xml_http_request_set_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = call.arg(0);
-    imp::xml_http_request::set_onabort(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_ready_state(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::Number(imp::xml_http_request::ready_state(
-        cx, this,
-    )?))
-}
-
-fn gen_xml_http_request_open(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_dom_string(call, 0)?;
-    let a1 = cx.arg_dom_string(call, 1)?;
-    imp::xml_http_request::open(cx, this, a0, a1)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_set_request_header(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_dom_string(call, 0)?;
-    let a1 = cx.arg_dom_string(call, 1)?;
-    imp::xml_http_request::set_request_header(cx, this, a0, a1)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_send(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = call.arg(0);
-    imp::xml_http_request::send(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_abort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::abort(cx, this)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_status(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::Number(imp::xml_http_request::status(cx, this)?))
-}
-
-fn gen_xml_http_request_get_status_text(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::String(imp::xml_http_request::status_text(
-        cx, this,
-    )?))
-}
-
-fn gen_xml_http_request_get_response_header(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_dom_string(call, 0)?;
-    Ok(
-        match imp::xml_http_request::get_response_header(cx, this, a0)? {
-            Some(s) => JsValue::String(s),
-            None => JsValue::Null,
-        },
-    )
-}
-
-fn gen_xml_http_request_get_all_response_headers(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::String(
-        imp::xml_http_request::get_all_response_headers(cx, this)?,
-    ))
-}
-
-fn gen_xml_http_request_get_with_credentials(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::Bool(imp::xml_http_request::with_credentials(
-        cx, this,
-    )?))
-}
-
-fn gen_xml_http_request_set_with_credentials(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_bool(call, 0);
-    imp::xml_http_request::set_with_credentials(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_response_type(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::String(imp::xml_http_request::response_type(
-        cx, this,
-    )?))
-}
-
-fn gen_xml_http_request_set_response_type(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    let a0 = cx.arg_dom_string(call, 0)?;
-    imp::xml_http_request::set_response_type(cx, this, a0)?;
-    Ok(JsValue::Undefined)
-}
-
-fn gen_xml_http_request_get_response_text(
-    cx: &BindCx<'_>,
-    call: &HostCall,
-) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    Ok(JsValue::String(imp::xml_http_request::response_text(
-        cx, this,
-    )?))
-}
-
-fn gen_xml_http_request_get_response(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let this = cx.this_xhr(&call.this)?;
-    imp::xml_http_request::response(cx, this)
-}
-
-fn gen_xml_http_request_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    imp::xml_http_request::constructor(cx, call)
 }
 
 fn gen_dom_rect_read_only_get_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
@@ -15541,4 +15412,363 @@ fn gen_url_search_params_to_string(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 fn gen_url_search_params_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let a0 = call.arg(0);
     imp::url_search_params::constructor(cx, call, a0)
+}
+
+fn gen_progress_event_get_length_computable(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Bool(imp::progress_event::length_computable(
+        cx, this,
+    )?))
+}
+
+fn gen_progress_event_get_loaded(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::progress_event::loaded(cx, this)?))
+}
+
+fn gen_progress_event_get_total(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::Number(imp::progress_event::total(cx, this)?))
+}
+
+fn gen_progress_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::progress_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_xml_http_request_event_target_get_onloadstart(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::onloadstart(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_onloadstart(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_onloadstart(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_event_target_get_onprogress(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::onprogress(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_onprogress(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_onprogress(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_event_target_get_onabort(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::onabort(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_onabort(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_onabort(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_event_target_get_onerror(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::onerror(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_onerror(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_onerror(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_event_target_get_onload(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::onload(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_onload(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_onload(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_event_target_get_ontimeout(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::ontimeout(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_ontimeout(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_ontimeout(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_event_target_get_onloadend(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    imp::xml_http_request_event_target::onloadend(cx, this)
+}
+
+fn gen_xml_http_request_event_target_set_onloadend(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr_event_target(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request_event_target::set_onloadend(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_onreadystatechange(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    imp::xml_http_request::onreadystatechange(cx, this)
+}
+
+fn gen_xml_http_request_set_onreadystatechange(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request::set_onreadystatechange(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_ready_state(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::Number(imp::xml_http_request::ready_state(
+        cx, this,
+    )?))
+}
+
+fn gen_xml_http_request_open(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_dom_string(call, 1)?;
+    let a2 = cx.arg_bool_or(call, 2, true);
+    let a3 = cx.arg_nullable_dom_string(call, 3)?;
+    let a4 = cx.arg_nullable_dom_string(call, 4)?;
+    imp::xml_http_request::open(cx, this, a0, a1, a2, a3, a4)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_set_request_header(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_dom_string(call, 1)?;
+    imp::xml_http_request::set_request_header(cx, this, a0, a1)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_timeout(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::Number(imp::xml_http_request::timeout(cx, this)?))
+}
+
+fn gen_xml_http_request_set_timeout(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_u32(call, 0)?;
+    imp::xml_http_request::set_timeout(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_with_credentials(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::Bool(imp::xml_http_request::with_credentials(
+        cx, this,
+    )?))
+}
+
+fn gen_xml_http_request_set_with_credentials(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_bool(call, 0);
+    imp::xml_http_request::set_with_credentials(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_upload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    imp::xml_http_request::upload(cx, this)
+}
+
+fn gen_xml_http_request_send(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = call.arg(0);
+    imp::xml_http_request::send(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_abort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    imp::xml_http_request::abort(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_response_url(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::String(imp::xml_http_request::response_url(
+        cx, this,
+    )?))
+}
+
+fn gen_xml_http_request_get_status(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::Number(imp::xml_http_request::status(cx, this)?))
+}
+
+fn gen_xml_http_request_get_status_text(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::String(imp::xml_http_request::status_text(
+        cx, this,
+    )?))
+}
+
+fn gen_xml_http_request_get_response_header(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    Ok(
+        match imp::xml_http_request::get_response_header(cx, this, a0)? {
+            Some(s) => JsValue::String(s),
+            None => JsValue::Null,
+        },
+    )
+}
+
+fn gen_xml_http_request_get_all_response_headers(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::String(
+        imp::xml_http_request::get_all_response_headers(cx, this)?,
+    ))
+}
+
+fn gen_xml_http_request_override_mime_type(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::xml_http_request::override_mime_type(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_response_type(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::String(imp::xml_http_request::response_type(
+        cx, this,
+    )?))
+}
+
+fn gen_xml_http_request_set_response_type(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::xml_http_request::set_response_type(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_xml_http_request_get_response(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    imp::xml_http_request::response(cx, this)
+}
+
+fn gen_xml_http_request_get_response_text(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    Ok(JsValue::String(imp::xml_http_request::response_text(
+        cx, this,
+    )?))
+}
+
+fn gen_xml_http_request_get_response_xml(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xhr(&call.this)?;
+    let ret = imp::xml_http_request::response_xml(cx, this)?;
+    cx.opt_node_to_js(ret)
+}
+
+fn gen_xml_http_request_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    imp::xml_http_request::constructor(cx, call)
 }

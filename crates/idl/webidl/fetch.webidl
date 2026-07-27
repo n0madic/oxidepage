@@ -1,7 +1,12 @@
-// Fetch + XHR Phase 3 surface. Promise-returning methods are typed `any`
+// Fetch Phase 3 surface. Promise-returning methods are typed `any`
 // (the codegen has no Promise type): the hand-written `imp` builds and returns
 // the promise value. `fetch()` itself is a global function hand-registered in
 // `install_window`, not an interface here.
+//
+// `XMLHttpRequest` lives in `xhr.webidl`: it is a separate specification with
+// its own inheritance chain (`XMLHttpRequestEventTarget`) and its own event
+// interface (`ProgressEvent`), and it shares only `FormData`/`Headers` with
+// this file.
 
 // The `FormData` entry list. Constructing one from a `<form>` runs HTML's
 // "construct the entry list" over the form's successful controls.
@@ -70,40 +75,4 @@ interface Response {
   any text();
   any json();
   any arrayBuffer();
-};
-
-// A real `EventTarget`, so `addEventListener` gets capture/`once`/`passive`,
-// `===` dedup and `handleEvent` objects, `dispatchEvent` exists, and the events
-// it fires are real `Event` objects rather than `{type, target}` stand-ins.
-interface XMLHttpRequest : EventTarget {
-  constructor();
-
-  const unsigned short UNSENT = 0;
-  const unsigned short OPENED = 1;
-  const unsigned short HEADERS_RECEIVED = 2;
-  const unsigned short LOADING = 3;
-  const unsigned short DONE = 4;
-
-  attribute any onreadystatechange;
-  attribute any onload;
-  attribute any onerror;
-  attribute any onloadend;
-  attribute any onabort;
-
-  readonly attribute unsigned short readyState;
-
-  undefined open(USVString method, USVString url);
-  undefined setRequestHeader(USVString name, USVString value);
-  undefined send(optional any body);
-  undefined abort();
-
-  readonly attribute unsigned short status;
-  readonly attribute USVString statusText;
-  USVString? getResponseHeader(USVString name);
-  USVString getAllResponseHeaders();
-
-  attribute boolean withCredentials;
-  attribute USVString responseType;
-  readonly attribute USVString responseText;
-  readonly attribute any response;
 };

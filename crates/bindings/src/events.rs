@@ -149,6 +149,20 @@ pub enum UiKind {
     Composition {
         data: String,
     },
+    /// `ProgressEvent`, which is **not** a UI event — it inherits straight from
+    /// `Event`. It reuses this slot anyway, because the slot is what gives an
+    /// event interface its brand: a `ProgressEvent` getter called on a plain
+    /// `Event` fails on the payload shape rather than needing a tag of its own
+    /// (ADR-0024). The other [`UiPayload`] fields (`detail`, `has_view`,
+    /// `modifiers`) stay at their defaults and are never read for it.
+    ///
+    /// `loaded`/`total` are `unsigned long long` in the IDL and JS numbers are
+    /// doubles, so an `f64` is the exact script-visible type.
+    Progress {
+        length_computable: bool,
+        loaded: f64,
+        total: f64,
+    },
 }
 
 /// The typed payload of a UI event.
@@ -415,6 +429,11 @@ pub(crate) fn target_to_js(cx: &BindCx<'_>, key: EventTargetKey) -> Result<JsVal
                         data.wrapper.borrow().clone()
                     }
                     Some(crate::state::HostData::Xhr(xhr)) => xhr.borrow().wrapper.clone(),
+                    // The upload object's wrapper lives on the XHR that owns it
+                    // (it is that XHR's `[SameObject]` member).
+                    Some(crate::state::HostData::XhrUpload(owner)) => {
+                        owner.upgrade().and_then(|x| x.borrow().upload.clone())
+                    }
                     _ => return Err(JsThrow::Type("stale EventTarget target".into())),
                 }
             };

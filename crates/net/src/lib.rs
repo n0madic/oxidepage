@@ -32,7 +32,8 @@ pub use cookies::{CookieJar, CookieSource};
 pub use error::{NetError, NetResult};
 pub use fetch::{
     Credentials, FetchEngine, FetchOutcome, NetRequest, RequestDefaults, RequestMode, ResponseHead,
-    ResponseType, decode_charset,
+    ResponseType, charset_from_content_type, decode_charset, decode_with_charset,
+    is_forbidden_request_header,
 };
 pub use ip_filter::ip_allowed;
 pub use policy::ResourcePolicy;

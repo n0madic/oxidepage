@@ -52,11 +52,16 @@ v1 limits.
   documents load and run their scripts headlessly with correct
   inline/external/`defer`/`async`/module timing; ES modules resolve static
   imports and `import.meta.url` through a synchronous loader. Bindings:
-  `URL`/`URLSearchParams`, `Headers`/`Request`/`Response`, `fetch()`, `XMLHttpRequest`,
-  and `document.cookie`. `oxidepage eval http(s)://…` loads over the network.
-  Gated by the SSRF battery, cookie/referrer/cache unit tests, and page/bindings
-  integration tests against in-process loopback servers (CI never touches the
-  real internet). Implementation decisions: ADR-0004.
+  `URL`/`URLSearchParams`, `Headers`/`Request`/`Response`, `fetch()`,
+  `XMLHttpRequest`, and `document.cookie`. XHR is conformant: the full event
+  sequence over `ProgressEvent`, `xhr.upload`, `timeout`, `overrideMimeType`,
+  `responseURL`, and every `responseType` but `"blob"` (there is no `Blob`
+  type); `Set-Cookie` is filtered out of `getResponseHeader`/
+  `getAllResponseHeaders`, and synchronous mode throws rather than deadlocking
+  the page thread — ADR-0024. `oxidepage eval http(s)://…` loads over the
+  network. Gated by the SSRF battery, cookie/referrer/cache unit tests, and
+  page/bindings integration tests against in-process loopback servers (CI never
+  touches the real internet). Implementation decisions: ADR-0004, ADR-0024.
 - **Phase 4 — Style (stylo)**: done. Servo's `stylo` drives a real cascade:
   the document stylesheet set (`<style>`, `<link rel=stylesheet>`, `@import` via
   a synchronous blocking loader), media queries, and incremental restyle driven
@@ -391,8 +396,9 @@ v1 limits.
   not leak the node the pointer came from. `XMLHttpRequest` is a real
   `EventTarget` — its events are genuine `Event` objects (so `preventDefault`,
   `currentTarget`, `isTrusted` and `instanceof Event` work) and its listeners
-  honour `capture`/`once`/`passive`; **not** implemented there: `ProgressEvent`,
-  `xhr.upload`, `progress`/`timeout`.
+  honour `capture`/`once`/`passive`; its behavior was then brought to the living
+  standard in ADR-0024 (`ProgressEvent`, `xhr.upload`, `timeout`, the full event
+  sequence, and the `Set-Cookie` disclosure fix).
   **Not implemented:** touch and gesture events,
   `Selection`/`Range` over arbitrary DOM, `contenteditable`, drag-and-drop,
   clipboard, IME composition *generation* (the interface exists), smooth

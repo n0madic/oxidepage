@@ -1057,35 +1057,7 @@ fn validate_header(name: &str, value: &str) -> NetResult<(HeaderName, HeaderValu
 /// Whether a script-supplied request header is forbidden (Fetch §"forbidden
 /// request-header name"): the client owns it, so a script copy is dropped.
 fn is_forbidden_header(name: &HeaderName) -> bool {
-    let name = name.as_str();
-    if name.starts_with("proxy-") || name.starts_with("sec-") {
-        return true;
-    }
-    matches!(
-        name,
-        "accept-charset"
-            | "accept-encoding"
-            | "access-control-request-headers"
-            | "access-control-request-method"
-            | "connection"
-            | "content-length"
-            | "cookie"
-            | "cookie2"
-            | "date"
-            | "dnt"
-            | "expect"
-            | "host"
-            | "keep-alive"
-            | "origin"
-            | "permissions-policy"
-            | "referer"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "user-agent"
-            | "via"
-    )
+    is_forbidden_request_header(name.as_str())
 }
 
 /// Whether a script-supplied request header is CORS-safelisted (Fetch): the
@@ -1230,20 +1202,75 @@ fn cors_visible_headers(headers: &HeaderMap, creds: Credentials) -> Vec<(String,
         .collect()
 }
 
+/// The `charset` parameter of a `Content-Type`, if it carries one.
+///
+/// Shared with `XMLHttpRequest`, whose "final charset" prefers the charset of
+/// an `overrideMimeType()` value over the response's own and so has to ask this
+/// question about each separately — one parsing rule, two callers.
+#[must_use]
+pub fn charset_from_content_type(content_type: &str) -> Option<&str> {
+    content_type
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("charset="))
+        .map(|c| c.trim().trim_matches('"'))
+        .filter(|c| !c.is_empty())
+}
+
 /// Decodes bytes to a string per a `Content-Type` charset (used by document
 /// loads; Fetch `text()` always uses UTF-8 and does not call this).
 #[must_use]
 pub fn decode_charset(bytes: &[u8], content_type: Option<&str>) -> String {
     let label = content_type
-        .and_then(|ct| {
-            ct.split(';')
-                .find_map(|p| p.trim().strip_prefix("charset="))
-        })
-        .map(str::trim)
+        .and_then(charset_from_content_type)
         .unwrap_or("utf-8");
+    decode_with_charset(bytes, label)
+}
+
+/// Decodes bytes with a named encoding, falling back to UTF-8 for an unknown
+/// label — the Encoding standard's "get an encoding" plus its default.
+#[must_use]
+pub fn decode_with_charset(bytes: &[u8], label: &str) -> String {
     let encoding = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8);
     let (text, _, _) = encoding.decode(bytes);
     text.into_owned()
+}
+
+/// Whether a script-supplied request header name is on Fetch's **forbidden
+/// request-header** list — the names only the user agent may set.
+///
+/// `XMLHttpRequest.setRequestHeader` must silently ignore these, so the list
+/// lives here next to the net layer that also strips them.
+#[must_use]
+pub fn is_forbidden_request_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name.starts_with("proxy-") || name.starts_with("sec-") {
+        return true;
+    }
+    matches!(
+        name.as_str(),
+        "accept-charset"
+            | "accept-encoding"
+            | "access-control-request-headers"
+            | "access-control-request-method"
+            | "connection"
+            | "content-length"
+            | "cookie"
+            | "cookie2"
+            | "date"
+            | "dnt"
+            | "expect"
+            | "host"
+            | "keep-alive"
+            | "origin"
+            | "permissions-policy"
+            | "referer"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "user-agent"
+            | "via"
+    )
 }
 
 #[cfg(test)]

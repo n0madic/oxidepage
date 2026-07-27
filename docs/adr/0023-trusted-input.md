@@ -267,9 +267,14 @@ alias a new one. Their registry entries *were* leaking, though — for
 `new EventTarget()` too — so finalization now drops the listeners and handlers
 under the key alongside the slab entry.
 
-Still absent, and the next honest gap: `ProgressEvent` (with `loaded`/`total`/
-`lengthComputable`), `xhr.upload`, and the `progress`/`timeout` events. XHR
-fires plain `Event`s for now.
+Still absent at the time of this ADR, and the next honest gap: `ProgressEvent`
+(with `loaded`/`total`/`lengthComputable`), `xhr.upload`, and the
+`progress`/`timeout` events. XHR fires plain `Event`s for now.
+
+**Closed by ADR-0024**, which also fixed four state-machine bugs this stage left
+untouched — chief among them that a *reused* XHR fired no events at all,
+because the wrapper root released here on every terminal transition was never
+restored by `open()`.
 
 ### Wheel
 

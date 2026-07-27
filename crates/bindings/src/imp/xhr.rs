@@ -5,23 +5,43 @@
 //! [`crate::events::EventTargetKey::Host`], and its events go through
 //! [`crate::events::dispatch_event`] like any other. The slab key doubles as
 //! the event-target identity, the same scheme `new EventTarget()` uses.
+//!
+//! The state machine models the spec's flags explicitly (send() flag, upload
+//! complete flag, response object cache) — see [`crate::netdata::XhrData`] and
+//! ADR-0024, which also records the four deliberate absences: no `Blob`, no
+//! synchronous mode, a single-shot `progress` event (the net layer buffers the
+//! whole body), and a page-side rather than per-request `timeout`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use oxidepage_base::DomExceptionKind;
-use oxidepage_js::{HostCall, JsThrow, JsValue};
-use oxidepage_net::{Credentials, NetRequest, RequestMode};
+use oxidepage_base::{DomExceptionKind, NodeId};
+use oxidepage_js::{HostCall, HostFn, JsThrow, JsValue};
+use oxidepage_net::{
+    Credentials, NetRequest, RequestMode, charset_from_content_type, decode_with_charset,
+    is_forbidden_request_header,
+};
 
 use crate::cx::BindCx;
-use crate::events::EventTargetKey;
-use crate::netdata::{PendingNet, XhrData, is_valid_header_name, is_valid_header_value};
+use crate::events::{EventData, EventTargetKey};
+use crate::netdata::{PendingNet, XhrData, XhrRef, is_valid_header_name, is_valid_header_value};
 use crate::state::HostData;
 
-type Xhr = Rc<RefCell<XhrData>>;
+pub(crate) const UNSENT: u16 = 0;
+pub(crate) const OPENED: u16 = 1;
+pub(crate) const HEADERS_RECEIVED: u16 = 2;
+pub(crate) const LOADING: u16 = 3;
+pub(crate) const DONE: u16 = 4;
 
-const OPENED: u16 = 1;
-const DONE: u16 = 4;
+/// The `responseType` enumeration. `"blob"` is deliberately absent: the engine
+/// has no `Blob` type at all (`Response` omits `blob()` for the same reason),
+/// and an enumerated attribute ignores a value outside its set — so assigning
+/// it leaves the previous value rather than installing a mode that could only
+/// ever return null (P6, ADR-0024).
+const RESPONSE_TYPES: &[&str] = &["", "arraybuffer", "document", "json", "text"];
+
+/// Methods `open()` must reject outright (Fetch's "forbidden method").
+const FORBIDDEN_METHODS: &[&str] = &["CONNECT", "TRACE", "TRACK"];
 
 pub(crate) fn constructor(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
     let xhr = Rc::new(RefCell::new(XhrData::default()));
@@ -36,95 +56,159 @@ pub(crate) fn constructor(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, 
     Ok(wrapper)
 }
 
-pub(crate) fn ready_state(_cx: &BindCx<'_>, this: Xhr) -> Result<f64, JsThrow> {
+// === Simple state accessors ===
+
+pub(crate) fn ready_state(_cx: &BindCx<'_>, this: XhrRef) -> Result<f64, JsThrow> {
     Ok(f64::from(this.borrow().ready_state))
 }
 
-pub(crate) fn status(_cx: &BindCx<'_>, this: Xhr) -> Result<f64, JsThrow> {
+pub(crate) fn status(_cx: &BindCx<'_>, this: XhrRef) -> Result<f64, JsThrow> {
     Ok(f64::from(this.borrow().status))
 }
 
-pub(crate) fn status_text(_cx: &BindCx<'_>, this: Xhr) -> Result<String, JsThrow> {
+pub(crate) fn status_text(_cx: &BindCx<'_>, this: XhrRef) -> Result<String, JsThrow> {
     Ok(this.borrow().status_text.clone())
 }
 
-pub(crate) fn response_type(_cx: &BindCx<'_>, this: Xhr) -> Result<String, JsThrow> {
-    Ok(this.borrow().response_type.clone())
+pub(crate) fn response_url(_cx: &BindCx<'_>, this: XhrRef) -> Result<String, JsThrow> {
+    Ok(this.borrow().response_url.clone())
 }
 
-pub(crate) fn with_credentials(_cx: &BindCx<'_>, this: Xhr) -> Result<bool, JsThrow> {
+pub(crate) fn with_credentials(_cx: &BindCx<'_>, this: XhrRef) -> Result<bool, JsThrow> {
     Ok(this.borrow().with_credentials)
 }
 
 pub(crate) fn set_with_credentials(
-    _cx: &BindCx<'_>,
-    this: Xhr,
+    cx: &BindCx<'_>,
+    this: XhrRef,
     value: bool,
 ) -> Result<(), JsThrow> {
+    let x = this.borrow();
+    if !matches!(x.ready_state, UNSENT | OPENED) || x.send_flag {
+        return Err(cx.dom_throw(
+            DomExceptionKind::InvalidStateError,
+            "XMLHttpRequest.withCredentials: the request has already been sent",
+        ));
+    }
+    drop(x);
     this.borrow_mut().with_credentials = value;
     Ok(())
 }
 
-pub(crate) fn set_response_type(_cx: &BindCx<'_>, this: Xhr, value: String) -> Result<(), JsThrow> {
-    this.borrow_mut().response_type = value;
+pub(crate) fn timeout(_cx: &BindCx<'_>, this: XhrRef) -> Result<f64, JsThrow> {
+    Ok(f64::from(this.borrow().timeout))
+}
+
+/// `timeout` is settable *during* a request, and then it re-arms against the
+/// moment `send()` was called — the spec measures the timeout from there, not
+/// from the assignment.
+pub(crate) fn set_timeout(cx: &BindCx<'_>, this: XhrRef, value: u32) -> Result<(), JsThrow> {
+    this.borrow_mut().timeout = value;
+    if this.borrow().send_flag {
+        arm_timeout(cx, &this)?;
+    }
     Ok(())
 }
 
-pub(crate) fn response_text(_cx: &BindCx<'_>, this: Xhr) -> Result<String, JsThrow> {
-    Ok(String::from_utf8_lossy(&this.borrow().response_body).into_owned())
+/// The `[SameObject]` upload object, created on first access.
+pub(crate) fn upload(cx: &BindCx<'_>, this: XhrRef) -> Result<JsValue, JsThrow> {
+    if let Some(existing) = this.borrow().upload.clone() {
+        return Ok(existing);
+    }
+    let wrapper = cx.new_xhr_upload(Rc::downgrade(&this.data))?;
+    let key = cx.slab_key(&wrapper).unwrap_or_default();
+    let mut x = this.borrow_mut();
+    x.upload_key = key;
+    x.upload = Some(wrapper.clone());
+    Ok(wrapper)
 }
 
-pub(crate) fn response(cx: &BindCx<'_>, this: Xhr) -> Result<JsValue, JsThrow> {
-    let (kind, text) = {
-        let x = this.borrow();
-        (
-            x.response_type.clone(),
-            String::from_utf8_lossy(&x.response_body).into_owned(),
-        )
-    };
-    match kind.as_str() {
-        "json" => {
-            let global = cx.with_global()?;
-            let json = cx.scope.get(&global, "JSON").map_err(JsThrow::from)?;
-            if let JsValue::Object(json) = &json {
-                let parse = cx.scope.get(json, "parse").map_err(JsThrow::from)?;
-                return cx
-                    .scope
-                    .call(&parse, &JsValue::Undefined, &[JsValue::String(text)])
-                    .or(Ok(JsValue::Null));
-            }
-            Ok(JsValue::Null)
-        }
-        _ => Ok(JsValue::String(text)),
-    }
-}
+// === open / send / abort ===
 
 pub(crate) fn open(
-    _cx: &BindCx<'_>,
-    this: Xhr,
+    cx: &BindCx<'_>,
+    this: XhrRef,
     method: String,
     url: String,
+    is_async: bool,
+    _username: Option<String>,
+    _password: Option<String>,
 ) -> Result<(), JsThrow> {
-    let mut x = this.borrow_mut();
-    x.method = method.to_ascii_uppercase();
-    x.url = url;
-    x.request_headers.clear();
-    x.response_headers.clear();
-    x.response_body.clear();
-    x.status = 0;
-    x.status_text.clear();
-    x.ready_state = OPENED;
-    drop(x);
-    fire_event(_cx, &this, "readystatechange");
+    if !is_valid_header_name(&method) {
+        return Err(cx.dom_throw(
+            DomExceptionKind::SyntaxError,
+            "XMLHttpRequest.open: method is not a valid HTTP token",
+        ));
+    }
+    let normalized = normalize_method(&method);
+    if FORBIDDEN_METHODS.contains(&normalized.as_str()) {
+        return Err(cx.dom_throw(
+            DomExceptionKind::SecurityError,
+            "XMLHttpRequest.open: forbidden method",
+        ));
+    }
+    // No synchronous mode. A blocking net wait inside a JS call would run while
+    // the `dom`/`style`/`layout` `RefCell`s are borrowed by the caller, so the
+    // first thing the resumed page touched would panic. Absent and loud beats a
+    // mode that deadlocks or corrupts (ADR-0024).
+    if !is_async {
+        return Err(cx.dom_throw(
+            DomExceptionKind::InvalidAccessError,
+            "XMLHttpRequest.open: synchronous mode is not supported",
+        ));
+    }
+    let doc_url = cx.state.dom.borrow().document_url().to_owned();
+    let absolute = match url::Url::parse(&url) {
+        Ok(u) => u.to_string(),
+        Err(_) => url::Url::parse(&doc_url)
+            .and_then(|base| base.join(&url))
+            .map(|u| u.to_string())
+            .map_err(|_| {
+                cx.dom_throw(
+                    DomExceptionKind::SyntaxError,
+                    &format!("XMLHttpRequest.open: invalid URL `{url}`"),
+                )
+            })?,
+    };
+
+    // "Terminate this's fetch controller": a reopened XHR must stop receiving
+    // the old request's events, which otherwise keep writing into the very
+    // state this call is resetting.
+    terminate(cx, &this);
+
+    {
+        let mut x = this.borrow_mut();
+        x.method = normalized;
+        x.url = absolute;
+        x.request_headers.clear();
+        x.send_flag = false;
+        x.upload_complete = false;
+        x.set_network_error();
+        x.ready_state = OPENED;
+        // Re-root: every terminal transition released the self-reference, and
+        // without putting it back a *reused* XHR would fire no events at all —
+        // `fire_at` needs the wrapper for `event.target`.
+        x.wrapper = Some(this.wrapper.clone());
+    }
+    fire_plain(cx, &this, "readystatechange");
     Ok(())
 }
 
 pub(crate) fn set_request_header(
     cx: &BindCx<'_>,
-    this: Xhr,
+    this: XhrRef,
     name: String,
     value: String,
 ) -> Result<(), JsThrow> {
+    {
+        let x = this.borrow();
+        if x.ready_state != OPENED || x.send_flag {
+            return Err(cx.dom_throw(
+                DomExceptionKind::InvalidStateError,
+                "XMLHttpRequest.setRequestHeader: the request is not open",
+            ));
+        }
+    }
     // Normalize the value (strip surrounding HTTP whitespace) then reject an
     // invalid name/value — a CR/LF/NUL here would inject request headers.
     let value = value.trim();
@@ -134,13 +218,36 @@ pub(crate) fn set_request_header(
             "XMLHttpRequest.setRequestHeader: invalid header name or value",
         ));
     }
-    this.borrow_mut()
+    // A forbidden header name is *silently ignored*, not an error: the spec is
+    // explicit, and feature-detecting code sets `User-Agent` and carries on.
+    if is_forbidden_request_header(&name) {
+        return Ok(());
+    }
+    let mut x = this.borrow_mut();
+    // Setting the same header twice **combines**, it does not duplicate.
+    if let Some((_, existing)) = x
         .request_headers
-        .push((name, value.to_owned()));
+        .iter_mut()
+        .find(|(n, _)| n.eq_ignore_ascii_case(&name))
+    {
+        existing.push_str(", ");
+        existing.push_str(value);
+    } else {
+        x.request_headers.push((name, value.to_owned()));
+    }
     Ok(())
 }
 
-pub(crate) fn send(cx: &BindCx<'_>, this: Xhr, body: JsValue) -> Result<(), JsThrow> {
+pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), JsThrow> {
+    {
+        let x = this.borrow();
+        if x.ready_state != OPENED || x.send_flag {
+            return Err(cx.dom_throw(
+                DomExceptionKind::InvalidStateError,
+                "XMLHttpRequest.send: the request is not open",
+            ));
+        }
+    }
     let (method, mut headers, url, with_credentials) = {
         let x = this.borrow();
         (
@@ -150,12 +257,13 @@ pub(crate) fn send(cx: &BindCx<'_>, this: Xhr, body: JsValue) -> Result<(), JsTh
             x.with_credentials,
         )
     };
-    if url.is_empty() {
-        return Err(JsThrow::Type(
-            "XMLHttpRequest.send: open() has not been called".into(),
-        ));
-    }
-    let body_bytes = match crate::imp::body::extract(cx, &body)? {
+    // A body is ignored for GET/HEAD, exactly as the spec says.
+    let body_value = if matches!(method.as_str(), "GET" | "HEAD") {
+        JsValue::Undefined
+    } else {
+        body
+    };
+    let body_bytes = match crate::imp::body::extract(cx, &body_value)? {
         None => None,
         Some(extracted) => {
             // The body's default `Content-Type` applies only if the author did
@@ -173,15 +281,9 @@ pub(crate) fn send(cx: &BindCx<'_>, this: Xhr, body: JsValue) -> Result<(), JsTh
             Some(extracted.bytes)
         }
     };
+    let body_len = body_bytes.as_ref().map_or(0.0, |b| b.len() as f64);
 
     let doc_url = cx.state.dom.borrow().document_url().to_owned();
-    let absolute = match url::Url::parse(&url) {
-        Ok(u) => u.to_string(),
-        Err(_) => url::Url::parse(&doc_url)
-            .and_then(|base| base.join(&url))
-            .map(|u| u.to_string())
-            .map_err(|_| JsThrow::Type(format!("XMLHttpRequest: invalid URL `{url}`")))?,
-    };
     let initiator_origin = url::Url::parse(&doc_url)
         .ok()
         .map(|u| u.origin().ascii_serialization());
@@ -195,7 +297,7 @@ pub(crate) fn send(cx: &BindCx<'_>, this: Xhr, body: JsValue) -> Result<(), JsTh
     };
     let request = NetRequest {
         method,
-        url: absolute,
+        url,
         headers,
         body: body_bytes,
         credentials,
@@ -205,103 +307,503 @@ pub(crate) fn send(cx: &BindCx<'_>, this: Xhr, body: JsValue) -> Result<(), JsTh
         bypass_cache: false,
     };
     let id = cx.state.hooks.start_fetch(request);
-    this.borrow_mut().request_id = Some(id);
+    {
+        let mut x = this.borrow_mut();
+        x.request_id = Some(id);
+        x.send_flag = true;
+        x.upload_complete = body_len == 0.0;
+        x.loaded = 0.0;
+        x.total = None;
+        x.send_started_ms = cx.now_ms();
+        // Re-root defensively: a `send()` on an XHR whose root was released
+        // (constructor → open → terminal → open → send) must be kept alive.
+        x.wrapper = Some(this.wrapper.clone());
+    }
     cx.state.pending_net.borrow_mut().insert(
         id,
         PendingNet::Xhr {
             xhr: Rc::clone(&this),
         },
     );
+    arm_timeout(cx, &this)?;
+
+    fire_progress(cx, &this, Target::Xhr, "loadstart", 0.0, None);
+    // The upload sequence starts here. Its completion is reported when the
+    // response head proves the body went out — see `upload_finished`.
+    if !this.borrow().upload_complete {
+        fire_progress(cx, &this, Target::Upload, "loadstart", 0.0, Some(body_len));
+    }
     Ok(())
 }
 
-pub(crate) fn abort(cx: &BindCx<'_>, this: Xhr) -> Result<(), JsThrow> {
-    let id = this.borrow_mut().request_id.take();
-    if let Some(id) = id {
-        cx.state.hooks.abort(id);
-        cx.state.pending_net.borrow_mut().remove(&id);
+pub(crate) fn abort(cx: &BindCx<'_>, this: XhrRef) -> Result<(), JsThrow> {
+    terminate(cx, &this);
+    // "If state is opened with the send() flag set, headers received, or
+    // loading, run the request error steps for abort." An XHR that was never
+    // sent fires **nothing** — this used to fire a full sequence at a fresh
+    // object.
+    let fire = {
+        let x = this.borrow();
+        (x.ready_state == OPENED && x.send_flag)
+            || matches!(x.ready_state, HEADERS_RECEIVED | LOADING)
+    };
+    if fire {
+        request_error(cx, &this, "abort");
     }
-    this.borrow_mut().ready_state = DONE;
-    fire_event(cx, &this, "readystatechange");
-    fire_event(cx, &this, "abort");
-    fire_event(cx, &this, "loadend");
+    // "If state is done, then set state to unsent and set response to a network
+    // error." An aborted request leaves no observable readyState or response
+    // behind — `status` used to still read 200 with the partial body intact.
     let mut x = this.borrow_mut();
-    x.ready_state = 0; // UNSENT
-    // Terminal: release the self-referential wrapper root so an aborted,
-    // script-abandoned request can be collected.
-    x.wrapper = None;
+    if x.ready_state == DONE {
+        x.ready_state = UNSENT;
+        x.set_network_error();
+    }
     Ok(())
+}
+
+pub(crate) fn override_mime_type(
+    cx: &BindCx<'_>,
+    this: XhrRef,
+    mime: String,
+) -> Result<(), JsThrow> {
+    if matches!(this.borrow().ready_state, LOADING | DONE) {
+        return Err(cx.dom_throw(
+            DomExceptionKind::InvalidStateError,
+            "XMLHttpRequest.overrideMimeType: the response is already being delivered",
+        ));
+    }
+    this.borrow_mut().override_mime = Some(mime);
+    Ok(())
+}
+
+// === Response headers ===
+
+/// Response headers script may never see. `Set-Cookie` reaches the bindings on
+/// a same-origin (`basic`) response because the net layer forwards the whole
+/// header map — filtering it here is what stops a session cookie marked
+/// `HttpOnly` at the *cookie jar* from being read straight off the response.
+fn is_hidden_response_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("set-cookie") || name.eq_ignore_ascii_case("set-cookie2")
+}
+
+/// The script-visible response headers as a `HeadersData`, so that combining
+/// and sorting reuse the `Headers` interface's implementation rather than a
+/// second copy of the same rules.
+fn visible_headers(x: &XhrData) -> crate::netdata::HeadersData {
+    let visible: Vec<(String, String)> = x
+        .response_headers
+        .iter()
+        .filter(|(n, _)| !is_hidden_response_header(n))
+        .cloned()
+        .collect();
+    crate::netdata::HeadersData::from_pairs(&visible)
 }
 
 pub(crate) fn get_response_header(
     _cx: &BindCx<'_>,
-    this: Xhr,
+    this: XhrRef,
     name: String,
 ) -> Result<Option<String>, JsThrow> {
-    let name = name.to_ascii_lowercase();
-    let x = this.borrow();
-    let values: Vec<&str> = x
-        .response_headers
-        .iter()
-        .filter(|(n, _)| n.eq_ignore_ascii_case(&name))
-        .map(|(_, v)| v.as_str())
-        .collect();
-    Ok((!values.is_empty()).then(|| values.join(", ")))
+    Ok(visible_headers(&this.borrow()).get(&name))
 }
 
-pub(crate) fn get_all_response_headers(_cx: &BindCx<'_>, this: Xhr) -> Result<String, JsThrow> {
-    let x = this.borrow();
+pub(crate) fn get_all_response_headers(_cx: &BindCx<'_>, this: XhrRef) -> Result<String, JsThrow> {
     let mut out = String::new();
-    for (name, value) in &x.response_headers {
-        out.push_str(&format!("{}: {value}\r\n", name.to_ascii_lowercase()));
+    for (name, value) in visible_headers(&this.borrow()).sorted_combined() {
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(&value);
+        out.push_str("\r\n");
     }
     Ok(out)
 }
 
-/// The `onX` handler properties.
-///
-/// They are stored in the shared `event_handlers` registry keyed by this
-/// object's `EventTargetKey::Host`, not on the `XhrData` — which is what puts
-/// them on the same footing as `addEventListener` registrations, so
-/// `invoke_listeners` runs them and `preventDefault` works from either.
-macro_rules! handler {
-    ($get:ident, $set:ident, $event_type:literal) => {
-        pub(crate) fn $get(cx: &BindCx<'_>, this: Xhr) -> Result<JsValue, JsThrow> {
-            Ok(cx
-                .state
-                .event_handlers
-                .borrow()
-                .get(&(target_key(&this), $event_type.to_owned()))
-                .cloned()
-                .unwrap_or(JsValue::Null))
-        }
-        pub(crate) fn $set(cx: &BindCx<'_>, this: Xhr, value: JsValue) -> Result<(), JsThrow> {
-            let slot = (target_key(&this), $event_type.to_owned());
-            let mut handlers = cx.state.event_handlers.borrow_mut();
-            if value.is_nullish() {
-                handlers.remove(&slot);
-            } else {
-                handlers.insert(slot, value);
-            }
-            Ok(())
-        }
+// === responseType / response / responseText / responseXML ===
+
+pub(crate) fn response_type(_cx: &BindCx<'_>, this: XhrRef) -> Result<String, JsThrow> {
+    Ok(this.borrow().response_type.clone())
+}
+
+pub(crate) fn set_response_type(
+    cx: &BindCx<'_>,
+    this: XhrRef,
+    value: String,
+) -> Result<(), JsThrow> {
+    if matches!(this.borrow().ready_state, LOADING | DONE) {
+        return Err(cx.dom_throw(
+            DomExceptionKind::InvalidStateError,
+            "XMLHttpRequest.responseType: the response is already being delivered",
+        ));
+    }
+    // An enumerated attribute ignores a value outside its set — including
+    // `"blob"`, which this engine has no type for.
+    if RESPONSE_TYPES.contains(&value.as_str()) {
+        this.borrow_mut().response_type = value;
+    }
+    Ok(())
+}
+
+pub(crate) fn response_text(cx: &BindCx<'_>, this: XhrRef) -> Result<String, JsThrow> {
+    let x = this.borrow();
+    if !matches!(x.response_type.as_str(), "" | "text") {
+        return Err(cx.dom_throw(
+            DomExceptionKind::InvalidStateError,
+            "XMLHttpRequest.responseText: responseType is not `` or `text`",
+        ));
+    }
+    if !matches!(x.ready_state, LOADING | DONE) {
+        return Ok(String::new());
+    }
+    Ok(decode_text(&x))
+}
+
+pub(crate) fn response(cx: &BindCx<'_>, this: XhrRef) -> Result<JsValue, JsThrow> {
+    let (kind, state) = {
+        let x = this.borrow();
+        (x.response_type.clone(), x.ready_state)
     };
+    if matches!(kind.as_str(), "" | "text") {
+        if !matches!(state, LOADING | DONE) {
+            return Ok(JsValue::String(String::new()));
+        }
+        return Ok(JsValue::String(decode_text(&this.borrow())));
+    }
+    // Every object-valued responseType is only available once the body is
+    // complete — a partially-arrived body cannot be parsed as anything.
+    if state != DONE {
+        return Ok(JsValue::Null);
+    }
+    if let Some(cached) = this.borrow().response_object.clone() {
+        return Ok(cached.unwrap_or(JsValue::Null));
+    }
+    let computed = match kind.as_str() {
+        "arraybuffer" => Some(array_buffer_response(cx, &this)?),
+        "json" => json_response(cx, &this)?,
+        "document" => document_response(cx, &this)?,
+        // Unreachable: `set_response_type` refuses anything else.
+        _ => None,
+    };
+    this.borrow_mut().response_object = Some(computed.clone());
+    Ok(computed.unwrap_or(JsValue::Null))
 }
 
-/// This XHR's identity as an event target.
-fn target_key(xhr: &Xhr) -> EventTargetKey {
-    EventTargetKey::Host(xhr.borrow().slab_key)
+pub(crate) fn response_xml(cx: &BindCx<'_>, this: XhrRef) -> Result<Option<NodeId>, JsThrow> {
+    {
+        let x = this.borrow();
+        if !matches!(x.response_type.as_str(), "" | "document") {
+            return Err(cx.dom_throw(
+                DomExceptionKind::InvalidStateError,
+                "XMLHttpRequest.responseXML: responseType is not `` or `document`",
+            ));
+        }
+        if x.ready_state != DONE {
+            return Ok(None);
+        }
+    }
+    // A cached document from a *previous* document — navigation replaces the
+    // arena — is a snapshot that no longer names anything. Drop it and reparse
+    // rather than hand back an id into the new tree.
+    let stale = this
+        .borrow()
+        .response_document
+        .is_some_and(|id| cx.state.dom.borrow().get(id).is_none());
+    if stale {
+        let mut x = this.borrow_mut();
+        x.response_document = None;
+        x.response_object = None;
+    }
+    if let Some(id) = this.borrow().response_document {
+        return Ok(Some(id));
+    }
+    if this.borrow().response_object.is_some() {
+        // Already computed and it was not a document (unsupported MIME type).
+        return Ok(None);
+    }
+    let computed = document_response(cx, &this)?;
+    this.borrow_mut().response_object = Some(computed);
+    Ok(this.borrow().response_document)
 }
 
-handler!(
-    onreadystatechange,
-    set_onreadystatechange,
-    "readystatechange"
-);
-handler!(onload, set_onload, "load");
-handler!(onerror, set_onerror, "error");
-handler!(onloadend, set_onloadend, "loadend");
-handler!(onabort, set_onabort, "abort");
+/// `responseText`'s decoding: the response bytes read with the **final
+/// charset** — the charset of an `overrideMimeType()` value if it named one,
+/// else the response's own, else UTF-8. Previously this was an unconditional
+/// lossy UTF-8 read, which mangled every non-UTF-8 response.
+fn decode_text(x: &XhrData) -> String {
+    let label = x
+        .override_mime
+        .as_deref()
+        .and_then(charset_from_content_type)
+        .or_else(|| {
+            x.response_content_type()
+                .and_then(charset_from_content_type)
+        })
+        .unwrap_or("utf-8");
+    decode_with_charset(&x.response_body, label)
+}
+
+/// The MIME type's essence (type/subtype, no parameters), lowercased.
+fn mime_essence(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// The spec's "final MIME type": the `overrideMimeType()` value if there is
+/// one, else the response's `Content-Type`.
+fn final_mime(x: &XhrData) -> String {
+    match &x.override_mime {
+        Some(mime) => mime_essence(mime),
+        None => mime_essence(x.response_content_type().unwrap_or("")),
+    }
+}
+
+fn array_buffer_response(cx: &BindCx<'_>, this: &XhrRef) -> Result<JsValue, JsThrow> {
+    let bytes: Vec<JsValue> = this
+        .borrow()
+        .response_body
+        .iter()
+        .map(|b| JsValue::Number(f64::from(*b)))
+        .collect();
+    let array = cx.scope.new_array(&bytes).map_err(JsThrow::from)?;
+    cx.bytes_to_array_buffer(JsValue::Object(array))
+}
+
+/// The JSON response. Per the spec this is a **UTF-8** decode of the bytes, not
+/// a charset-aware one, and a parse failure is `null` rather than a throw.
+fn json_response(cx: &BindCx<'_>, this: &XhrRef) -> Result<Option<JsValue>, JsThrow> {
+    let text = String::from_utf8_lossy(&this.borrow().response_body).into_owned();
+    let global = cx.with_global()?;
+    let json = cx.scope.get(&global, "JSON").map_err(JsThrow::from)?;
+    let JsValue::Object(json) = &json else {
+        return Ok(None);
+    };
+    let parse = cx.scope.get(json, "parse").map_err(JsThrow::from)?;
+    Ok(cx
+        .scope
+        .call(&parse, &JsValue::Undefined, &[JsValue::String(text)])
+        .ok())
+}
+
+/// The document response: `null` unless the final MIME type is an HTML or XML
+/// one. Parsing reuses `DOMParser`, which is the only full-document parse entry
+/// point there is — so an XHR document and a `DOMParser` document are the same
+/// kind of object, with the same ADR-0017 caveat that XML is parsed by the HTML
+/// parser.
+fn document_response(cx: &BindCx<'_>, this: &XhrRef) -> Result<Option<JsValue>, JsThrow> {
+    let (mime, text) = {
+        let x = this.borrow();
+        (final_mime(&x), decode_text(&x))
+    };
+    let ty = match mime.as_str() {
+        "text/html" => "text/html",
+        "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => &mime,
+        // Any other `+xml` type is an XML MIME type; the parser knows the four
+        // names above, so it is parsed as generic XML.
+        other if other.ends_with("+xml") => "application/xml",
+        // "" is the spec's own case: a response with no `Content-Type` at all
+        // is parsed as HTML.
+        "" => "text/html",
+        _ => return Ok(None),
+    };
+    let document = crate::imp::dom_parser::parse_from_string(cx, 0, text, ty.to_owned())?;
+    let wrapper = cx.node_to_js(document)?;
+    this.borrow_mut().response_document = Some(document);
+    Ok(Some(wrapper))
+}
+
+// === Timeout ===
+
+/// Arms (or re-arms) the `timeout` timer against the moment `send()` started.
+///
+/// The timeout is a page-side timer plus `NetService::abort`, not per-request
+/// net plumbing: observably correct, at the cost of the socket possibly reading
+/// on to completion before being discarded (ADR-0024).
+fn arm_timeout(cx: &BindCx<'_>, this: &XhrRef) -> Result<(), JsThrow> {
+    if let Some(id) = this.borrow_mut().timeout_timer.take() {
+        cx.state.hooks.clear_timer(id);
+    }
+    let (timeout, started) = {
+        let x = this.borrow();
+        (x.timeout, x.send_started_ms)
+    };
+    if timeout == 0 {
+        return Ok(());
+    }
+    let remaining = (f64::from(timeout) - (cx.now_ms() - started)).max(0.0);
+    // The callback holds a `Weak`: a pending timer must not be what keeps a
+    // collected XHR's state alive.
+    let weak = Rc::downgrade(&this.data);
+    let host: HostFn = Rc::new(move |scope, _call| {
+        let cx = BindCx {
+            scope,
+            state: crate::cx::page_state(scope)?,
+        };
+        if let Some(data) = weak.upgrade() {
+            timeout_fired(&cx, &data);
+        }
+        Ok(JsValue::Undefined)
+    });
+    let func = cx
+        .scope
+        .new_function("XMLHttpRequest timeout", 0, host)
+        .map_err(JsThrow::from)?;
+    let id = cx
+        .state
+        .hooks
+        .schedule_timer(JsValue::Object(func), Vec::new(), remaining, false);
+    this.borrow_mut().timeout_timer = Some(id);
+    Ok(())
+}
+
+/// The timeout fired: terminate the fetch and run the request error steps for
+/// `timeout`. A request that already finished (the timer outran its `clear`)
+/// has no send() flag and does nothing.
+fn timeout_fired(cx: &BindCx<'_>, data: &Rc<RefCell<XhrData>>) {
+    let Some(this) = rehydrate(data) else {
+        return;
+    };
+    if !this.borrow().send_flag {
+        return;
+    }
+    terminate(cx, &this);
+    request_error(cx, &this, "timeout");
+}
+
+/// Rebuilds an [`XhrRef`] from the state alone, for the paths that reach an XHR
+/// without a receiver (the timer callback, net event delivery). The wrapper is
+/// the live self-root, which is set for exactly as long as those paths can run.
+pub(crate) fn rehydrate(data: &Rc<RefCell<XhrData>>) -> Option<XhrRef> {
+    let wrapper = data.borrow().wrapper.clone()?;
+    Some(XhrRef {
+        data: Rc::clone(data),
+        wrapper,
+    })
+}
+
+// === Shared transition helpers, also driven by `deliver_net_event` ===
+
+/// Cancels the in-flight request (net side and bookkeeping) and disarms the
+/// timeout. Idempotent.
+pub(crate) fn terminate(cx: &BindCx<'_>, this: &XhrRef) {
+    let (id, timer) = {
+        let mut x = this.borrow_mut();
+        (x.request_id.take(), x.timeout_timer.take())
+    };
+    if let Some(id) = id {
+        cx.state.hooks.abort(id);
+        cx.state.pending_net.borrow_mut().remove(&id);
+    }
+    if let Some(timer) = timer {
+        cx.state.hooks.clear_timer(timer);
+    }
+}
+
+/// The spec's **request error steps**, shared by `abort`, `error` and
+/// `timeout`: the response becomes a network error, the state becomes DONE, and
+/// exactly one of the three terminal events fires — always followed by
+/// `loadend`.
+pub(crate) fn request_error(cx: &BindCx<'_>, this: &XhrRef, event_type: &str) {
+    {
+        let mut x = this.borrow_mut();
+        x.ready_state = DONE;
+        x.send_flag = false;
+        x.set_network_error();
+    }
+    // The upload half, if the body never got a completion, reports the same
+    // terminal event first.
+    let upload_pending = !this.borrow().upload_complete;
+    if upload_pending {
+        this.borrow_mut().upload_complete = true;
+        fire_progress(cx, this, Target::Upload, event_type, 0.0, None);
+        fire_progress(cx, this, Target::Upload, "loadend", 0.0, None);
+    }
+    fire_plain(cx, this, "readystatechange");
+    fire_progress(cx, this, Target::Xhr, event_type, 0.0, None);
+    fire_progress(cx, this, Target::Xhr, "loadend", 0.0, None);
+    release_root(this);
+}
+
+/// Marks the request body as fully transmitted and fires the upload object's
+/// completion sequence. Called when the response head arrives — the earliest
+/// point at which the body demonstrably went out.
+pub(crate) fn upload_finished(cx: &BindCx<'_>, this: &XhrRef) {
+    if this.borrow().upload_complete {
+        return;
+    }
+    this.borrow_mut().upload_complete = true;
+    // The body is handed to hyper whole, so the only honest report is 100%.
+    let total = None;
+    fire_progress(cx, this, Target::Upload, "progress", 0.0, total);
+    fire_progress(cx, this, Target::Upload, "load", 0.0, total);
+    fire_progress(cx, this, Target::Upload, "loadend", 0.0, total);
+}
+
+/// The successful terminal sequence: DONE, then `load`, then `loadend`.
+pub(crate) fn request_done(cx: &BindCx<'_>, this: &XhrRef) {
+    {
+        let mut x = this.borrow_mut();
+        x.ready_state = DONE;
+        x.send_flag = false;
+    }
+    fire_plain(cx, this, "readystatechange");
+    fire_transfer_progress(cx, this, "load");
+    fire_transfer_progress(cx, this, "loadend");
+    release_root(this);
+}
+
+/// One chunk of the body arrived: enter LOADING (nothing used to write state 3
+/// at all) and report progress. Written against a chunk *stream* even though
+/// the net layer currently emits exactly one `Chunk` per response — when it
+/// learns to stream, this loop needs no change (ADR-0004, ADR-0024).
+pub(crate) fn chunk_received(cx: &BindCx<'_>, this: &XhrRef, data: &[u8]) {
+    {
+        let mut x = this.borrow_mut();
+        x.response_body.extend_from_slice(data);
+        x.loaded += data.len() as f64;
+        x.ready_state = LOADING;
+        // A new body invalidates any response object computed from the old one.
+        x.response_object = None;
+        x.response_document = None;
+    }
+    fire_plain(cx, this, "readystatechange");
+    fire_transfer_progress(cx, this, "progress");
+}
+
+/// Releases the self-root on a terminal transition, so a finished and
+/// script-abandoned XHR can be collected. `open()` puts it back.
+///
+/// The send() flag check is load-bearing: a `load`/`error` listener may have
+/// reopened and re-sent this very XHR from inside the sequence that is
+/// terminating, and dropping the root then would silently un-root a request
+/// that has only just started.
+fn release_root(this: &XhrRef) {
+    let mut x = this.borrow_mut();
+    if !x.send_flag {
+        x.wrapper = None;
+    }
+}
+
+// === Event firing ===
+
+/// Which of the two event targets an XHR event goes to.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Xhr,
+    Upload,
+}
+
+/// This XHR's (or its upload object's) identity as an event target, and the
+/// wrapper `event.target` must hand back. Absent when the object has no live
+/// wrapper — a released root, or an upload object script never asked for.
+fn target_of(this: &XhrRef, target: Target) -> Option<(EventTargetKey, JsValue)> {
+    let x = this.borrow();
+    match target {
+        Target::Xhr => Some((EventTargetKey::Host(x.slab_key), x.wrapper.clone()?)),
+        Target::Upload => Some((EventTargetKey::Host(x.upload_key), x.upload.clone()?)),
+    }
+}
 
 /// Fires one XHR event through the real dispatch machinery.
 ///
@@ -310,22 +812,14 @@ handler!(onabort, set_onabort, "abort");
 /// `isTrusted` and `instanceof Event` all work, and every listener option
 /// (`capture`, `once`, `passive`) is honoured because the shared registry is
 /// doing the work.
-pub(crate) fn fire_event(cx: &BindCx<'_>, xhr: &Xhr, event_type: &str) {
-    let key = target_key(xhr);
-    // A wrapper is required for `event.target`; it is released on a terminal
-    // readyState, so a reused XHR can legitimately have none.
-    if xhr.borrow().wrapper.is_none() {
+fn fire_at(cx: &BindCx<'_>, this: &XhrRef, target: Target, interface: &str, mut data: EventData) {
+    let Some((key, _wrapper)) = target_of(this, target) else {
         return;
-    }
-    let mut data = crate::events::EventData::new(
-        event_type.to_owned(),
-        /* bubbles */ false,
-        /* cancelable */ false,
-        /* composed */ false,
-    );
+    };
+    let event_type = data.event_type.clone();
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
-    let Ok((value, data)) = cx.new_event_object("Event", data) else {
+    let Ok((value, data)) = cx.new_event_object(interface, data) else {
         return;
     };
     if let Err(e) = crate::events::dispatch_event(cx, key, &value, &data) {
@@ -333,4 +827,86 @@ pub(crate) fn fire_event(cx: &BindCx<'_>, xhr: &Xhr, event_type: &str) {
             "XMLHttpRequest `{event_type}` dispatch failed: {e:?}"
         ));
     }
+}
+
+/// `readystatechange` — the one XHR event that is a plain `Event`.
+pub(crate) fn fire_plain(cx: &BindCx<'_>, this: &XhrRef, event_type: &str) {
+    fire_at(
+        cx,
+        this,
+        Target::Xhr,
+        "Event",
+        EventData::new(
+            event_type.to_owned(),
+            /* bubbles */ false,
+            /* cancelable */ false,
+            /* composed */ false,
+        ),
+    );
+}
+
+/// Fires a `ProgressEvent`. `total` is `Some` only when the transfer length is
+/// actually known — `lengthComputable` follows from that, and a `total` is
+/// never fabricated from the bytes seen so far.
+fn fire_progress(
+    cx: &BindCx<'_>,
+    this: &XhrRef,
+    target: Target,
+    event_type: &str,
+    loaded: f64,
+    total: Option<f64>,
+) {
+    let data = crate::imp::progress_event::event_data(
+        event_type,
+        total.is_some(),
+        loaded,
+        total.unwrap_or(0.0),
+    );
+    fire_at(cx, this, target, "ProgressEvent", data);
+}
+
+/// A download-side progress event, reading the counters off the XHR.
+fn fire_transfer_progress(cx: &BindCx<'_>, this: &XhrRef, event_type: &str) {
+    let (loaded, total) = {
+        let x = this.borrow();
+        (x.loaded, x.total)
+    };
+    fire_progress(cx, this, Target::Xhr, event_type, loaded, total);
+}
+
+/// Method normalization (Fetch): the four common methods are uppercased, any
+/// other token is sent verbatim — `PATCH` is a real method and `patch` is not.
+fn normalize_method(method: &str) -> String {
+    if matches!(
+        method.to_ascii_uppercase().as_str(),
+        "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "CONNECT" | "TRACE" | "TRACK"
+    ) {
+        method.to_ascii_uppercase()
+    } else {
+        method.to_owned()
+    }
+}
+
+/// The `onreadystatechange` handler property. The six shared ones live on
+/// `XMLHttpRequestEventTarget`; this one is `XMLHttpRequest`'s alone.
+pub(crate) fn onreadystatechange(cx: &BindCx<'_>, this: XhrRef) -> Result<JsValue, JsThrow> {
+    Ok(crate::imp::xhr_event_target::get(
+        cx,
+        EventTargetKey::Host(this.borrow().slab_key),
+        "readystatechange",
+    ))
+}
+
+pub(crate) fn set_onreadystatechange(
+    cx: &BindCx<'_>,
+    this: XhrRef,
+    value: JsValue,
+) -> Result<(), JsThrow> {
+    crate::imp::xhr_event_target::set(
+        cx,
+        EventTargetKey::Host(this.borrow().slab_key),
+        "readystatechange",
+        value,
+    );
+    Ok(())
 }
