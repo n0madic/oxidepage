@@ -439,4 +439,31 @@ v1 limits.
   embedder, not page script), `console.count`/`time`/`timeEnd`/`table`,
   `Map`/`Set` preview contents, and document-relative line numbers for inline
   scripts. Decisions and v1 limits: ADR-0025.
+- **Transform-aware geometry and capture completeness**: done — stage 4 of the
+  automation roadmap. The CSS transform resolver moved down from `paint` into
+  `layout` (`crates/layout/src/transform.rs`), so paint, geometry and hit
+  testing share **one** matrix, and the individual `translate`/`rotate`/`scale`
+  properties came with the move. `getBoundingClientRect`, `getClientRects`,
+  `Page::layout_rect`, IntersectionObserver rects, lazy-image visibility and
+  `MouseEvent.offsetX/offsetY` are transform-aware; `elementFromPoint` /
+  `elementsFromPoint` invert the transform per box, so **a click computed from
+  element geometry now lands on the element it was computed from** — the reason
+  the stage exists. `Page::content_quads` and `Page::scroll_into_view_if_needed`
+  are the two actionability primitives, the latter sharing its one
+  implementation with `Element.scrollIntoView`. Screenshots take a document-space
+  `clip` rectangle and a format (`ScreenshotOptions`, PNG or JPEG with a
+  quality); PDF export **paginates** onto real paper (A4 by default, with paper
+  size, margins, landscape, scale, fit-to-width and `printBackground`), breaking
+  at the class-A break points multi-column already computes so no line is cut in
+  half, and emitting the document's content **once** as a form XObject that every
+  page invokes. The CLI gained `--clip`, `--quality`, `--paper`, `--margin`,
+  `--scale`, `--landscape`, `--single-page`, `--no-fit-to-width` and
+  `--no-print-background`; `--dpr` now reaches `window.devicePixelRatio` and says
+  so when it is ignored. **Not implemented:** `offset*`/`client*`/`scrollWidth`
+  stay untransformed (CSSOM-View defines them that way, and a WPT file pins it),
+  3D transforms stay flattened to their 2D affine part, hit-test ordering is
+  still ADR-0006 §7's approximation rather than a stacking-context tree, there is
+  no `@media print` or relayout at paper width, and no CSS fragmentation
+  properties, header/footer templates, tagged PDF or WebP encoding. Decisions and
+  v1 limits: ADR-0026.
 - Phases 8+ (GPU raster, C ABI, CDP, …): not started.

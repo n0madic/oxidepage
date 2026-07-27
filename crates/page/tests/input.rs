@@ -1053,3 +1053,97 @@ fn has_focus_reflects_the_browsing_context() {
         "a document with no browsing context does not have focus"
     );
 }
+
+/// The whole reason Stage 4 exists: a driver computes the click point from
+/// element geometry, so a click at a transformed element's **painted** position
+/// has to activate it — and one at its untransformed position must not.
+#[test]
+fn a_click_lands_on_a_transformed_button() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             button { position: absolute; left: 0; top: 0; width: 100px; height: 50px;
+                      transform: translate(200px, 300px) }
+           </style>
+           <button id=b>x</button>
+           <script>window.hits = 0;
+             document.getElementById('b').addEventListener('click', () => window.hits++);
+           </script>"##,
+    );
+
+    // `getBoundingClientRect` reports the painted box, and its centre is where a
+    // driver clicks: (250, 325).
+    assert_eq!(
+        eval_string(
+            &page,
+            "const r=document.getElementById('b').getBoundingClientRect();\
+             [r.left+r.width/2,r.top+r.height/2].join(',')"
+        ),
+        "250,325"
+    );
+
+    click_at(&page, 50.0, 25.0);
+    assert_eq!(
+        eval_string(&page, "window.hits"),
+        "0",
+        "the untransformed position is empty space"
+    );
+
+    click_at(&page, 250.0, 325.0);
+    assert_eq!(
+        eval_string(&page, "window.hits"),
+        "1",
+        "a click at the painted position activates the button"
+    );
+    assert_eq!(
+        eval_string(&page, "document.activeElement.id"),
+        "b",
+        "and focuses it"
+    );
+}
+
+/// `offsetX`/`offsetY` are the probe expressed in the target's **own**
+/// coordinates: the point comes back through the inverse of the element's
+/// frame, so they stay inside the element a driver actually hit.
+#[test]
+fn offset_coordinates_follow_a_translated_target() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #d { position: absolute; left: 0; top: 0; width: 100px; height: 50px;
+                  transform: translate(200px, 300px) }
+           </style>
+           <div id=d></div>
+           <script>window.seen = '';
+             document.getElementById('d').addEventListener('mousedown',
+               e => window.seen = e.offsetX + ',' + e.offsetY + ',' + e.clientX);
+           </script>"##,
+    );
+    click_at(&page, 210.0, 320.0);
+    // 10px into the painted box on each axis; `clientX` stays the raw probe.
+    assert_eq!(eval_string(&page, "window.seen"), "10,20,210");
+}
+
+/// A scaled target is where the bounding-box shortcut breaks: measuring the
+/// probe against the AABB's corner reports twice the real offset, and puts a
+/// centre click outside the element's own 100x40 box. The inverse mapping is
+/// what makes `offsetX` mean the same thing it does in a browser.
+#[test]
+fn offset_coordinates_are_element_local_under_a_scale() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #d { position: absolute; left: 0; top: 0; width: 100px; height: 50px;
+                  transform: scale(2); transform-origin: 0 0 }
+           </style>
+           <div id=d></div>
+           <script>window.seen = '';
+             document.getElementById('d').addEventListener('mousedown',
+               e => window.seen = e.offsetX + ',' + e.offsetY);
+           </script>"##,
+    );
+    // The element paints over (0,0)..(200,100); its visual centre is (100, 50),
+    // which is (50, 25) in its own coordinates.
+    click_at(&page, 100.0, 50.0);
+    assert_eq!(eval_string(&page, "window.seen"), "50,25");
+}

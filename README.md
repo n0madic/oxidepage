@@ -37,10 +37,11 @@ rasterization.
 - **Fetch safely.** Networking is SSRF-guarded by default (loopback,
   private, link-local and cloud-metadata addresses are blocked unless you
   opt in), with a real cookie jar, HTTP caching, redirects, and CORS.
-- **Render output.** A PNG screenshot of the viewport or the whole page, a
-  PDF with real embedded/subset fonts (selectable text, not outlines), or
-  the final serialized HTML after scripts have run — plus a JSON display
-  list for debugging.
+- **Render output.** A PNG or JPEG screenshot of the viewport, the whole
+  page, or any clipped region of it; a paginated PDF on real paper with
+  embedded/subset fonts (selectable text, not outlines); or the final
+  serialized HTML after scripts have run — plus a JSON display list for
+  debugging.
 - **Stay bounded.** Per-page request and byte budgets, a script execution
   timeout, and sandboxed `file://` access, so a hostile page can't run away
   with your process.
@@ -79,7 +80,11 @@ oxidepage render page.html -o screenshot.png
 # Screenshot the whole page, at 2x pixel density
 oxidepage render https://example.com -o screenshot.png --full-page --dpr 2
 
-# Export as PDF (fonts are embedded and subset — text stays selectable)
+# JPEG of one region of the document
+oxidepage render page.html -o crop.jpg --clip 0,0,400,300 --quality 80
+
+# Export as PDF, paginated onto A4 (fonts are embedded and subset —
+# text stays selectable)
 oxidepage render page.html -o page.pdf
 
 # Serialize the DOM after scripts have run
@@ -87,7 +92,7 @@ oxidepage render page.html -o page.html
 ```
 
 The output format is inferred from `-o`'s extension, or set explicitly with
-`--format png|pdf|html`.
+`--format png|jpeg|pdf|html`.
 
 ### Evaluate a JavaScript expression
 
@@ -116,9 +121,22 @@ All commands accept:
 | `--lazy-images` / `--no-lazy-images` | Fetch `<img>` only near the viewport, or always eagerly |
 | `--quiet` | Suppress page `console.*` output on stderr (script errors and dialogs still print) |
 
-`render` additionally takes `--format <png\|pdf\|html>`, `--dpr <N>` (PNG
-pixel density), and `--full-page` (capture the whole document instead of
-just the viewport).
+`render` additionally takes:
+
+| Option | Effect |
+| --- | --- |
+| `--format <png\|jpeg\|pdf\|html>` | Output format (default: inferred from `-o`'s extension) |
+| `--dpr <N>` | Device pixel ratio for an image capture; also what the page sees as `window.devicePixelRatio` |
+| `--full-page` | Capture the whole document instead of just the viewport |
+| `--clip X,Y,W,H` | Capture one region of the document, in CSS px |
+| `--quality <N>` | JPEG quality, 1–100 (default `80`) |
+| `--paper <spec>` | PDF paper: `a3`, `a4`, `a5`, `letter`, `legal`, `tabloid`, or `WxH` in CSS px (default `a4`) |
+| `--margin <spec>` | PDF margins in CSS px: one value, or `top,right,bottom,left` (default `38.4`, i.e. 0.4in) |
+| `--scale <N>` | PDF zoom, 0.1–2 (default `1`) |
+| `--landscape` | Swap the PDF paper's width and height |
+| `--single-page` | One PDF page as tall as the whole document, instead of paginating |
+| `--no-fit-to-width` | Don't shrink wide content to the PDF page width |
+| `--no-print-background` | Omit element backgrounds from the PDF (on by default, unlike Chrome) |
 
 Run `oxidepage --help` for the full reference.
 

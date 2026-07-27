@@ -148,19 +148,29 @@ struct Builder {
     image_names: HashMap<(u64, u32, u32), Vec<u8>>,
     /// Index into `fonts` for each font already registered this page.
     font_index: HashMap<FontId, usize>,
-    /// The page box in CSS px (`viewport.width × max(content, viewport).height`),
-    /// used as the `/BBox` of layer form XObjects.
-    page_w: f32,
-    page_h: f32,
+    /// The document box in CSS px, used as the `/BBox` of layer form XObjects.
+    /// Passed in by `crate::export`, which is the one place it is derived.
+    doc_w: f32,
+    doc_h: f32,
     next_ref: i32,
 }
 
 /// Builds the content stream for `list`, assigning resource object ids starting
-/// at `first_ref`. `scale` is the CSS-px → pt factor.
-pub(crate) fn build(list: &DisplayList, scale: f32, first_ref: i32) -> Built {
-    let page_w = list.viewport.width;
-    let page_h = list.content_size.height.max(list.viewport.height);
-    let page_h_pt = page_h * scale;
+/// at `first_ref`. `scale` is the CSS-px → pt factor, and `doc_w`/`doc_h` the
+/// document box in CSS px.
+///
+/// The stream opens with a base CTM that maps CSS px (y-down, origin at the
+/// document's top-left) onto points (y-up, origin at the document's
+/// bottom-left) — the document's own space, not a page's. A paginated export
+/// wraps the whole thing in one form XObject and each page places a slice of it.
+pub(crate) fn build(
+    list: &DisplayList,
+    scale: f32,
+    first_ref: i32,
+    doc_w: f32,
+    doc_h: f32,
+) -> Built {
+    let doc_h_pt = doc_h * scale;
 
     let mut builder = Builder {
         content: Content::new(),
@@ -172,14 +182,14 @@ pub(crate) fn build(list: &DisplayList, scale: f32, first_ref: i32) -> Built {
         layers: Vec::new(),
         image_names: HashMap::new(),
         font_index: HashMap::new(),
-        page_w,
-        page_h,
+        doc_w,
+        doc_h,
         next_ref: first_ref,
     };
     // Base CTM: CSS px (y-down) → PDF pt (y-up).
     builder
         .content
-        .transform([scale, 0.0, 0.0, -scale, 0.0, page_h_pt]);
+        .transform([scale, 0.0, 0.0, -scale, 0.0, doc_h_pt]);
     for item in &list.items {
         builder.exec(item, &list.resources);
     }
@@ -557,7 +567,7 @@ impl Builder {
                     name: form_name.clone(),
                     obj,
                     content: body,
-                    bbox: [0.0, 0.0, self.page_w, self.page_h],
+                    bbox: [0.0, 0.0, self.doc_w, self.doc_h],
                 });
                 let gs_name = self.register_gstate(opacity);
                 self.content.save_state();

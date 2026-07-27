@@ -24,7 +24,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
-use oxidepage_base::{NodeId, Rect, RequestId};
+use oxidepage_base::RequestId;
+// Geometry is part of this crate's own public surface (`layout_rect`,
+// `content_quads`, `ScreenshotOptions::clip`), so an embedder needs no
+// `oxidepage_base` dependency of its own.
+pub use oxidepage_base::{NodeId, Point, Rect};
 use oxidepage_bindings::{
     BindCx, EventTargetKey, HostHooks, NavigationBody, PageState, PendingNavigation,
     TimingMilestone, is_classic_script_type,
@@ -41,6 +45,7 @@ use style::selector_parser::PseudoElement;
 use style::stylesheets::Origin;
 
 mod render;
+pub use render::{ImageFormat, ScreenshotOptions};
 
 // The observable page-event vocabulary is built in `bindings` (the call sites
 // are the only places with a JS scope) but is an embedder-facing part of
@@ -51,10 +56,11 @@ pub use oxidepage_bindings::{
     DialogResponse, PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING,
     ScriptError, ScriptErrorKind, ValuePreview, render_preview, render_preview_top,
 };
+pub use oxidepage_export_pdf::{MAX_PDF_PAGES, Margins, PaperSize, PdfOptions};
 pub use oxidepage_js::{StackFrame, parse_stack};
 pub use oxidepage_layout::disable_system_fonts;
 pub use oxidepage_net::ResourcePolicy;
-pub use oxidepage_paint::DisplayList;
+pub use oxidepage_paint::{DisplayList, PaintOptions};
 pub use oxidepage_raster_skia::{RasterImage, RasterOptions};
 pub use oxidepage_style::Viewport;
 
@@ -3770,7 +3776,7 @@ impl Page {
     /// first). Mirrors `node.getBoundingClientRect()` for box-generating
     /// elements.
     #[must_use]
-    pub fn layout_rect(&self, node: NodeId) -> Option<oxidepage_base::Rect> {
+    pub fn layout_rect(&self, node: NodeId) -> Option<Rect> {
         self.flush_layout();
         self.state.layout.borrow().border_box(node)
     }
@@ -3789,6 +3795,52 @@ impl Page {
         self.flush_layout();
         let dom = self.state.dom.borrow();
         self.state.layout.borrow().element_from_point(&dom, x, y)
+    }
+
+    /// The painted quads of `node` in viewport coordinates: one per client rect
+    /// (so one per line for a wrapped inline), each as its four corners in
+    /// top-left, top-right, bottom-right, bottom-left order — CDP's
+    /// `DOM.getContentQuads`.
+    ///
+    /// Unlike [`Page::layout_rect`] this is not bounding-boxed, so a rotated or
+    /// skewed element reports the quadrilateral an actionability check has to
+    /// aim inside of rather than a rect that is mostly empty space.
+    #[must_use]
+    pub fn content_quads(&self, node: NodeId) -> Vec<[Point; 4]> {
+        self.flush_layout();
+        let dom = self.state.dom.borrow();
+        self.state.layout.borrow().content_quads(&dom, node)
+    }
+
+    /// Scrolls `node` into view if it is not already fully visible, aligning
+    /// `nearest` on both axes — CDP's `DOM.scrollIntoViewIfNeeded`, and the
+    /// second primitive every actionability check is built from. `rect` is an
+    /// optional sub-rectangle to reveal, relative to the element's border-box
+    /// origin.
+    ///
+    /// Returns whether anything actually scrolled. Every scroll container on the
+    /// chain is scrolled, innermost first, and a `scroll` event is queued for
+    /// each one that moved — through the page's own event loop, *after* the
+    /// layout borrow is released, because the algorithm itself must never
+    /// re-enter JS.
+    pub fn scroll_into_view_if_needed(&self, node: NodeId, rect: Option<Rect>) -> bool {
+        self.flush_layout();
+        let scrolled = {
+            let dom = self.state.dom.borrow();
+            let mut layout = self.state.layout.borrow_mut();
+            oxidepage_layout::scroll_into_view(
+                &mut layout,
+                &dom,
+                node,
+                rect,
+                oxidepage_layout::Align::Nearest,
+                oxidepage_layout::Align::Nearest,
+            )
+        };
+        for target in &scrolled {
+            self.state.queue_scroll_event(*target);
+        }
+        !scrolled.is_empty()
     }
 }
 

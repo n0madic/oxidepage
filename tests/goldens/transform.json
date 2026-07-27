@@ -1,0 +1,26 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "PushLayer", "opacity": 1.00, "transform": [1.00, 0.00, 0.00, 1.00, 30.00, -10.00] },
+    { "type": "Fill", "rect": [0.00, 0.00, 100.00, 40.00], "radii": null, "brush": { "solid": "#ff0000ff" } },
+    { "type": "PopLayer" },
+    { "type": "PushLayer", "opacity": 1.00, "transform": [2.00, 0.00, 0.00, 2.00, 0.00, -40.00] },
+    { "type": "Fill", "rect": [0.00, 40.00, 100.00, 40.00], "radii": null, "brush": { "solid": "#00ff00ff" } },
+    { "type": "PopLayer" },
+    { "type": "PushLayer", "opacity": 1.00, "transform": [1.30, 0.75, -0.75, 1.30, 70.05, -62.40] },
+    { "type": "Fill", "rect": [0.00, 80.00, 100.00, 40.00], "radii": null, "brush": { "solid": "#0000ffff" } },
+    { "type": "PopLayer" },
+    { "type": "PushLayer", "opacity": 1.00, "transform": [1.00, 0.00, 0.00, 1.00, 0.00, -60.00] },
+    { "type": "Fill", "rect": [0.00, 120.00, 200.00, 60.00], "radii": null, "brush": { "solid": "#ccccccff" } },
+    { "type": "PushLayer", "opacity": 1.00, "transform": [1.00, 0.00, 0.00, 1.00, 20.00, 0.00] },
+    { "type": "Fill", "rect": [0.00, 120.00, 50.00, 20.00], "radii": null, "brush": { "solid": "#ffff00ff" } },
+    { "type": "PopLayer" },
+    { "type": "PopLayer" }
+  ],
+  "resources": {
+    "fonts": [],
+    "images": []
+  }
+}

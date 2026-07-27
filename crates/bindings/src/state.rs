@@ -1195,11 +1195,16 @@ impl PageState {
         std::mem::take(&mut self.pending_scroll_targets.borrow_mut())
     }
 
-    /// Queues a viewport `scroll` event for the page's event loop — the same
-    /// path a script scroll takes, so a fragment scroll has no event path of
-    /// its own.
+    /// Queues a `scroll` event for `target` (`None` = the viewport) on the
+    /// page's event loop — the same path a script scroll takes, so an
+    /// embedder-driven scroll has no event path of its own.
+    pub fn queue_scroll_event(&self, target: Option<oxidepage_base::NodeId>) {
+        self.pending_scroll_targets.borrow_mut().push(target);
+    }
+
+    /// [`Self::queue_scroll_event`] for the viewport.
     pub fn queue_viewport_scroll_event(&self) {
-        self.pending_scroll_targets.borrow_mut().push(None);
+        self.queue_scroll_event(None);
     }
 
     /// Queues a navigation for the page's event loop (see

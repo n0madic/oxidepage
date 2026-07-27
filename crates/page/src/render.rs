@@ -1,22 +1,74 @@
 //! Display-list construction, the "update the rendering" step, and raster /
-//! screenshot output on the [`Page`] (Phase 6, ADR-0007 D6/D8).
+//! screenshot / PDF output on the [`Page`] (Phase 6, ADR-0007 D6/D8;
+//! ADR-0026).
 //!
 //! The display list is cached and rebuilt only when the [`PaintStamp`] changes
 //! (DOM, style, viewport, or scroll). A rendering opportunity fires pending
 //! `requestAnimationFrame` callbacks, flushes layout, and — when a consumer
 //! (screenshot / PDF / display list) has asked for output — refreshes the
 //! cached display list.
+//!
+//! Capture options come in two layers, and that split is deliberate:
+//! [`ScreenshotOptions`] and `PdfOptions` describe the *output* (area, format,
+//! paper), while `PaintOptions` describes what the paint walk emits at all —
+//! `print_background` has to be decided there, because by export time a
+//! background is an ordinary fill.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
+use oxidepage_base::Rect;
+use oxidepage_export_pdf::PdfOptions;
 use oxidepage_layout::PaintStamp;
-use oxidepage_paint::{Color, DisplayList, build_display_list, build_display_list_full};
+use oxidepage_paint::{Color, DisplayList, PaintOptions, build_display_list};
 use oxidepage_raster_skia::{
-    RasterImage, RasterOptions, encode_png, render_full_page, render_scrolled,
+    RasterImage, RasterOptions, encode_jpeg, encode_png, render_clipped, render_full_page,
+    render_scrolled,
 };
 
 use crate::Page;
+
+/// Encoding of a screenshot (`Page.captureScreenshot`'s `format`). WebP is a
+/// documented non-goal (ADR-0026).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ImageFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+/// Everything a screenshot can be asked for, in one struct — the shape CDP's
+/// `Page.captureScreenshot` takes. [`Page::screenshot`] and
+/// [`Page::screenshot_full_page`] stay as the two-argument-free wrappers.
+#[derive(Clone, Copy, Debug)]
+pub struct ScreenshotOptions {
+    /// Device pixel ratio: the output is `ceil(area × dpr)` device px.
+    pub dpr: f32,
+    /// Capture the whole document rather than the viewport. Ignored when
+    /// `clip` is set — a clip already names the area, in the same coordinates.
+    pub full_page: bool,
+    /// The area to capture, in **document** CSS px. `None` captures the
+    /// viewport (or the document, with `full_page`).
+    pub clip: Option<Rect>,
+    pub format: ImageFormat,
+    /// JPEG quality, 1..=100; ignored for PNG.
+    pub quality: u8,
+    /// The opaque base color painted under the page.
+    pub background: Color,
+}
+
+impl Default for ScreenshotOptions {
+    fn default() -> Self {
+        Self {
+            dpr: 1.0,
+            full_page: false,
+            clip: None,
+            format: ImageFormat::Png,
+            quality: 80,
+            background: Color::WHITE,
+        }
+    }
+}
 
 /// Cached display list plus the paint stamp it was built for. Lives on the
 /// [`Page`] (not the bindings' `PageState`) so it survives realm teardown.
@@ -74,7 +126,7 @@ impl Page {
     /// (see [`Page::screenshot_full_page`]).
     #[must_use]
     pub fn render_pixels_full_page(&self, options: &RasterOptions) -> RasterImage {
-        let list = self.full_page_display_list();
+        let list = self.full_page_display_list(&PaintOptions::default());
         render_full_page(&list, options)
     }
 
@@ -105,27 +157,103 @@ impl Page {
         encode_png(&image).unwrap_or_default()
     }
 
-    /// Exports the current page to a single-page PDF byte stream.
+    /// Renders a screenshot under the full [`ScreenshotOptions`] surface:
+    /// viewport, whole document or an arbitrary document-space `clip`, as PNG
+    /// or JPEG. An encoding failure yields an empty `Vec` — the same signal
+    /// [`Page::screenshot`] gives.
+    #[must_use]
+    pub fn screenshot_with(&self, options: &ScreenshotOptions) -> Vec<u8> {
+        let image = self.render_pixels_with(options);
+        match options.format {
+            ImageFormat::Png => encode_png(&image).unwrap_or_default(),
+            ImageFormat::Jpeg => encode_jpeg(&image, options.quality).unwrap_or_default(),
+        }
+    }
+
+    /// The RGBA pixels [`Page::screenshot_with`] encodes.
     ///
-    /// The PDF is sized to the whole document (`content_size`), so — unlike a
-    /// viewport screenshot — it is painted from the document's top-left and
-    /// ignores the current viewport (document) scroll (ADR-0007 D8). Element
-    /// `overflow` scroll offsets still apply.
+    /// A `clip` takes precedence over `full_page`: both name a capture area in
+    /// document coordinates, and the explicit one wins.
+    #[must_use]
+    pub fn render_pixels_with(&self, options: &ScreenshotOptions) -> RasterImage {
+        let raster = RasterOptions {
+            scale: options.dpr,
+            background: options.background,
+        };
+        match options.clip {
+            // A clip names a region of the *document*, which can be anywhere —
+            // so it takes the whole-document list, for the same reason
+            // `render_pixels_full_page` does: the paint stamp cannot tell the
+            // two paint origins apart, so the viewport cache must not serve a
+            // capture that is not the viewport's.
+            Some(clip) => render_clipped(
+                &self.full_page_display_list(&PaintOptions::default()),
+                &raster,
+                clip,
+            ),
+            None if options.full_page => self.render_pixels_full_page(&raster),
+            None => self.render_pixels(&raster),
+        }
+    }
+
+    /// Exports the current page to a PDF byte stream with the default options:
+    /// paginated A4, 0.4 in margins, backgrounds printed (ADR-0026).
+    ///
+    /// The PDF covers the whole document, so — unlike a viewport screenshot —
+    /// it is painted from the document's top-left and ignores the current
+    /// viewport (document) scroll (ADR-0007 D8). Element `overflow` scroll
+    /// offsets still apply.
     #[must_use]
     pub fn print_to_pdf(&self) -> Vec<u8> {
-        let list = self.full_page_display_list();
-        oxidepage_export_pdf::export(&list, &oxidepage_export_pdf::PdfOptions::default())
+        self.pdf(&PdfOptions::default(), &PaintOptions::default())
+    }
+
+    /// Exports the current page to PDF under explicit options.
+    ///
+    /// Two structs rather than one because they belong to different layers, and
+    /// that is the point: `PdfOptions` is paper geometry, while
+    /// `print_background` is a *paint*-time decision — by export time a
+    /// background is an ordinary fill, indistinguishable from any other
+    /// (ADR-0026).
+    ///
+    /// Where the pages break comes from layout, not from the display list:
+    /// `DisplayItem`s carry baselines, never line tops, so the boundaries are
+    /// `layout::pagination`'s class-A break points — the same "never cut a line
+    /// in half" rule multi-column uses (ADR-0016).
+    #[must_use]
+    pub fn pdf(&self, options: &PdfOptions, paint: &PaintOptions) -> Vec<u8> {
+        let list = self.full_page_display_list(paint);
+        if !options.paginate {
+            return oxidepage_export_pdf::export(&list, options);
+        }
+        // The same width the exporter's document box uses, so the slice height
+        // layout fills against is the one the pages are actually drawn at.
+        let page_height =
+            options.page_content_height(list.content_size.width.max(list.viewport.width));
+        let boundaries = self.state.layout.borrow().page_boundaries(page_height);
+        oxidepage_export_pdf::export_paginated(&list, options, &boundaries)
+    }
+
+    /// Where the current document would break onto pages for a slice of
+    /// `page_height` document CSS px (reflows first): `n + 1` offsets for `n`
+    /// pages. [`Page::pdf`] feeds these to the exporter; an embedder laying out
+    /// its own print preview wants the same numbers.
+    #[must_use]
+    pub fn page_boundaries(&self, page_height: f32) -> Vec<f32> {
+        self.flush_layout();
+        self.state.layout.borrow().page_boundaries(page_height)
     }
 
     /// Builds a display list covering the whole document (unscrolled), after
     /// forcing a rendering opportunity. Not cached: the cache holds the
-    /// viewport-scrolled list keyed by the paint stamp, which does not
-    /// distinguish the two paint origins.
-    fn full_page_display_list(&self) -> DisplayList {
+    /// list keyed by the paint stamp, which knows nothing about
+    /// [`PaintOptions`] and cannot tell a `print_background: false` build from
+    /// the ordinary one.
+    fn full_page_display_list(&self, options: &PaintOptions) -> DisplayList {
         self.update_the_rendering();
         let dom = self.state.dom.borrow();
         let engine = self.state.layout.borrow();
-        build_display_list_full(&dom, &engine)
+        build_display_list(&dom, &engine, options)
     }
 
     /// The HTML "update the rendering" step (ADR-0007 D8): fire pending
@@ -164,7 +292,7 @@ impl Page {
             return cached;
         }
 
-        let list = Arc::new(build_display_list(&dom, &engine));
+        let list = Arc::new(build_display_list(&dom, &engine, &PaintOptions::default()));
         *self.render.cache.borrow_mut() = Some(Arc::clone(&list));
         self.render.stamp.set(Some(stamp));
         list

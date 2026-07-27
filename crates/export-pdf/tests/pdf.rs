@@ -31,6 +31,9 @@ fn text(pdf: &[u8]) -> String {
 
 #[test]
 fn header_and_media_box_math() {
+    // ADR-0026 made pagination the default, so the media box is the *paper*.
+    // The document-sized page it used to be is `paginate: false`, asserted just
+    // below.
     let pdf = export(
         &list(
             vec![DisplayItem::Fill {
@@ -41,14 +44,16 @@ fn header_and_media_box_math() {
             ResourceTable::default(),
             600.0,
         ),
-        &PdfOptions::default(),
+        &PdfOptions {
+            paginate: false,
+            ..PdfOptions::default()
+        },
     );
     assert_eq!(&pdf[0..5], b"%PDF-", "PDF header");
     let s = text(&pdf);
     // 800×600 CSS px × 0.75 = 600×450 pt.
-    assert!(s.contains("/MediaBox"), "has media box");
     assert!(
-        s.contains("600") && s.contains("450"),
+        s.contains("/MediaBox [0 0 600 450]"),
         "media box 600×450: {s}"
     );
     assert!(
@@ -60,12 +65,19 @@ fn header_and_media_box_math() {
 
 #[test]
 fn tall_content_extends_page_height() {
+    // Unpaginated, the single page is as tall as the document:
+    // max(1200, 600) × 0.75 = 900 pt.
     let pdf = export(
         &list(vec![], ResourceTable::default(), 1200.0),
-        &PdfOptions::default(),
+        &PdfOptions {
+            paginate: false,
+            ..PdfOptions::default()
+        },
     );
-    // max(1200, 600) × 0.75 = 900 pt tall.
-    assert!(text(&pdf).contains("900"), "page height 900");
+    assert!(
+        text(&pdf).contains("/MediaBox [0 0 600 900]"),
+        "page height 900"
+    );
 }
 
 /// Builds a PDF from a single-glyph run of the given `char`, returning the raw
@@ -724,10 +736,12 @@ fn opaque_layer_transform_emits_paired_cm_without_a_group() {
         s.contains("1 0 0 1 10 20 cm"),
         "layer transform in content: {s}"
     );
-    // An opaque layer needs no compositing group.
+    // An opaque layer needs no compositing group. (A paginated export always
+    // emits *one* form XObject — the document every page invokes — so the
+    // absence being asserted is the transparency group, not the form.)
     assert!(
-        !s.contains("/Subtype /Form"),
-        "opaque layer emits no form XObject: {s}"
+        !s.contains("/Group"),
+        "opaque layer emits no transparency group: {s}"
     );
     // Paired save/restore around the transformed subtree.
     assert!(s.contains('q') && s.contains('Q'), "paired q/Q: {s}");

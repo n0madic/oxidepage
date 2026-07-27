@@ -16,7 +16,7 @@ pub(crate) mod json;
 pub mod path;
 pub(crate) mod text;
 
-pub use builder::{build_display_list, build_display_list_full};
+pub use builder::{PaintOptions, build_display_list};
 pub use decode::{DecodedImageData, DecodedPixels, VectorImage, decode_image, rasterize_svg};
 pub use display_list::{
     BorderEdge, BorderRadii, BorderStyle, Brush, Color, DecodedImage, DisplayItem, DisplayList,

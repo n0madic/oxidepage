@@ -621,7 +621,6 @@ css/cssom-view/Element-currentCSSZoom.html	Element.currentCSSZoom basic test	FAI
 css/cssom-view/Element-currentCSSZoom.html	Element.currentCSSZoom reacts to style changes	FAIL
 css/cssom-view/Element-currentCSSZoom.html	__harness__	OK
 css/cssom-view/GetBoundingRect.html	__harness__	OK
-css/cssom-view/GetBoundingRect.html	getBoundingClientRect	FAIL
 css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	When body not potentially scrollable, document.body.scrollHeight always equals window.innerHeight in quirks. (cond. scroll, visible)	FAIL
 css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	When body not potentially scrollable, document.body.scrollHeight always equals window.innerHeight in quirks. (cond. visible, scroll)	FAIL
 css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	When body not potentially scrollable, document.body.scrollHeight always equals window.innerHeight in quirks. (cond. visible, visible)	FAIL

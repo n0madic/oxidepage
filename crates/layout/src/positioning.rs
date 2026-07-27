@@ -20,22 +20,9 @@
 //! approximates with its parent's content-box origin. [`restore_static_positions`]
 //! puts it back after layout, on each axis whose insets are both `auto`.
 
-use oxidepage_dom::DomTree;
 use taffy::Position;
 
 use crate::tree::{BoxId, LayoutTree};
-
-/// True when `box_id` has a non-`none` `transform`. Per CSS a transformed box
-/// establishes a containing block for both absolute *and* fixed descendants
-/// (paint applies the transform to them, so layout must resolve them against
-/// that box too, or the layout containing block and paint parentage disagree).
-/// Anonymous boxes carry no DOM node and cannot be transformed.
-fn has_transform(tree: &LayoutTree, dom: &DomTree, box_id: BoxId) -> bool {
-    tree.box_(box_id)
-        .dom_node
-        .and_then(|node| dom.primary_style(node))
-        .is_some_and(|style| !style.get_box().transform.0.is_empty())
-}
 
 /// Whether `box_id` establishes the containing block an out-of-flow box with
 /// the given positioning scheme resolves against. An `absolute` box is
@@ -45,12 +32,13 @@ fn has_transform(tree: &LayoutTree, dom: &DomTree, box_id: BoxId) -> bool {
 /// it stays fixed to the viewport. (Taffy's own style collapses
 /// `static`/`relative`/`sticky`, so the position is read from the stylo value
 /// the box tree keeps alongside it.)
-fn establishes_containing_block(
-    tree: &LayoutTree,
-    dom: &DomTree,
-    box_id: BoxId,
-    fixed: bool,
-) -> bool {
+///
+/// "Transformed" is [`crate::LayoutBox::has_transform`], captured at
+/// construction: any of `transform`/`translate`/`rotate`/`scale`. Paint applies
+/// all four to descendants, so layout must resolve them against that box too,
+/// or the layout containing block and paint parentage disagree. Anonymous boxes
+/// carry no DOM node and cannot be transformed.
+fn establishes_containing_block(tree: &LayoutTree, box_id: BoxId, fixed: bool) -> bool {
     // A multicol *flow* box contains every out-of-flow descendant, `fixed`
     // included (ADR-0016). Paint shows the flow through per-column clip +
     // translate views, and reaches a hoisted box through the static parent it
@@ -64,21 +52,21 @@ fn establishes_containing_block(
         return true;
     }
     if fixed {
-        has_transform(tree, dom, box_id)
+        tree.box_(box_id).has_transform
     } else {
         tree.box_(box_id).position != style::computed_values::position::T::Static
-            || has_transform(tree, dom, box_id)
+            || tree.box_(box_id).has_transform
     }
 }
 
 /// The containing block for an out-of-flow box: the nearest ancestor that
 /// establishes one for its positioning scheme (see
 /// [`establishes_containing_block`]), falling back to the root (viewport).
-fn containing_block(tree: &LayoutTree, dom: &DomTree, box_id: BoxId, root: BoxId) -> BoxId {
+fn containing_block(tree: &LayoutTree, box_id: BoxId, root: BoxId) -> BoxId {
     let fixed = tree.box_(box_id).position == style::computed_values::position::T::Fixed;
     let mut ancestor = tree.box_(box_id).parent;
     while let Some(current) = ancestor {
-        if current == root || establishes_containing_block(tree, dom, current, fixed) {
+        if current == root || establishes_containing_block(tree, current, fixed) {
             return current;
         }
         ancestor = tree.box_(current).parent;
@@ -88,7 +76,7 @@ fn containing_block(tree: &LayoutTree, dom: &DomTree, box_id: BoxId, root: BoxId
 
 /// Re-parents every out-of-flow box onto its CSS containing block. Runs once
 /// per box-tree build, before the first layout pass.
-pub(crate) fn hoist_out_of_flow(tree: &mut LayoutTree, dom: &DomTree) {
+pub(crate) fn hoist_out_of_flow(tree: &mut LayoutTree) {
     let Some(root) = tree.root() else { return };
 
     for index in 0..tree.boxes.len() {
@@ -109,7 +97,7 @@ pub(crate) fn hoist_out_of_flow(tree: &mut LayoutTree, dom: &DomTree) {
         let Some(parent) = tree.box_(box_id).parent else {
             continue;
         };
-        let target = containing_block(tree, dom, box_id, root);
+        let target = containing_block(tree, box_id, root);
         if target == parent {
             continue;
         }

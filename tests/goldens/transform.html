@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<body style="margin:0">
+  <!-- The `transform` shorthand: origin defaults to the box's centre. -->
+  <div style="width:100px;height:40px;background:#ff0000;transform:translate(30px,-10px)"></div>
+  <!-- An explicit origin pins the top-left corner instead. -->
+  <div style="width:100px;height:40px;background:#00ff00;transform:scale(2);transform-origin:0 0"></div>
+  <!-- The individual properties compose translate → rotate → scale (ADR-0026). -->
+  <div style="width:100px;height:40px;background:#0000ff;translate:10px 5px;rotate:30deg;scale:1.5"></div>
+  <!-- A transformed ancestor maps its whole subtree. -->
+  <div style="width:200px;height:60px;background:#cccccc;transform:translateY(-100%)">
+    <div style="width:50px;height:20px;background:#ffff00;transform:translateX(20px)"></div>
+  </div>
+</body>
+</html>

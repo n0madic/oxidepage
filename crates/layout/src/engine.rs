@@ -272,7 +272,7 @@ impl LayoutEngine {
             // they only see captured data.
             let _scope = enter_active_tree(dom);
             self.tree = build_layout_tree(dom, style, &mut self.fonts, self.viewport, &self.images);
-            hoist_out_of_flow(&mut self.tree, dom);
+            hoist_out_of_flow(&mut self.tree);
             self.snapshot = Some(self.take_snapshot(dom));
             self.rebuild_count += 1;
         }
@@ -303,6 +303,11 @@ impl LayoutEngine {
             // top line of every column but the first (`multicol`, module docs).
             crate::multicol::resolve_columns(&mut self.tree);
             resolve_scrollable_overflow(&mut self.tree);
+            // Transforms resolve last: `transform-origin` percentages and
+            // `translate: 50%` are against the *used* border-box size, and
+            // geometry and hit-testing read the matrix in the rounded space
+            // (ADR-0026).
+            crate::transform::resolve_transforms(&mut self.tree, dom);
         }
 
         self.stamp = Some(stamp);
@@ -544,6 +549,18 @@ impl LayoutEngine {
             };
 
             let layout_box = self.tree.box_(box_id);
+            // Gaining or losing a transform changes which boxes this one is the
+            // containing block for (`positioning::establishes_containing_block`),
+            // and hoisting runs only on the rebuild path. Patching it in place
+            // would leave an out-of-flow descendant resolved against the *old*
+            // containing block while paint and geometry compose the new ancestor
+            // matrix over it — the two would disagree about where it is. The
+            // taffy style carries no transform, so nothing else catches this.
+            // Only a *flip* rebuilds: animating an existing transform's value
+            // stays on the fast path.
+            if layout_box.has_transform != crate::transform::has_transform(&new_style) {
+                return false;
+            }
             // Table grid-item styles are captured in the table context, out
             // of reach of a box patch.
             if layout_box.kind == BoxKind::TableRoot

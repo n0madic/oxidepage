@@ -476,3 +476,228 @@ fn elements_from_point_reports_full_stack_of_siblings() {
     assert!(above_pos < below_pos, "paint order: {hits:?}");
     assert_eq!(hits.last(), Some(&dom.document_element().unwrap()));
 }
+
+// === Transforms (ADR-0026) ===
+//
+// Every expected number below is hand-derived from the box's untransformed
+// layout, which the sibling tests above pin: `body { margin: 0 }` puts a plain
+// block at (0, 0), so the transform is the only thing moving it.
+
+#[test]
+fn translate_shifts_the_bounding_rect() {
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: translate(30px, -10px)'></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    let rect = layout.border_box(d).unwrap();
+    assert_eq!((rect.origin.x, rect.origin.y), (30.0, -10.0));
+    assert_eq!((rect.size.width, rect.size.height), (100.0, 40.0));
+}
+
+#[test]
+fn percentage_translate_resolves_against_the_border_box() {
+    // `translate(50%, 100%)` on a 100×40 box: +50px, +40px.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: translate(50%, 100%)'></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "d")).unwrap();
+    assert_eq!((rect.origin.x, rect.origin.y), (50.0, 40.0));
+}
+
+#[test]
+fn scale_grows_the_rect_about_the_default_center_origin() {
+    // A 100×40 box at (0, 0) scaled ×2 about its centre (50, 20) spans
+    // (-50, -20)..(150, 60).
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; transform: scale(2)'></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "d")).unwrap();
+    assert_eq!((rect.origin.x, rect.origin.y), (-50.0, -20.0));
+    assert_eq!((rect.size.width, rect.size.height), (200.0, 80.0));
+}
+
+#[test]
+fn transform_origin_moves_the_fixed_point() {
+    // The same ×2 scale about the top-left corner keeps (0, 0) put.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; transform: scale(2); \
+         transform-origin: 0 0'></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "d")).unwrap();
+    assert_eq!((rect.origin.x, rect.origin.y), (0.0, 0.0));
+    assert_eq!((rect.size.width, rect.size.height), (200.0, 80.0));
+}
+
+#[test]
+fn rotation_reports_the_bounding_box_of_the_quad() {
+    // A 100×40 box rotated a quarter turn about its centre (50, 20) has a
+    // 40×100 bounding box centred there: (30, -30)..(70, 70).
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: rotate(90deg)'></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "d")).unwrap();
+    assert!((rect.origin.x - 30.0).abs() < 0.01, "{rect:?}");
+    assert!((rect.origin.y - -30.0).abs() < 0.01, "{rect:?}");
+    assert!((rect.size.width - 40.0).abs() < 0.01, "{rect:?}");
+    assert!((rect.size.height - 100.0).abs() < 0.01, "{rect:?}");
+}
+
+#[test]
+fn individual_transform_properties_compose_in_spec_order() {
+    // `translate` then `rotate` then `scale` then `transform` (CSS Transforms 2
+    // §"Individual Transform Properties"). Here: scale ×2 about the centre
+    // (50, 20) → (-50, -20)..(150, 60), then translate by (10, 5) — the
+    // translate is applied *after* the scale in matrix order, so it is not
+    // itself scaled.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         translate: 10px 5px; scale: 2'></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "d")).unwrap();
+    assert_eq!((rect.origin.x, rect.origin.y), (-40.0, -15.0));
+    assert_eq!((rect.size.width, rect.size.height), (200.0, 80.0));
+}
+
+#[test]
+fn nested_transforms_compose_outermost_last() {
+    // Outer translates by (100, 0) and scales ×2 about its own top-left; the
+    // inner box sits 10px into the outer's content and is itself translated by
+    // (5, 0). Innermost first: 10 + 5 = 15 in the outer's space, doubled to 30,
+    // then the outer's own translate → 130.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div style='width: 200px; transform: translate(100px, 0) scale(2); \
+         transform-origin: 0 0; padding-left: 10px'>\
+         <div id=inner style='width: 20px; height: 10px; \
+         transform: translate(5px, 0)'></div></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "inner")).unwrap();
+    assert_eq!(rect.origin.x, 130.0);
+    assert_eq!(rect.origin.y, 0.0);
+    // The outer's ×2 scales the inner's size too.
+    assert_eq!((rect.size.width, rect.size.height), (40.0, 20.0));
+}
+
+#[test]
+fn a_transformed_ancestor_moves_a_descendants_rect() {
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div style='transform: translateY(-100%)'>\
+         <div id=inner style='width: 50px; height: 20px'></div></div></body>",
+    );
+    let rect = layout.border_box(find_by_id(&dom, "inner")).unwrap();
+    // The panel is 20px tall (its only child), so -100% is -20px.
+    assert_eq!((rect.origin.x, rect.origin.y), (0.0, -20.0));
+}
+
+#[test]
+fn offset_and_client_boxes_ignore_transforms() {
+    // CSSOM-View defines `offset*`/`client*` on the untransformed border and
+    // padding boxes; `HTMLImageElement-x-and-y-ignore-transforms.html` in WPT
+    // pins exactly this. Only `getBoundingClientRect` sees the transform.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; border: 5px solid; \
+         transform: translate(30px, 70px) scale(2)'>\
+         <div style='height: 300px'></div></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    let offset = layout.offset_box(&dom, d).unwrap();
+    assert_eq!((offset.left, offset.top), (0.0, 0.0));
+    assert_eq!((offset.width, offset.height), (110.0, 50.0));
+
+    let client = layout.client_box(d).unwrap();
+    assert_eq!((client.left, client.top), (5.0, 5.0));
+    assert_eq!((client.width, client.height), (100.0, 40.0));
+
+    // Scrollable overflow is untransformed too (`crate::overflow`).
+    let (_, scroll_h) = layout.scroll_size(d).unwrap();
+    assert_eq!(scroll_h, 300.0);
+
+    // …while the visual rect is moved and doubled.
+    let rect = layout.border_box(d).unwrap();
+    assert_eq!((rect.size.width, rect.size.height), (220.0, 100.0));
+}
+
+#[test]
+fn content_quads_report_corners_of_a_rotated_box() {
+    // A 100×40 box rotated 90° about its centre (50, 20): the top-left corner
+    // (0, 0) lands at (70, -30), and the corners keep their TL/TR/BR/BL order.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: rotate(90deg)'></div></body>",
+    );
+    let quads = layout.content_quads(&dom, find_by_id(&dom, "d"));
+    assert_eq!(quads.len(), 1);
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    let q = quads[0];
+    assert!(near(q[0].x, 70.0) && near(q[0].y, -30.0), "{q:?}");
+    assert!(near(q[1].x, 70.0) && near(q[1].y, 70.0), "{q:?}");
+    assert!(near(q[2].x, 30.0) && near(q[2].y, 70.0), "{q:?}");
+    assert!(near(q[3].x, 30.0) && near(q[3].y, -30.0), "{q:?}");
+}
+
+#[test]
+fn content_quads_report_one_quad_per_line() {
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'><div style='font-family: Ahem; font-size: 10px; \
+         line-height: 10px; width: 30px'><span id=s>aaa aaa</span></div></body>",
+    );
+    let quads = layout.content_quads(&dom, find_by_id(&dom, "s"));
+    assert_eq!(quads.len(), 2, "wraps onto two lines: {quads:?}");
+    assert_eq!(quads[0][0], oxidepage_base::Point::new(0.0, 0.0));
+    assert_eq!(quads[1][0], oxidepage_base::Point::new(0.0, 10.0));
+}
+
+#[test]
+fn hit_testing_inverts_the_transform() {
+    // The panel is translated 200px right; a probe at its *painted* position
+    // hits it and a probe at its untransformed one does not.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: translateX(200px)'></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    assert_eq!(layout.element_from_point(&dom, 250.0, 20.0), Some(d));
+    let miss = layout.element_from_point(&dom, 50.0, 20.0).unwrap();
+    assert_ne!(miss, d, "the untransformed position must not hit");
+}
+
+#[test]
+fn hit_testing_inside_and_outside_a_rotated_box() {
+    // A 100×40 box rotated 90° about its centre occupies (30, -30)..(70, 70).
+    // (35, 60) is inside that quad; (10, 30) is inside the *untransformed* box
+    // but outside the rotated one.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: rotate(90deg)'></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    assert_eq!(layout.element_from_point(&dom, 35.0, 60.0), Some(d));
+    assert_ne!(layout.element_from_point(&dom, 10.0, 30.0), Some(d));
+}
+
+#[test]
+fn a_zero_scaled_box_is_not_hit_testable() {
+    // `scale(0)` is singular: there is no inverse, and the box collapses to a
+    // point that no probe can land on.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; transform: scale(0)'></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    let hits = layout.elements_from_point(&dom, 50.0, 20.0);
+    assert!(!hits.contains(&d), "{hits:?}");
+}

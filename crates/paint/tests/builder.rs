@@ -4,7 +4,7 @@
 use oxidepage_base::Rect;
 use oxidepage_dom::{ParseOptions, parse_document};
 use oxidepage_layout::LayoutEngine;
-use oxidepage_paint::{Brush, Color, DisplayItem, DisplayList, build_display_list};
+use oxidepage_paint::{Brush, Color, DisplayItem, DisplayList, PaintOptions, build_display_list};
 use oxidepage_style::{StyleEngine, Viewport};
 
 fn display_list(html: &str) -> DisplayList {
@@ -12,7 +12,7 @@ fn display_list(html: &str) -> DisplayList {
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut engine = LayoutEngine::new(Viewport::default());
     engine.reflow(&mut dom, &mut style);
-    build_display_list(&dom, &engine)
+    build_display_list(&dom, &engine, &PaintOptions::default())
 }
 
 /// The solid-fill colors in paint order.

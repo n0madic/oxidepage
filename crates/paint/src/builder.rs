@@ -31,7 +31,40 @@ use crate::text::InlinePhase;
 /// gracefully instead of crashing. Well beyond any realistic document nesting.
 const MAX_PAINT_DEPTH: usize = 256;
 
+/// Knobs that change *what* is painted, as opposed to where it lands.
+///
+/// `print_background` is a **build** option and not a PDF one on purpose: by
+/// export time an element background is an ordinary [`DisplayItem::Fill`],
+/// indistinguishable from any other fill, so the only place that can drop it is
+/// the walk that knows what it is (ADR-0026).
+#[derive(Clone, Copy, Debug)]
+pub struct PaintOptions {
+    /// Paint element backgrounds — colors, gradients and background images —
+    /// and the canvas background propagated from `<html>`/`<body>`. The opaque
+    /// white base fill and replaced content (`<img>`) are unaffected.
+    ///
+    /// **Defaults to `true`, unlike Chrome's `printBackground`**, so
+    /// `render -o page.pdf` keeps meaning "the page as it looks" (ADR-0026).
+    pub print_background: bool,
+}
+
+impl Default for PaintOptions {
+    fn default() -> Self {
+        Self {
+            print_background: true,
+        }
+    }
+}
+
 /// Builds the display list for the current layout of `dom`/`engine`.
+///
+/// **There is one entry point, and it covers the whole document.** There used
+/// to be a `build_display_list_full` beside it for the PDF and full-page
+/// callers; the list became scroll-independent and the two bodies became
+/// identical, leaving a name that promised a distinction the code did not make.
+/// A viewport render and a full-page one differ only in what the *rasterizer*
+/// is told to cover (`raster_skia::render_scrolled` vs `render_full_page`),
+/// never in what is built here.
 ///
 /// The list is built *unscrolled*: document content is placed at its document
 /// position and the document (viewport) scroll is applied later, by the
@@ -45,20 +78,11 @@ const MAX_PAINT_DEPTH: usize = 256;
 /// `dom.pseudo_style`, which do not need an active-tree scope (ADR-0007 D2).
 /// It borrows the tree immutably and never calls back into JS.
 #[must_use]
-pub fn build_display_list(dom: &DomTree, engine: &LayoutEngine) -> DisplayList {
-    build_display_list_inner(dom, engine)
-}
-
-/// Alias retained for the full-page callers (PDF export, full-page screenshot).
-/// The display list is now scroll-independent, so it is identical to
-/// [`build_display_list`]; those callers rasterize it from the document origin
-/// (ADR-0007 D8) while a viewport render applies the live document scroll.
-#[must_use]
-pub fn build_display_list_full(dom: &DomTree, engine: &LayoutEngine) -> DisplayList {
-    build_display_list_inner(dom, engine)
-}
-
-fn build_display_list_inner(dom: &DomTree, engine: &LayoutEngine) -> DisplayList {
+pub fn build_display_list(
+    dom: &DomTree,
+    engine: &LayoutEngine,
+    options: &PaintOptions,
+) -> DisplayList {
     let viewport = engine.viewport();
     let viewport_size = Size::new(viewport.width, viewport.height);
     let tree = engine.tree();
@@ -73,6 +97,7 @@ fn build_display_list_inner(dom: &DomTree, engine: &LayoutEngine) -> DisplayList
     let mut builder = Builder {
         dom,
         engine,
+        options: *options,
         items: Vec::new(),
         resources: ResourceTable::default(),
         suppressed_bg: None,
@@ -99,6 +124,7 @@ fn build_display_list_inner(dom: &DomTree, engine: &LayoutEngine) -> DisplayList
 pub(crate) struct Builder<'a> {
     dom: &'a DomTree,
     engine: &'a LayoutEngine,
+    options: PaintOptions,
     items: Vec<DisplayItem>,
     resources: ResourceTable,
     /// The node whose background was propagated to the canvas; it must not
@@ -161,6 +187,12 @@ impl<'a> Builder<'a> {
             radii: BorderRadii::ZERO,
             brush: Brush::Solid(Color::WHITE),
         });
+        // The white base stays even without backgrounds — a PDF page is opaque
+        // paper — but the page's own canvas color is a background like any
+        // other.
+        if !self.options.print_background {
+            return;
+        }
 
         // The root box's DOM node is <html>.
         let html = self.engine.tree().box_(root).dom_node;
@@ -321,7 +353,7 @@ impl<'a> Builder<'a> {
         let border_box = Rect::from_xywh(abs_origin.x, abs_origin.y, size.width, size.height);
         let transform = style
             .as_deref()
-            .and_then(|s| convert::transform(s, border_box))
+            .and_then(|s| oxidepage_layout::transform::resolve(s, border_box))
             .unwrap_or(Transform2D::IDENTITY);
 
         // A `position: fixed` box is pinned to the viewport: wrap its whole
@@ -509,14 +541,16 @@ impl<'a> Builder<'a> {
         };
 
         // Background: color plus layers (suppressed color on the canvas node).
-        crate::background::paint(
-            self,
-            border_box,
-            box_edges,
-            radii,
-            style,
-            node != self.suppressed_bg,
-        );
+        if self.options.print_background {
+            crate::background::paint(
+                self,
+                border_box,
+                box_edges,
+                radii,
+                style,
+                node != self.suppressed_bg,
+            );
+        }
 
         // Borders.
         let b = self.engine.tree().box_(box_id);

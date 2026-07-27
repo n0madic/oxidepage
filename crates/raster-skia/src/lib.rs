@@ -9,7 +9,7 @@ pub(crate) mod canvas;
 pub(crate) mod glyphs;
 pub(crate) mod path;
 
-use oxidepage_base::{Point, Size};
+use oxidepage_base::{Point, Rect, Size};
 use oxidepage_paint::{Color, DisplayList};
 
 /// A rendered RGBA image (straight alpha, 8 bits per channel, row-major).
@@ -94,12 +94,26 @@ pub fn render_scrolled(list: &DisplayList, options: &RasterOptions, scroll: Poin
     render_sized(list, options, list.viewport, scroll)
 }
 
+/// Rasterizes the `clip` rectangle of the document (CSS px, document
+/// coordinates) — CDP's `Page.captureScreenshot` `clip`.
+///
+/// A clip *is* the `(size, scroll)` pair [`render_sized`] already takes: the
+/// output is `clip.size` and the content is offset by `clip.origin`, which is
+/// exactly "render the viewport as if it were this big and scrolled to here".
+/// `position: fixed` content therefore pins to the clip's own top-left, as it
+/// would in a viewport at that scroll position.
+#[must_use]
+pub fn render_clipped(list: &DisplayList, options: &RasterOptions, clip: Rect) -> RasterImage {
+    render_sized(list, options, clip.size, clip.origin)
+}
+
 /// Rasterizes `list` over the whole document extent (`content_size`) instead of
 /// the viewport, for full-page screenshots.
 ///
-/// `list` must have been built by `build_display_list_full`, so it is painted
-/// from the document's top-left and ignores the viewport (document) scroll —
-/// the same geometry the PDF export uses (ADR-0007 D8).
+/// The list always covers the whole document (there is only one builder), so
+/// this differs from [`render_scrolled`] purely in what it is told to cover: it
+/// paints from the document's top-left and ignores the viewport (document)
+/// scroll — the same geometry the PDF export uses (ADR-0007 D8).
 #[must_use]
 pub fn render_full_page(list: &DisplayList, options: &RasterOptions) -> RasterImage {
     // The whole document is painted from its top-left, so document scroll does
@@ -154,4 +168,41 @@ pub fn encode_png(image: &RasterImage) -> Result<Vec<u8>, png::EncodingError> {
         writer.write_image_data(&image.rgba)?;
     }
     Ok(buf)
+}
+
+/// Encodes a [`RasterImage`] as a baseline JPEG at `quality` (1..=100).
+///
+/// JPEG carries no alpha channel, so translucent pixels are **composited over
+/// white** rather than having their alpha silently dropped. A screenshot is
+/// normally rendered over an opaque [`RasterOptions::background`], which makes
+/// this a no-op — but `background` is caller-settable and nothing enforces
+/// opacity, and dropping alpha there would write whatever colour happened to
+/// sit under a fully transparent pixel.
+///
+/// # Errors
+/// Returns any error from the `image` encoder (writing into the in-memory
+/// buffer does not fail in practice).
+pub fn encode_jpeg(image: &RasterImage, quality: u8) -> Result<Vec<u8>, image::ImageError> {
+    use image::ImageEncoder;
+
+    let rgb: Vec<u8> = image
+        .rgba
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let over_white = |c: u8| {
+                let a = u32::from(p[3]);
+                (((u32::from(c) * a) + 255 * (255 - a)) / 255) as u8
+            };
+            [over_white(p[0]), over_white(p[1]), over_white(p[2])]
+        })
+        .collect();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality.clamp(1, 100))
+        .write_image(
+            &rgb,
+            image.width,
+            image.height,
+            image::ExtendedColorType::Rgb8,
+        )?;
+    Ok(buf.into_inner())
 }

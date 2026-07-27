@@ -4,10 +4,18 @@
 //!
 //! Positions are computed by walking up the box tree summing
 //! `final_layout.location`, subtracting ancestor scroll offsets — no cached
-//! absolute coordinates. Transforms and writing modes are ignored (ADR-0006
-//! §6). Callers must reflow first (the bindings' `flush_layout` does).
+//! absolute coordinates. Writing modes are ignored (ADR-0006 §6).
+//!
+//! **Transforms** are honored by the rects CSSOM-View defines on the *visual*
+//! box — `getBoundingClientRect`, `getClientRects`, and hit testing — and
+//! deliberately not by `offset*`, `client*` or `scrollWidth`/`scrollHeight`,
+//! which CSSOM-View defines on the untransformed border/padding box
+//! (ADR-0026). The matrix itself is resolved once per reflow and cached on
+//! [`crate::LayoutBox::transform`]; nothing here re-derives it.
+//!
+//! Callers must reflow first (the bindings' `flush_layout` does).
 
-use oxidepage_base::{NodeId, Point, Rect};
+use oxidepage_base::{NodeId, Point, Rect, Transform2D};
 use oxidepage_dom::{DomTree, NodeKind};
 use style::computed_values::position::T as Position;
 
@@ -254,38 +262,185 @@ impl LayoutEngine {
         Point::new(x, y)
     }
 
+    /// Absolute border-box origin of `box_id` **and** the transform that maps
+    /// that untransformed box into the space it is painted in — the composition
+    /// of every `transform`/`translate`/`rotate`/`scale` on the box and its
+    /// ancestors, innermost applied first, which is exactly the order the
+    /// rasterizer's CTM stack applies them in.
+    ///
+    /// The origin is [`Self::absolute_origin`]'s, unchanged, and the second
+    /// field is `None` whenever nothing on the chain is transformed — the
+    /// overwhelming case, which therefore costs one `Option::is_some` per
+    /// ancestor, no allocation, and nothing else.
+    ///
+    /// The composed matrix lives in the *same* space as the returned origin
+    /// (element scroll subtracted along the way, document scroll subtracted at
+    /// the end): conjugating each box's cached local matrix by its own origin in
+    /// that space distributes over the composition, so a viewport-space matrix
+    /// is exactly a document-space one conjugated by the scroll.
+    fn absolute_frame(&self, box_id: BoxId, include_scroll: bool) -> (Point, Option<Transform2D>) {
+        let origin = self.absolute_origin(box_id, include_scroll);
+
+        // The transformed boxes on the chain, innermost first.
+        let mut transformed: Vec<BoxId> = Vec::new();
+        let mut current = Some(box_id);
+        while let Some(id) = current {
+            let b = self.tree().box_(id);
+            if b.transform.is_some() {
+                transformed.push(id);
+            }
+            current = b.parent;
+        }
+        if transformed.is_empty() {
+            return (origin, None);
+        }
+
+        let mut acc = Transform2D::IDENTITY;
+        for &id in &transformed {
+            let Some(local) = self.tree().box_(id).transform else {
+                continue;
+            };
+            // Innermost first, so `acc.then(&outer)` builds "apply mine, then my
+            // ancestors'" — `a.then(&b).apply(p) == b.apply(a.apply(p))`.
+            let box_origin = if id == box_id {
+                origin
+            } else {
+                self.absolute_origin(id, include_scroll)
+            };
+            acc = acc.then(&local.at_origin(box_origin));
+        }
+        (origin, Some(acc))
+    }
+
+    /// The untransformed border-box rect of `node`'s principal box plus the
+    /// transform mapping it into painted space (see [`Self::absolute_frame`]).
+    fn border_frame(&self, node: NodeId) -> Option<(Rect, Option<Transform2D>)> {
+        let box_id = self.tree().box_for_node(node)?;
+        let (origin, transform) = self.absolute_frame(box_id, true);
+        let size = self.tree().box_(box_id).final_layout.size;
+        Some((
+            Rect::from_xywh(origin.x, origin.y, size.width, size.height),
+            transform,
+        ))
+    }
+
     /// The absolute (viewport-relative) border-box rect of `node`'s
-    /// principal box.
+    /// principal box, transformed: the axis-aligned bounding box of the painted
+    /// quad, which is what a `DOMRect` reports.
     #[must_use]
     pub fn border_box(&self, node: NodeId) -> Option<Rect> {
+        self.border_frame(node)
+            .map(|(rect, transform)| map_rect(rect, transform))
+    }
+
+    /// Maps a **visual** rect back into the untransformed space `node`'s own
+    /// scroll offset lives in, undoing the transforms on `node` and its
+    /// ancestors. The identity when nothing on the chain is transformed.
+    ///
+    /// A scroll offset is measured in the scroller's own content px, while
+    /// `border_box`/`padding_box` now report visual rects: under a `scale(2)`
+    /// ancestor the visual delta is twice the scroll the container needs, and
+    /// `scrollIntoView` would overshoot by exactly that factor. Rotation makes
+    /// the axis-aligned answer approximate, as everywhere else here.
+    #[must_use]
+    pub fn unmap_into_scroll_space(&self, node: NodeId, rect: Rect) -> Rect {
+        let Some(box_id) = self.tree().box_for_node(node) else {
+            return rect;
+        };
+        match self
+            .absolute_frame(box_id, true)
+            .1
+            .and_then(|t| t.inverse())
+        {
+            Some(inverse) => inverse.map_rect(rect),
+            None => rect,
+        }
+    }
+
+    /// `MouseEvent.offsetX`/`offsetY`: a viewport point expressed in `node`'s
+    /// **own** coordinates, measured from its padding-box origin.
+    ///
+    /// The probe goes back through the inverse of the element's frame rather
+    /// than being measured against its transformed bounding box: on a
+    /// `scale(2)` element a click at the visual centre is 50 px into a 100 px
+    /// box, not 100, and on a rotated one the bounding box's corner is not a
+    /// corner of the element at all. `None` when the element has no box, or
+    /// when its transform is singular and no point maps back.
+    #[must_use]
+    pub fn offset_in_element(&self, node: NodeId, x: f32, y: f32) -> Option<(f32, f32)> {
         let box_id = self.tree().box_for_node(node)?;
-        let origin = self.absolute_origin(box_id, true);
+        let (origin, transform) = self.absolute_frame(box_id, true);
+        let local = match transform {
+            None => Point::new(x, y),
+            Some(matrix) => matrix.inverse()?.apply(Point::new(x, y)),
+        };
+        let border = self.tree().box_(box_id).final_layout.border;
+        Some((
+            local.x - (origin.x + border.left),
+            local.y - (origin.y + border.top),
+        ))
+    }
+
+    /// The **untransformed** border-box size of `node`'s principal box.
+    ///
+    /// ResizeObserver observes this, not the visual box: `scale(2)` must not
+    /// double the size an observer is told about, and changing a transform must
+    /// not fire a resize notification at all (CSS Resize Observer, "observed
+    /// box" — and the same reasoning as `offset*` in this module's header).
+    #[must_use]
+    pub fn border_box_size(&self, node: NodeId) -> Option<(f32, f32)> {
+        let box_id = self.tree().box_for_node(node)?;
         let size = self.tree().box_(box_id).final_layout.size;
-        Some(Rect::from_xywh(origin.x, origin.y, size.width, size.height))
+        Some((size.width, size.height))
     }
 
     /// The node's **padding box** in document coordinates — the origin
-    /// `MouseEvent.offsetX/offsetY` are measured from.
+    /// `MouseEvent.offsetX/offsetY` are measured from. Transformed like the
+    /// border box, so a click on a translated element reports an offset from
+    /// where that element is *seen*.
     #[must_use]
     pub fn padding_box(&self, node: NodeId) -> Option<Rect> {
         let box_id = self.tree().box_for_node(node)?;
-        let origin = self.absolute_origin(box_id, true);
+        let (origin, transform) = self.absolute_frame(box_id, true);
         let layout = &self.tree().box_(box_id).final_layout;
         let border = layout.border;
-        Some(Rect::from_xywh(
+        let rect = Rect::from_xywh(
             origin.x + border.left,
             origin.y + border.top,
             (layout.size.width - border.left - border.right).max(0.0),
             (layout.size.height - border.top - border.bottom).max(0.0),
-        ))
+        );
+        Some(map_rect(rect, transform))
     }
 
     /// `getClientRects()`: one rect for box-generating elements, one rect
     /// per line fragment for inline elements inside an IFC.
     #[must_use]
     pub fn client_rects(&self, dom: &DomTree, node: NodeId) -> Vec<Rect> {
-        if let Some(rect) = self.border_box(node) {
-            return vec![rect];
+        self.client_frames(dom, node)
+            .into_iter()
+            .map(|(rect, transform)| map_rect(rect, transform))
+            .collect()
+    }
+
+    /// `DOM.getContentQuads`: the four corners of each client rect, in order
+    /// top-left, top-right, bottom-right, bottom-left. The un-bounding-boxed
+    /// form of [`Self::client_rects`], so a rotated element reports the
+    /// quadrilateral a click has to aim inside of.
+    #[must_use]
+    pub fn content_quads(&self, dom: &DomTree, node: NodeId) -> Vec<[Point; 4]> {
+        self.client_frames(dom, node)
+            .into_iter()
+            .map(|(rect, transform)| transform.unwrap_or(Transform2D::IDENTITY).map_quad(rect))
+            .collect()
+    }
+
+    /// The untransformed client rects of `node` paired with the transform that
+    /// maps each into painted space: the shared source of [`Self::client_rects`]
+    /// (bounding boxes) and [`Self::content_quads`] (corners).
+    fn client_frames(&self, dom: &DomTree, node: NodeId) -> Vec<(Rect, Option<Transform2D>)> {
+        if let Some(frame) = self.border_frame(node) {
+            return vec![frame];
         }
         self.inline_fragment_rects(dom, node)
     }
@@ -301,8 +456,14 @@ impl LayoutEngine {
 
     /// Per-line rects for an inline (non-box-generating) element: the runs
     /// and atomic inline boxes of the nearest ancestor IFC whose brush node
-    /// is `node` or a DOM descendant of it.
-    fn inline_fragment_rects(&self, dom: &DomTree, node: NodeId) -> Vec<Rect> {
+    /// is `node` or a DOM descendant of it. Each is paired with the enclosing
+    /// IFC's transform — a non-replaced inline box cannot itself be transformed
+    /// (CSS Transforms §3), so the whole run shares one matrix.
+    fn inline_fragment_rects(
+        &self,
+        dom: &DomTree,
+        node: NodeId,
+    ) -> Vec<(Rect, Option<Transform2D>)> {
         if dom.node(node).data().kind() != NodeKind::Element {
             return Vec::new();
         }
@@ -345,10 +506,12 @@ impl LayoutEngine {
         // column — a line never straddles a break, because line tops are exactly
         // where the breaks are taken).
         let frame = self.multicol_frame(ifc_box_id, true);
-        let (base, offset) = match frame {
-            Some((_, flow_origin, offset)) => (flow_origin, offset),
-            None => (self.absolute_origin(ifc_box_id, true), Point::ZERO),
-        };
+        // The box the placed rects are measured from — the multicol flow, or the
+        // IFC box itself — is also the box whose ancestor chain carries the
+        // transform they are painted under.
+        let anchor = frame.map_or(ifc_box_id, |(flow, _, _)| flow);
+        let (base, transform) = self.absolute_frame(anchor, true);
+        let offset = frame.map_or(Point::ZERO, |(_, _, offset)| offset);
         let content_x =
             offset.x + ifc_box.final_layout.border.left + ifc_box.final_layout.padding.left;
         let content_y =
@@ -397,7 +560,7 @@ impl LayoutEngine {
                 });
             }
             if let Some(rect) = line_rect {
-                rects.push(place(rect));
+                rects.push((place(rect), transform));
             }
         }
         rects
@@ -745,6 +908,22 @@ impl LayoutEngine {
     /// Recursive hit test. `pt` is relative to `box_id`'s border-box origin.
     fn hit_box(&self, dom: &DomTree, box_id: BoxId, pt: Point, out: &mut Vec<NodeId>) {
         let b = self.tree().box_(box_id);
+
+        // A transformed box paints itself and its whole subtree through its
+        // matrix, so the probe comes back through the inverse before anything is
+        // compared against this box's own (untransformed) geometry — the same
+        // shape, and the same place, as the multicol arm below inverts paint's
+        // column mapping. The cached matrix is already box-local, which is the
+        // space `pt` is in. A singular matrix (`scale(0)`) collapses the box to
+        // a line: nothing in it is hit-testable, as in every browser.
+        let pt = match b.transform {
+            None => pt,
+            Some(matrix) => match matrix.inverse() {
+                Some(inverse) => inverse.apply(pt),
+                None => return,
+            },
+        };
+
         let size = b.final_layout.size;
         let contains = pt.x >= 0.0 && pt.x < size.width && pt.y >= 0.0 && pt.y < size.height;
 
@@ -1138,6 +1317,13 @@ impl LayoutEngine {
             ancestor = self.tree().box_(current).parent;
         }
     }
+}
+
+/// `rect` mapped through `transform`, or `rect` itself when there is none. The
+/// result is the axis-aligned bounding box of the mapped quad — a `DOMRect`
+/// cannot be anything else.
+fn map_rect(rect: Rect, transform: Option<Transform2D>) -> Rect {
+    transform.map_or(rect, |t| t.map_rect(rect))
 }
 
 /// Whether `candidate` is reachable from `element` by walking DOM parents and

@@ -13,6 +13,9 @@ oxidepage-base.workspace = true
 oxidepage-paint.workspace = true
 tiny-skia.workspace = true
 png.workspace = true
+# JPEG screenshot encoding only; `paint` already pulls `image` in for its
+# decoders, so this is a dependency edge, not a build.
+image.workspace = true
 
 [dev-dependencies]
 # Tests build a font resource (Blob) directly from Ahem to exercise glyph

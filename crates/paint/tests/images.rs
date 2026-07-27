@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use oxidepage_dom::{ParseOptions, parse_document};
 use oxidepage_layout::LayoutEngine;
-use oxidepage_paint::{Brush, Color, DisplayItem, DisplayList, TileMode, build_display_list};
+use oxidepage_paint::{
+    Brush, Color, DisplayItem, DisplayList, PaintOptions, TileMode, build_display_list,
+};
 use oxidepage_style::{StyleEngine, Viewport};
 
 const URL: &str = "http://example.com/a.png";
@@ -25,7 +27,7 @@ fn display_list(html: &str, image: Option<(u32, u32)>) -> DisplayList {
         );
     }
     engine.reflow(&mut dom, &mut style);
-    build_display_list(&dom, &engine)
+    build_display_list(&dom, &engine, &PaintOptions::default())
 }
 
 fn image_item(list: &DisplayList) -> Option<(oxidepage_base::Rect, TileMode)> {

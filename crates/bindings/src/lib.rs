@@ -1797,13 +1797,16 @@ pub fn deliver_observations(cx: &BindCx<'_>) -> bool {
                 .retain(|t| dom.get(t.node).is_some());
             let mut entries = Vec::new();
             for target in observer.targets.borrow().iter() {
+                // `border_box_size`, not `border_box`: a ResizeObserver observes
+                // the *untransformed* border box, so `scale(2)` must not double
+                // the reported size and a transform change must not notify
+                // (ADR-0026).
                 match (
                     layout.content_box(target.node),
-                    layout.border_box(target.node),
+                    layout.border_box_size(target.node),
                 ) {
-                    (Some(content), Some(border)) => {
+                    (Some(content), Some(border_size)) => {
                         let content_size = (content.size.width, content.size.height);
-                        let border_size = (border.size.width, border.size.height);
                         let device = (content_size.0 * dpr, content_size.1 * dpr);
                         let chosen = match target.box_kind {
                             state::RoBoxKind::ContentBox => content_size,

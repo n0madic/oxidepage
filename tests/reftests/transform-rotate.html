@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><link rel="match" href="transform-rotate-ref.html"></head>
+<body style="margin:0">
+  <!--
+    The individual transform properties (ADR-0026) go through the same resolver
+    as the `transform` shorthand, so the two spellings must paint identically —
+    including the composition order, which is translate → rotate → scale, each
+    applied after the ones before it (CSS Transforms 2 §"Individual Transform
+    Properties"). The reference spells all of it as one `transform` list.
+  -->
+  <div style="width:120px;height:60px;background:#ff0000;rotate:25deg"></div>
+  <div style="width:120px;height:60px;background:#0000ff;translate:40px 10px;rotate:-15deg;scale:1.4"></div>
+  <!-- transform-origin applies to the composed matrix, not to each part. -->
+  <div style="width:120px;height:60px;background:#00aa00;rotate:40deg;transform-origin:0 0"></div>
+</body></html>

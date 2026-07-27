@@ -1338,6 +1338,7 @@ pub(crate) fn capture_text_fields(layout_box: &mut LayoutBox, style: &ComputedVa
     layout_box.z_index = style.clone_z_index().integer_or(0);
     layout_box.pointer_events_none =
         style.get_inherited_ui().clone_pointer_events() == PointerEvents::None;
+    layout_box.has_transform = crate::transform::has_transform(style);
     layout_box.order = style.clone_order();
     layout_box.intrinsic_size_keywords = intrinsic_size_keywords_for(style);
 }

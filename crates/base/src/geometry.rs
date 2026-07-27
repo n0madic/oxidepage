@@ -203,6 +203,84 @@ impl Transform2D {
             self.b * p.x + self.d * p.y + self.ty,
         )
     }
+
+    /// Re-expresses a matrix given in a box's **local** space (its border-box
+    /// top-left at the origin) in the space that box sits in:
+    /// `translate(-origin) ∘ self ∘ translate(origin)`.
+    ///
+    /// A transform resolved against a local border box and one resolved against
+    /// the same box's absolute border box differ by exactly this conjugation,
+    /// which is what lets layout cache one matrix per transformed box and hand
+    /// out either (`layout::transform`).
+    #[must_use]
+    pub fn at_origin(&self, origin: Point) -> Transform2D {
+        Self::translation(-origin.x, -origin.y)
+            .then(self)
+            .then(&Self::translation(origin.x, origin.y))
+    }
+
+    /// The inverse transform, or `None` when the matrix is singular
+    /// (`scale(0)`, `scaleX(0)`, a degenerate `matrix()`): such a box collapses
+    /// to a line or a point and is not hit-testable, which is what browsers do.
+    /// A non-finite determinant is treated as singular for the same reason.
+    ///
+    /// Singularity is judged **relative to the matrix's own magnitude**. An
+    /// absolute threshold declares `scale(0.0003)` singular — its determinant is
+    /// 9e-8, below `f32::EPSILON` — and a legitimately tiny but perfectly
+    /// invertible box would become un-hit-testable along with everything inside
+    /// it.
+    #[must_use]
+    pub fn inverse(&self) -> Option<Transform2D> {
+        let det = self.a * self.d - self.b * self.c;
+        let scale = self
+            .a
+            .abs()
+            .max(self.b.abs())
+            .max(self.c.abs())
+            .max(self.d.abs());
+        if !det.is_finite() || det.abs() <= f32::EPSILON * scale * scale {
+            return None;
+        }
+        Some(Self {
+            a: self.d / det,
+            b: -self.b / det,
+            c: -self.c / det,
+            d: self.a / det,
+            tx: (self.c * self.ty - self.d * self.tx) / det,
+            ty: (self.b * self.tx - self.a * self.ty) / det,
+        })
+    }
+
+    /// The four corners of `rect` mapped through this transform, in order
+    /// top-left, top-right, bottom-right, bottom-left. A rotation or a skew
+    /// turns the rect into a genuine quadrilateral, which is why the corners
+    /// are reported rather than a rect (CSSOM-View `DOMQuad`, CDP's
+    /// `DOM.getContentQuads`).
+    #[must_use]
+    pub fn map_quad(&self, rect: Rect) -> [Point; 4] {
+        [
+            self.apply(Point::new(rect.min_x(), rect.min_y())),
+            self.apply(Point::new(rect.max_x(), rect.min_y())),
+            self.apply(Point::new(rect.max_x(), rect.max_y())),
+            self.apply(Point::new(rect.min_x(), rect.max_y())),
+        ]
+    }
+
+    /// The axis-aligned bounding box of [`Self::map_quad`] — what a `DOMRect`
+    /// reports for a transformed box.
+    #[must_use]
+    pub fn map_rect(&self, rect: Rect) -> Rect {
+        let quad = self.map_quad(rect);
+        let (mut min_x, mut min_y) = (quad[0].x, quad[0].y);
+        let (mut max_x, mut max_y) = (quad[0].x, quad[0].y);
+        for p in &quad[1..] {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        Rect::from_xywh(min_x, min_y, max_x - min_x, max_y - min_y)
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +317,118 @@ mod tests {
         assert_eq!(
             scale.then(&translate).apply(Point::new(1.0, 1.0)),
             Point::new(12.0, 2.0)
+        );
+    }
+
+    /// A quarter turn clockwise about the origin (CSS `rotate(90deg)`: +x → +y).
+    fn rotate_90() -> Transform2D {
+        Transform2D {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
+    fn assert_near(a: Point, b: Point) {
+        assert!(
+            (a.x - b.x).abs() < 1e-4 && (a.y - b.y).abs() < 1e-4,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    #[test]
+    fn inverse_round_trips_a_point() {
+        let t = Transform2D::translation(10.0, -5.0)
+            .then(&Transform2D::scale(2.0, 4.0))
+            .then(&rotate_90());
+        let inverse = t.inverse().expect("invertible");
+        let p = Point::new(3.0, 7.0);
+        assert_near(inverse.apply(t.apply(p)), p);
+        assert_near(t.apply(inverse.apply(p)), p);
+    }
+
+    #[test]
+    fn inverse_of_identity_is_identity() {
+        assert_eq!(Transform2D::IDENTITY.inverse(), Some(Transform2D::IDENTITY));
+    }
+
+    #[test]
+    fn singular_matrices_have_no_inverse() {
+        // `scale(0)` and a single collapsed axis both flatten the plane.
+        assert_eq!(Transform2D::scale(0.0, 0.0).inverse(), None);
+        assert_eq!(Transform2D::scale(0.0, 3.0).inverse(), None);
+        assert_eq!(Transform2D::scale(3.0, 0.0).inverse(), None);
+    }
+
+    #[test]
+    fn a_tiny_but_invertible_matrix_keeps_its_inverse() {
+        // `scale(0.0003)` has determinant 9e-8 — below `f32::EPSILON`, and yet
+        // perfectly invertible. An absolute threshold made it, and everything
+        // inside it, un-hit-testable.
+        let tiny = Transform2D::scale(0.0003, 0.0003);
+        let inverse = tiny.inverse().expect("invertible");
+        assert_near(
+            inverse.apply(tiny.apply(Point::new(4.0, 9.0))),
+            Point::new(4.0, 9.0),
+        );
+    }
+
+    #[test]
+    fn at_origin_matches_resolving_against_the_moved_box() {
+        // A box at (100, 50) scaled ×2 about its own top-left. Resolved locally
+        // it is a plain scale; re-expressed at the box's origin it must keep
+        // that corner fixed and move the far corner by the same factor.
+        let local = Transform2D::scale(2.0, 2.0);
+        let at = local.at_origin(Point::new(100.0, 50.0));
+        assert_near(at.apply(Point::new(100.0, 50.0)), Point::new(100.0, 50.0));
+        assert_near(at.apply(Point::new(110.0, 70.0)), Point::new(120.0, 90.0));
+        // The identity is unmoved by conjugation.
+        assert_eq!(
+            Transform2D::IDENTITY.at_origin(Point::new(7.0, 9.0)),
+            Transform2D::IDENTITY
+        );
+    }
+
+    #[test]
+    fn map_quad_reports_corners_in_tl_tr_br_bl_order() {
+        let rect = Rect::from_xywh(10.0, 20.0, 30.0, 40.0);
+        let quad = Transform2D::IDENTITY.map_quad(rect);
+        assert_eq!(
+            quad,
+            [
+                Point::new(10.0, 20.0),
+                Point::new(40.0, 20.0),
+                Point::new(40.0, 60.0),
+                Point::new(10.0, 60.0),
+            ]
+        );
+
+        // Rotated a quarter turn about the origin, the top-left corner (10, 20)
+        // lands at (-20, 10) and the corner order rotates with the box.
+        let quad = rotate_90().map_quad(rect);
+        assert_near(quad[0], Point::new(-20.0, 10.0));
+        assert_near(quad[1], Point::new(-20.0, 40.0));
+        assert_near(quad[2], Point::new(-60.0, 40.0));
+        assert_near(quad[3], Point::new(-60.0, 10.0));
+    }
+
+    #[test]
+    fn map_rect_is_the_bounding_box_of_the_quad() {
+        // A 30×40 box rotated 90° has a 40×30 bounding box.
+        let rect = Rect::from_xywh(10.0, 20.0, 30.0, 40.0);
+        let bounds = rotate_90().map_rect(rect);
+        assert!((bounds.origin.x - -60.0).abs() < 1e-4);
+        assert!((bounds.origin.y - 10.0).abs() < 1e-4);
+        assert!((bounds.size.width - 40.0).abs() < 1e-4);
+        assert!((bounds.size.height - 30.0).abs() < 1e-4);
+
+        // An axis-aligned scale keeps it a rect.
+        assert_eq!(
+            Transform2D::scale(2.0, 0.5).map_rect(rect),
+            Rect::from_xywh(20.0, 10.0, 60.0, 20.0)
         );
     }
 }

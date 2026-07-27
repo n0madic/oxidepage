@@ -58,18 +58,21 @@ fn hit_test(cx: &BindCx<'_>, x: f32, y: f32) -> Option<NodeId> {
     layout.elements_from_point(&dom, x, y).first().copied()
 }
 
-/// `offsetX`/`offsetY`: the point relative to the target's padding-box origin.
-/// `None` when there is no target or no box, which makes the getters fall back
-/// to `pageX`/`pageY` exactly as the spec does for a targetless event.
+/// `offsetX`/`offsetY`: the point relative to the target's padding-box origin,
+/// in the target's **own** coordinates. `None` when there is no target or no
+/// box, which makes the getters fall back to `pageX`/`pageY` exactly as the
+/// spec does for a targetless event.
 fn offset_in(cx: &BindCx<'_>, target: Option<NodeId>, x: f32, y: f32) -> Option<(f64, f64)> {
     let target = target?;
     let layout = cx.state.layout.borrow();
-    let rect = layout.padding_box(target)?;
-    // Both sides are already **viewport** coordinates — `padding_box` resolves
-    // through `absolute_origin(.., include_scroll: true)`. Adding the document
+    // `offset_in_element` inverse-maps the probe through the element's frame,
+    // so a transformed target reports offsets inside its own box rather than
+    // against the corner of a bounding box that is not one of its corners
+    // (ADR-0026). Both sides are **viewport** coordinates — adding the document
     // scroll here offset every reading by exactly the scroll position on any
     // page that had been scrolled.
-    Some((f64::from(x - rect.origin.x), f64::from(y - rect.origin.y)))
+    let (offset_x, offset_y) = layout.offset_in_element(target, x, y)?;
+    Some((f64::from(offset_x), f64::from(offset_y)))
 }
 
 /// Builds the payload for one synthesized mouse event.

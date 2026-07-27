@@ -3,7 +3,7 @@
 //! `dom.primary_style`/`pseudo_style`, so no active-tree scope is needed
 //! (ADR-0007 D2).
 
-use oxidepage_base::{Rect, Size, Transform2D};
+use oxidepage_base::Size;
 use style::color::{AbsoluteColor, ColorSpace};
 use style::properties::ComputedValues;
 use style::values::computed::{Color as ComputedColor, Length};
@@ -45,69 +45,6 @@ pub(crate) fn resolve_color(color: &ComputedColor, current: &AbsoluteColor) -> C
 pub(crate) fn background_color(style: &ComputedValues) -> Color {
     let current = current_color(style);
     resolve_color(&style.get_background().background_color, &current)
-}
-
-/// The box's `transform`, as an affine matrix in the same absolute coordinate
-/// space as `border_box`: the computed transform list resolved about
-/// `transform-origin` (percentages against the border box). `None` for
-/// `transform: none` and for a list that resolves to the identity.
-///
-/// A 3D transform list is flattened to its 2D affine part (the perspective and
-/// z components are dropped), which is exact for the `translate3d(x, y, 0)` /
-/// `translateZ(0)` compositing hints that dominate real pages and an
-/// approximation for genuine 3D (ADR-0013).
-#[must_use]
-pub(crate) fn transform(style: &ComputedValues, border_box: Rect) -> Option<Transform2D> {
-    use euclid::default::{Point2D, Rect as EuclidRect, Size2D};
-
-    let box_style = style.get_box();
-    if box_style.transform.0.is_empty() {
-        return None;
-    }
-
-    // Percentages in the transform list resolve against the border box; only
-    // its size is read, so the origin is irrelevant here.
-    let reference = EuclidRect::new(
-        Point2D::new(Length::new(0.0), Length::new(0.0)),
-        Size2D::new(
-            Length::new(border_box.size.width),
-            Length::new(border_box.size.height),
-        ),
-    );
-    let (m, _is_3d) = box_style
-        .transform
-        .to_transform_3d_matrix(Some(&reference))
-        .ok()?;
-    let matrix = Transform2D {
-        a: m.m11,
-        b: m.m12,
-        c: m.m21,
-        d: m.m22,
-        tx: m.m41,
-        ty: m.m42,
-    };
-    if matrix == Transform2D::IDENTITY {
-        return None;
-    }
-
-    let origin = &box_style.transform_origin;
-    let ox = border_box.origin.x
-        + origin
-            .horizontal
-            .resolve(Length::new(border_box.size.width))
-            .px();
-    let oy = border_box.origin.y
-        + origin
-            .vertical
-            .resolve(Length::new(border_box.size.height))
-            .px();
-
-    // Around the origin: translate it to (0, 0), apply the matrix, translate back.
-    Some(
-        Transform2D::translation(-ox, -oy)
-            .then(&matrix)
-            .then(&Transform2D::translation(ox, oy)),
-    )
 }
 
 /// The element's `opacity`, clamped to `[0, 1]`.

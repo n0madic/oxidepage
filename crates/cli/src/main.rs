@@ -9,7 +9,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use oxidepage_dom::decode::decode_document_bytes;
-use oxidepage_page::{DialogResponse, Page, PageOptions, WaitUntil};
+use oxidepage_page::{
+    DialogResponse, ImageFormat, Margins, Page, PageOptions, PaintOptions, PaperSize, PdfOptions,
+    Rect, ScreenshotOptions, WaitUntil,
+};
 
 /// The viewport every command renders at without `--viewport`. A desktop-class
 /// size, because 800×600 puts most of the modern web into its mobile layout;
@@ -36,6 +39,10 @@ const MAX_VIEWPORT_DIM: f32 = 16384.0;
 /// Bounds on the screenshot device-pixel-ratio.
 const MIN_DPR: f32 = 0.1;
 const MAX_DPR: f32 = 4.0;
+
+/// Bounds on `--scale`, matching Chrome's `Page.printToPDF`.
+const MIN_PDF_SCALE: f32 = 0.1;
+const MAX_PDF_SCALE: f32 = 2.0;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -66,7 +73,7 @@ fn usage() {
         "usage: oxidepage eval <file.html | http(s)://URL> [expression] [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
          \x20      oxidepage dump-layout <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
          \x20      oxidepage dump-display-list <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [-o <file>] [--quiet]\n\
-         \x20      oxidepage render <file.html | http(s)://URL> -o <out.{{png,pdf,html}}> [--format png|pdf|html] [--viewport WxH] [--dpr N] [--full-page] [--settle-ms <ms>] [--quiet]\n\n\
+         \x20      oxidepage render <file.html | http(s)://URL> -o <out.{{png,jpg,pdf,html}}> [--format png|jpeg|pdf|html] [--viewport WxH] [--dpr N] [--full-page] [--clip X,Y,W,H] [--quality N] [--paper <name|WxH>] [--margin <px|t,r,b,l>] [--scale N] [--landscape] [--single-page] [--no-fit-to-width] [--no-print-background] [--settle-ms <ms>] [--quiet]\n\n\
          eval: loads a local HTML file or fetches a document over the network\n\
          (SSRF- and policy-checked), runs its scripts and the event loop until\n\
          it settles, then evaluates `expression` (default: `document.title`)\n\
@@ -78,21 +85,34 @@ fn usage() {
          eagerly — unlike a viewport screenshot of the same document, whose list\n\
          is the same one but built after lazy loading skipped the images below\n\
          the fold. Pass --lazy-images to see what the screenshot sees.\n\n\
-         render: loads and lays out the document, then writes it as PNG, PDF, or\n\
-         HTML — chosen by --format, or by -o's extension if --format is absent.\n\
-         PNG rasterizes the viewport (or, with --full-page, the whole document);\n\
-         PDF exports the whole document as a single page; HTML serializes the\n\
-         live DOM after the engine has run (doctype included) — the final\n\
-         markup, not the input file. A viewport PNG only fetches images near the\n\
-         viewport; --full-page, pdf, and html fetch everything and are visible\n\
-         to IntersectionObserver.\n\n\
+         render: loads and lays out the document, then writes it as PNG, JPEG,\n\
+         PDF, or HTML — chosen by --format, or by -o's extension if --format is\n\
+         absent. An image rasterizes the viewport (or, with --full-page, the\n\
+         whole document, or with --clip, any region of it); PDF paginates the\n\
+         whole document onto real paper; HTML serializes the live DOM after the\n\
+         engine has run (doctype included) — the final markup, not the input\n\
+         file. A viewport image only fetches images near the viewport;\n\
+         --full-page, --clip, pdf, and html fetch everything and are visible to\n\
+         IntersectionObserver.\n\n\
          options:\n\
          \x20 --settle-ms <ms>  event-loop settle budget (default 5000)\n\
          \x20 --viewport WxH    layout viewport in CSS px (default 1280x800)\n\
-         \x20 --format <fmt>    output format for render: png, pdf, or html\n\
+         \x20 --format <fmt>    output format for render: png, jpeg, pdf, or html\n\
          \x20                   (default: inferred from -o's extension)\n\
-         \x20 --dpr N           device pixel ratio for a PNG render (default 1)\n\
-         \x20 --full-page       render the whole document, not just the viewport (PNG only)\n\
+         \x20 --dpr N           device pixel ratio; also what the page sees as\n\
+         \x20                   window.devicePixelRatio (image output only, default 1)\n\
+         \x20 --full-page       render the whole document, not just the viewport\n\
+         \x20 --clip X,Y,W,H    render this region of the document, in CSS px\n\
+         \x20 --quality N       JPEG quality, 1-100 (default 80)\n\
+         \x20 --paper <spec>    PDF paper: a3, a4, a5, letter, legal, tabloid, or\n\
+         \x20                   WxH in CSS px (default a4)\n\
+         \x20 --margin <spec>   PDF margins in CSS px: one value, or t,r,b,l\n\
+         \x20                   (default 38.4 = 0.4in)\n\
+         \x20 --scale N         PDF zoom, 0.1-2 (default 1)\n\
+         \x20 --landscape       swap the PDF paper's width and height\n\
+         \x20 --single-page     one PDF page as tall as the whole document\n\
+         \x20 --no-fit-to-width do not shrink wide content to the PDF page width\n\
+         \x20 --no-print-background  omit element backgrounds from the PDF\n\
          \x20 -o, --output <file>  write output to <file> instead of stdout\n\
          \x20 --quiet           suppress page console output\n\
          \x20 --max-bytes <sz>  per-page response byte budget (e.g. 1G, 2G; default 512M)\n\
@@ -246,6 +266,11 @@ fn render_command(args: &[String]) -> ExitCode {
     let mut dpr: f32 = 1.0;
     let mut full_page = false;
     let mut format_flag: Option<&str> = None;
+    let mut clip: Option<Rect> = None;
+    // The library's default, not a second copy of it.
+    let mut quality: u8 = ScreenshotOptions::default().quality;
+    let mut pdf = PdfOptions::default();
+    let mut paint = PaintOptions::default();
 
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -292,6 +317,59 @@ fn render_command(args: &[String]) -> ExitCode {
                 };
                 output = Some(value);
             }
+            "--clip" => {
+                let Some(parsed) = iter.next().and_then(|v| parse_clip(v)) else {
+                    eprintln!("oxidepage render: --clip expects X,Y,W,H in CSS px");
+                    return ExitCode::from(2);
+                };
+                clip = Some(parsed);
+            }
+            "--quality" => {
+                let Some(value) = iter.next().and_then(|v| v.parse::<u8>().ok()) else {
+                    eprintln!("oxidepage render: --quality requires a number");
+                    return ExitCode::from(2);
+                };
+                if !(1..=100).contains(&value) {
+                    eprintln!("oxidepage render: --quality must be 1..=100");
+                    return ExitCode::from(2);
+                }
+                quality = value;
+            }
+            "--paper" => {
+                let Some(parsed) = iter.next().and_then(|v| parse_paper(v)) else {
+                    eprintln!(
+                        "oxidepage render: --paper expects a name (a3, a4, a5, letter, legal, tabloid) or WxH in CSS px"
+                    );
+                    return ExitCode::from(2);
+                };
+                pdf.paper = parsed;
+            }
+            "--margin" => {
+                let Some(parsed) = iter.next().and_then(|v| parse_margins(v)) else {
+                    eprintln!("oxidepage render: --margin expects <px> or <top,right,bottom,left>");
+                    return ExitCode::from(2);
+                };
+                pdf.margins = parsed;
+            }
+            "--scale" => {
+                let Some(value) = iter.next().and_then(|v| v.parse::<f32>().ok()) else {
+                    eprintln!("oxidepage render: --scale requires a number");
+                    return ExitCode::from(2);
+                };
+                if !value.is_finite() || value <= 0.0 {
+                    eprintln!("oxidepage render: --scale must be a positive number");
+                    return ExitCode::from(2);
+                }
+                let clamped = value.clamp(MIN_PDF_SCALE, MAX_PDF_SCALE);
+                if clamped != value {
+                    eprintln!("oxidepage render: --scale {value} clamped to {clamped}");
+                }
+                pdf.scale = clamped;
+            }
+            "--landscape" => pdf.landscape = true,
+            "--single-page" => pdf.paginate = false,
+            "--no-fit-to-width" => pdf.fit_to_width = false,
+            "--no-print-background" => paint.print_background = false,
             "--full-page" => full_page = true,
             "--quiet" => quiet = true,
             "--allow-private" => allow_private = true,
@@ -320,10 +398,30 @@ fn render_command(args: &[String]) -> ExitCode {
         }
     };
 
-    // Whole document capture: full-page PNG, PDF, and HTML all want every
-    // lazy-loaded image fetched and the IntersectionObserver root grown to the
-    // document (ADR-0015) — only a plain viewport PNG stays viewport-scoped.
-    let whole_document = full_page || format != OutputFormat::Png;
+    // `--dpr` always reaches the page (it is `window.devicePixelRatio`, and a
+    // DPR media query picks a different asset), but only an image capture is
+    // *rendered* at it. Say precisely that rather than claiming it is ignored.
+    if dpr != 1.0 && !format.is_raster() {
+        eprintln!(
+            "oxidepage render: --dpr {dpr} sets the page's devicePixelRatio; \
+             {format} output has no pixel density of its own"
+        );
+    }
+
+    // Whole document capture: a full-page or clipped image, PDF, and HTML all
+    // want every lazy-loaded image fetched and the IntersectionObserver root
+    // grown to the document (ADR-0015) — only a plain viewport image stays
+    // viewport-scoped. A clip can name any region of the page, including one
+    // below the fold, so it is a whole-document capture too.
+    let whole_document = full_page || clip.is_some() || !format.is_raster();
+
+    // The device pixel ratio is the page's, not just the encoder's: a page that
+    // reads `window.devicePixelRatio` (or matches a `-webkit-min-device-pixel-
+    // ratio` query to pick a 2× asset) has to see the value it is rendered at.
+    let viewport = Some(oxidepage_page::Viewport {
+        dpr,
+        ..viewport.unwrap_or(DEFAULT_VIEWPORT)
+    });
 
     let page = match load_page(
         file,
@@ -338,29 +436,34 @@ fn render_command(args: &[String]) -> ExitCode {
     };
     page.settle(Duration::from_millis(settle_ms));
 
+    // Anything still deferred has to land before a whole-document capture, or
+    // it paints as a hole. (Lazy loading is off for these unless `--lazy-images`
+    // forced it on.) HTML output paints nothing, so it waits for nothing.
+    if whole_document && format != OutputFormat::Html {
+        page.load_deferred_images(Duration::from_millis(settle_ms));
+    }
+
     let bytes: Vec<u8> = match format {
-        OutputFormat::Png if full_page => {
-            // Lazy loading is off for `--full-page` unless `--lazy-images` forced
-            // it on; either way the whole document is about to be painted, so
-            // anything still deferred has to land first or it paints as a hole.
-            page.load_deferred_images(Duration::from_millis(settle_ms));
-            page.screenshot_full_page(dpr)
-        }
-        OutputFormat::Png => page.screenshot(dpr),
-        OutputFormat::Pdf => {
-            // A PDF is the whole document: nothing may stay deferred (only
-            // reachable via an explicit `--lazy-images`, since `pdf` defaults
-            // to eager).
-            page.load_deferred_images(Duration::from_millis(settle_ms));
-            page.print_to_pdf()
-        }
+        OutputFormat::Png | OutputFormat::Jpeg => page.screenshot_with(&ScreenshotOptions {
+            dpr,
+            full_page,
+            clip,
+            format: if format == OutputFormat::Jpeg {
+                ImageFormat::Jpeg
+            } else {
+                ImageFormat::Png
+            },
+            quality,
+            ..ScreenshotOptions::default()
+        }),
+        OutputFormat::Pdf => page.pdf(&pdf, &paint),
         OutputFormat::Html => page.document_html().into_bytes(),
     };
     flush_page_output(&page, quiet);
     // Empty output only signals failure for the two backends that actually
     // encode a binary format; `document_html()` always returns at least the
     // document element's markup.
-    if matches!(format, OutputFormat::Png | OutputFormat::Pdf) && bytes.is_empty() {
+    if format != OutputFormat::Html && bytes.is_empty() {
         eprintln!("oxidepage render: failed to produce {format} output");
         return ExitCode::FAILURE;
     }
@@ -625,14 +728,24 @@ fn flush_page_output(page: &Page, quiet: bool) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
     Png,
+    Jpeg,
     Pdf,
     Html,
+}
+
+impl OutputFormat {
+    /// Whether the output is a rasterized image, i.e. whether `--dpr`,
+    /// `--clip` and `--full-page` mean anything for it.
+    fn is_raster(self) -> bool {
+        matches!(self, OutputFormat::Png | OutputFormat::Jpeg)
+    }
 }
 
 impl std::fmt::Display for OutputFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             OutputFormat::Png => "PNG",
+            OutputFormat::Jpeg => "JPEG",
             OutputFormat::Pdf => "PDF",
             OutputFormat::Html => "HTML",
         })
@@ -644,13 +757,14 @@ impl std::fmt::Display for OutputFormat {
 fn detect_format(output: &str, format_flag: Option<&str>) -> Result<OutputFormat, String> {
     let by_name = |s: &str| match s {
         "png" => Some(OutputFormat::Png),
+        "jpeg" | "jpg" => Some(OutputFormat::Jpeg),
         "pdf" => Some(OutputFormat::Pdf),
         "html" => Some(OutputFormat::Html),
         _ => None,
     };
     if let Some(f) = format_flag {
         return by_name(&f.to_lowercase())
-            .ok_or_else(|| format!("unknown --format `{f}` (expected png, pdf, or html)"));
+            .ok_or_else(|| format!("unknown --format `{f}` (expected png, jpeg, pdf, or html)"));
     }
     let ext = Path::new(output)
         .extension()
@@ -661,7 +775,7 @@ fn detect_format(output: &str, format_flag: Option<&str>) -> Result<OutputFormat
         "htm" => Ok(OutputFormat::Html),
         _ => by_name(&ext).ok_or_else(|| {
             format!(
-                "cannot infer format from `{output}` (expected .png/.pdf/.html) — pass --format <png|pdf|html>"
+                "cannot infer format from `{output}` (expected .png/.jpg/.pdf/.html) — pass --format <png|jpeg|pdf|html>"
             )
         }),
     }
@@ -690,6 +804,60 @@ fn parse_viewport(spec: &str) -> Option<oxidepage_page::Viewport> {
         height: clamped_height,
         dpr: 1.0,
     })
+}
+
+/// Parses `--clip X,Y,W,H` (document CSS px). A non-positive size is rejected:
+/// an empty clip would produce a 1×1 image rather than an error.
+fn parse_clip(spec: &str) -> Option<Rect> {
+    let mut parts = spec.split(',').map(|p| p.trim().parse::<f32>());
+    let (x, y, w, h) = (
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+    );
+    if parts.next().is_some() || ![x, y, w, h].iter().all(|v| v.is_finite()) || w <= 0.0 || h <= 0.0
+    {
+        return None;
+    }
+    Some(Rect::from_xywh(x, y, w, h))
+}
+
+/// Parses `--paper`: a known name, or an explicit `WxH` in CSS px.
+fn parse_paper(spec: &str) -> Option<PaperSize> {
+    if let Some(named) = PaperSize::by_name(spec) {
+        return Some(named);
+    }
+    let (w, h) = spec.split_once(['x', 'X'])?;
+    let width = w.trim().parse::<f32>().ok()?;
+    let height = h.trim().parse::<f32>().ok()?;
+    (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0)
+        .then_some(PaperSize { width, height })
+}
+
+/// Parses `--margin`: one value for all four sides, or `top,right,bottom,left`
+/// in CSS px.
+fn parse_margins(spec: &str) -> Option<Margins> {
+    let values: Option<Vec<f32>> = spec
+        .split(',')
+        .map(|p| {
+            p.trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite() && *v >= 0.0)
+        })
+        .collect();
+    let values = values?;
+    match values.as_slice() {
+        [all] => Some(Margins::uniform(*all)),
+        [top, right, bottom, left] => Some(Margins {
+            top: *top,
+            right: *right,
+            bottom: *bottom,
+            left: *left,
+        }),
+        _ => None,
+    }
 }
 
 /// A best-effort `file://` URL for a local path.

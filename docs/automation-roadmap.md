@@ -33,7 +33,7 @@ Ready to be exposed almost as-is:
 
 | Need | Already in the engine |
 |---|---|
-| screenshot, PDF | `raster-skia`, `export-pdf`, `--full-page`, `--dpr` |
+| screenshot, PDF | `raster-skia`, `export-pdf`, `--full-page`, `--dpr`, `--clip`, JPEG, paginated paper (stage 4, ADR-0026) |
 | viewport / DPR emulation | `Page::set_viewport`, `Viewport { dpr }` |
 | user agent | `NavigatorProfile` |
 | cookies | RFC 6265bis jar, `NetService::cookies()` |
@@ -54,7 +54,7 @@ Missing outright: multiple pages, remote object handles, request interception, i
 | 1 | Navigation & session history — **landed** | "click a link and wait" | ADR-0022 | 3–4 w |
 | 2 | Trusted input (mouse/keyboard/focus/typing) — **landed** | `click`, `type`, `press`, `hover` | ADR-0023 | 5–7 w |
 | 3 | Dialogs & structured page events — **landed** | real sites stop throwing on `alert` | ADR-0025 | 1–2 w |
-| 4 | Transform-aware geometry, capture completeness | correct click points, `page.pdf()` | yes | 3–4 w |
+| 4 | Transform-aware geometry, capture completeness — **landed** | correct click points, `page.pdf()` | ADR-0026 | 3–4 w |
 | 5 | `engine`: Browser, contexts, multi-page, async commands | anything protocol-shaped | yes | 4–5 w |
 | 6 | CDP transport + Target/Page/Runtime/Network/Log | **Puppeteer basic green** | yes | 5–7 w |
 | 7 | `Input` + `DOM` domains | Puppeteer interaction green | no | 2–3 w |
@@ -281,32 +281,62 @@ directories are not vendored (ADR-0025, Consequences).
 
 ---
 
-## Stage 4 — Transform-aware geometry and capture completeness
+## Stage 4 — Transform-aware geometry and capture completeness — **landed (ADR-0026)**
 
 **Why here.** Both drivers compute the click point from element geometry. ADR-0013
-applies `transform` at paint time only and geometry ignores it, so a click on any
-transformed element lands somewhere else. Fixing it also yields
+applied `transform` at paint time only and geometry ignored it, so a click on any
+transformed element landed somewhere else. Fixing it also yielded
 `DOM.getContentQuads` for free.
 
-**Scope.**
+**Landed.** The scope below shipped as written, with the corrections noted under
+"Deviations".
 
-- Propagate the accumulated transform through the box tree into geometry:
-  `getBoundingClientRect`, `getClientRects`, `offset*`/`client*` and
-  `elementFromPoint` (which inverse-transforms the probe point). Closes a named
-  ADR-0013 limit.
+- The transform resolver **moved down** from `paint` into
+  `crates/layout/src/transform.rs`, so paint, geometry and hit testing share one
+  matrix; `layout` caches it per transformed box after rounding, because geometry
+  has no access to computed styles. `getBoundingClientRect`, `getClientRects`,
+  `Page::layout_rect`, IntersectionObserver and `MouseEvent.offsetX/offsetY` are
+  transform-aware, and `elementFromPoint` inverse-transforms the probe point.
+  Closes a named ADR-0013 limit.
 - `Page::content_quads(node) -> Vec<[Point; 4]>` and
-  `Page::scroll_into_view_if_needed(node, rect)` — the two primitives every
-  actionability check is built from.
-- Screenshot completeness: `clip` rectangle, JPEG encoding (the `image` dependency
-  already carries the `jpeg` feature), quality.
-- **PDF pagination.** `export-pdf` writes one page as tall as the document
-  (`crates/export-pdf/src/lib.rs:43`). `page.pdf()` defaults to paginated Letter/A4.
-  Add paper size, margins, `printBackground`, `scale`, `landscape`, and slice the
-  display list into pages at line-box boundaries — the same "never cut a line in
-  half" rule the multi-column work already established (ADR-0016).
+  `Page::scroll_into_view_if_needed(node, rect)`, the latter sharing one
+  implementation with `Element.scrollIntoView` (moved to
+  `crates/layout/src/scroll_into_view.rs`).
+- Screenshot completeness: `ScreenshotOptions` with a document-space `clip`,
+  `format` (PNG/JPEG) and `quality`; `Page::screenshot_with`.
+- **PDF pagination.** `Page::pdf` paginates onto A4 by default, with paper size,
+  margins, `printBackground`, `scale`, `landscape` and fit-to-width. Breaks come
+  from `layout::pagination`, over the same class-A break points multi-column uses
+  (ADR-0016), and the document's content is emitted once as a form XObject that
+  every page invokes.
+- CLI: `--clip`, `--quality`, `--paper`, `--margin`, `--scale`, `--landscape`,
+  `--single-page`, `--no-fit-to-width`, `--no-print-background`, JPEG output, and
+  two silent papercuts fixed (`--dpr` never reached `Viewport.dpr`; it was
+  accepted and ignored for non-image output).
+
+**Deviations** (all recorded in ADR-0026). `offset*`/`client*` are **not**
+transform-aware, contrary to the bullet above as originally written: CSSOM-View
+defines them on the untransformed border/padding box, and
+`HTMLImageElement-x-and-y-ignore-transforms.html` passes today *because* we ignore
+transforms there. The individual `translate`/`rotate`/`scale` properties were
+added (ADR-0013's second named limit) since they share the resolver.
+`printBackground` defaults to `true`, unlike Chrome, so `render -o page.pdf` keeps
+meaning "the page as it looks". Pagination's fill breaks at the page boundary when
+a page holds no break opportunity at all (CSS Fragmentation §3.4's last resort),
+where multicol lets a column overflow — without it a `display: flex` body would
+print as one page as tall as the document.
 
 **Non-goals.** CSS fragmentation properties (`break-*`, `orphans`/`widows`),
-header/footer templates, tagged PDF, WebP screenshot encoding.
+header/footer templates, tagged PDF, WebP screenshot encoding, `@media print`,
+relayout at paper width, and a real stacking-context tree for hit-test ordering.
+
+**Verification.** `crates/layout/tests/geometry.rs`, `crates/page/tests/geometry.rs`,
+`crates/page/tests/input.rs`, `crates/page/tests/quads.rs`,
+`crates/page/tests/screenshot.rs`, `crates/page/tests/pdf.rs`,
+`crates/export-pdf/tests/pagination.rs`, a display-list golden
+(`tests/goldens/transform.html`), a reftest pair (`tests/reftests/transform-rotate.html`),
+and one WPT expectation flipped to PASS
+(`css/cssom-view/GetBoundingRect.html :: getBoundingClientRect`).
 
 ---
 

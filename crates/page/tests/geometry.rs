@@ -825,3 +825,126 @@ fn an_outside_list_marker_stays_out_of_the_items_geometry() {
         "true,true,true"
     );
 }
+
+// === Transform-aware geometry (ADR-0026) ===
+
+#[test]
+fn get_bounding_client_rect_applies_the_transform() {
+    assert_eq!(
+        eval_in(
+            "<!DOCTYPE html><body style='margin:0'>\
+             <div id=d style='width:100px;height:40px;\
+             transform:translate(30px,-10px)'></div></body>",
+            "const r=document.getElementById('d').getBoundingClientRect();\
+             [r.left,r.top,r.width,r.height].join(',')",
+        ),
+        "30,-10,100,40"
+    );
+}
+
+#[test]
+fn individual_transform_properties_reach_geometry() {
+    // `translate`/`rotate`/`scale` are resolved by the same function as
+    // `transform`, so they cannot disagree with it. Here: ×2 about the centre
+    // (50, 20) → (-50, -20, 200, 80), then translated by (10, 5).
+    assert_eq!(
+        eval_in(
+            "<!DOCTYPE html><body style='margin:0'>\
+             <div id=d style='width:100px;height:40px;translate:10px 5px;scale:2'></div>\
+             </body>",
+            "const r=document.getElementById('d').getBoundingClientRect();\
+             [r.left,r.top,r.width,r.height].join(',')",
+        ),
+        "-40,-15,200,80"
+    );
+}
+
+#[test]
+fn rotate_property_reports_the_bounding_quad() {
+    // A 100×40 box rotated a quarter turn about its centre: a 40×100 rect at
+    // (30, -30). Rounded, because a quarter turn goes through sin/cos.
+    assert_eq!(
+        eval_in(
+            "<!DOCTYPE html><body style='margin:0'>\
+             <div id=d style='width:100px;height:40px;rotate:90deg'></div></body>",
+            "const r=document.getElementById('d').getBoundingClientRect();\
+             [Math.round(r.left),Math.round(r.top),\
+              Math.round(r.width),Math.round(r.height)].join(',')",
+        ),
+        "30,-30,40,100"
+    );
+}
+
+#[test]
+fn get_client_rects_maps_every_line_of_a_transformed_inline() {
+    // Both line boxes of the wrapped span move with the container's transform.
+    assert_eq!(
+        eval_in(
+            "<!DOCTYPE html><body style='margin:0'>\
+             <div style='font-family:Ahem;font-size:10px;line-height:10px;width:30px;\
+             transform:translate(100px,50px)'><span id=s>aaa aaa</span></div></body>",
+            "const l=document.getElementById('s').getClientRects();\
+             [l.length,l[0].left,l[0].top,l[1].left,l[1].top].join(',')",
+        ),
+        "2,100,50,100,60"
+    );
+}
+
+#[test]
+fn offset_and_client_metrics_stay_untransformed() {
+    // CSSOM-View defines them on the untransformed border/padding box; WPT's
+    // `HTMLImageElement-x-and-y-ignore-transforms.html` pins it.
+    assert_eq!(
+        eval_in(
+            "<!DOCTYPE html><body style='margin:0'>\
+             <div id=d style='width:100px;height:40px;border:5px solid;\
+             transform:translate(30px,70px) scale(2)'></div></body>",
+            "const d=document.getElementById('d');\
+             [d.offsetLeft,d.offsetTop,d.offsetWidth,d.offsetHeight,\
+              d.clientWidth,d.clientHeight].join(',')",
+        ),
+        "0,0,110,50,100,40"
+    );
+}
+
+#[test]
+fn element_from_point_finds_a_transformed_element_where_it_is_painted() {
+    assert_eq!(
+        eval_in(
+            "<!DOCTYPE html><body style='margin:0'>\
+             <div id=d style='width:100px;height:40px;\
+             transform:translateX(200px)'></div></body>",
+            "[document.elementFromPoint(250,20).id,\
+              document.elementFromPoint(50,20).id].join(',')",
+        ),
+        "d,"
+    );
+}
+
+#[test]
+fn resize_observer_reports_the_untransformed_border_box() {
+    // CSS Resize Observer observes the *untransformed* border box: `scale(2)`
+    // must not double `borderBoxSize`, even though `getBoundingClientRect` on
+    // the same element reports 200×80 (ADR-0026).
+    let page = load_html_page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <div id=d style='width:100px;height:40px;transform:scale(2)'></div>\
+         <script>window.seen = '';\
+           new ResizeObserver(es => { const b = es[0].borderBoxSize[0];\
+             window.seen = b.inlineSize + ',' + b.blockSize; })\
+             .observe(document.getElementById('d'));</script></body>",
+        PageOptions::default(),
+    )
+    .unwrap();
+    page.settle(std::time::Duration::from_millis(200));
+    assert_eq!(page.eval_to_string("window.seen").unwrap(), "100,40");
+    assert_eq!(
+        page.eval_to_string(
+            "const r=document.getElementById('d').getBoundingClientRect();\
+             [r.width,r.height].join(',')"
+        )
+        .unwrap(),
+        "200,80",
+        "…while the visual rect is doubled"
+    );
+}

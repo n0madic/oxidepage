@@ -4,7 +4,8 @@
 use oxidepage_dom::{ParseOptions, parse_document};
 use oxidepage_layout::LayoutEngine;
 use oxidepage_paint::{
-    Brush, Color, DisplayItem, DisplayList, LinearGradient, RadialGradient, build_display_list,
+    Brush, Color, DisplayItem, DisplayList, LinearGradient, PaintOptions, RadialGradient,
+    build_display_list,
 };
 use oxidepage_style::{StyleEngine, Viewport};
 
@@ -13,7 +14,7 @@ fn display_list(html: &str) -> DisplayList {
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut engine = LayoutEngine::new(Viewport::default());
     engine.reflow(&mut dom, &mut style);
-    build_display_list(&dom, &engine)
+    build_display_list(&dom, &engine, &PaintOptions::default())
 }
 
 fn linear(list: &DisplayList) -> LinearGradient {

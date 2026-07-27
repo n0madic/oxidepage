@@ -15,7 +15,6 @@ oxidepage-style.workspace = true
 oxidepage-layout.workspace = true
 style.workspace = true
 servo_arc.workspace = true
-euclid.workspace = true
 parley.workspace = true
 taffy.workspace = true
 skrifa.workspace = true

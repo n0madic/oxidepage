@@ -1,6 +1,9 @@
 //! Viewport vs. full-page screenshot geometry (ADR-0007 D8).
 
-use oxidepage_page::{PageOptions, RasterOptions, Viewport, load_html_page};
+use oxidepage_base::Rect;
+use oxidepage_page::{
+    ImageFormat, PageOptions, RasterOptions, ScreenshotOptions, Viewport, load_html_page,
+};
 
 const VIEWPORT: Viewport = Viewport {
     width: 800.0,
@@ -120,4 +123,86 @@ fn viewport_render_scrolls_document_but_pins_fixed() {
         [255, 0, 0, 255],
         "document content shifted up by the scroll offset"
     );
+}
+
+// === Clip and format (ADR-0026) ===
+
+#[test]
+fn a_clip_sizes_the_output_and_picks_the_document_region() {
+    // A 400×300 window over the red band, 500px down the document.
+    let image = tall_page().render_pixels_with(&ScreenshotOptions {
+        clip: Some(Rect::from_xywh(0.0, 500.0, 400.0, 300.0)),
+        ..ScreenshotOptions::default()
+    });
+    assert_eq!((image.width, image.height), (400, 300));
+    assert_eq!(image.pixel(200, 150), [255, 0, 0, 255]);
+
+    // A clip straddling the boundary sees both bands: the green strip runs to
+    // y = 100, so a clip starting at y = 50 has green on top and red below.
+    let image = tall_page().render_pixels_with(&ScreenshotOptions {
+        clip: Some(Rect::from_xywh(0.0, 50.0, 200.0, 200.0)),
+        ..ScreenshotOptions::default()
+    });
+    assert_eq!(image.pixel(100, 10), [0, 255, 0, 255], "still in the strip");
+    assert_eq!(image.pixel(100, 100), [255, 0, 0, 255], "past it");
+}
+
+#[test]
+fn a_clip_scales_with_dpr() {
+    let image = tall_page().render_pixels_with(&ScreenshotOptions {
+        dpr: 2.0,
+        clip: Some(Rect::from_xywh(0.0, 500.0, 400.0, 300.0)),
+        ..ScreenshotOptions::default()
+    });
+    assert_eq!((image.width, image.height), (800, 600));
+    assert_eq!(image.pixel(400, 300), [255, 0, 0, 255]);
+}
+
+#[test]
+fn a_clip_wins_over_full_page() {
+    let image = tall_page().render_pixels_with(&ScreenshotOptions {
+        full_page: true,
+        clip: Some(Rect::from_xywh(0.0, 0.0, 100.0, 100.0)),
+        ..ScreenshotOptions::default()
+    });
+    assert_eq!((image.width, image.height), (100, 100));
+}
+
+#[test]
+fn jpeg_output_is_a_valid_jfif_stream() {
+    let bytes = tall_page().screenshot_with(&ScreenshotOptions {
+        format: ImageFormat::Jpeg,
+        ..ScreenshotOptions::default()
+    });
+    assert!(!bytes.is_empty());
+    // SOI marker, and EOI at the end.
+    assert_eq!(&bytes[..2], &[0xFF, 0xD8], "JPEG SOI");
+    assert_eq!(&bytes[bytes.len() - 2..], &[0xFF, 0xD9], "JPEG EOI");
+    // Round-trips through a decoder at the requested size.
+    let decoded = image::load_from_memory(&bytes).expect("decodes");
+    assert_eq!((decoded.width(), decoded.height()), (800, 600));
+}
+
+#[test]
+fn jpeg_quality_changes_the_size() {
+    let page = tall_page();
+    let low = page.screenshot_with(&ScreenshotOptions {
+        format: ImageFormat::Jpeg,
+        quality: 10,
+        ..ScreenshotOptions::default()
+    });
+    let high = page.screenshot_with(&ScreenshotOptions {
+        format: ImageFormat::Jpeg,
+        quality: 95,
+        ..ScreenshotOptions::default()
+    });
+    assert!(low.len() < high.len(), "{} vs {}", low.len(), high.len());
+}
+
+#[test]
+fn png_is_still_the_default_format() {
+    let bytes = tall_page().screenshot_with(&ScreenshotOptions::default());
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    // …and the wrapper is the same picture.
+    assert_eq!(bytes, tall_page().screenshot(1.0));
 }

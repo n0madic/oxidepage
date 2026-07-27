@@ -18,12 +18,15 @@ mod intrinsic_size;
 mod marker;
 pub mod multicol;
 mod overflow;
+pub mod pagination;
 mod positioning;
 mod replaced;
 pub mod scroll;
+pub mod scroll_into_view;
 pub mod table;
 mod taffy_impl;
 pub mod text;
+pub mod transform;
 pub mod tree;
 pub mod webfont;
 
@@ -35,6 +38,7 @@ pub use geometry::{ClientBox, OffsetBox, ScrollParent, UsedBoxValues};
 pub use images::{DecodedImage, ImageData, ImageId, ImageStore};
 pub use multicol::{ColumnRange, MulticolContext};
 pub use scroll::ScrollResult;
+pub use scroll_into_view::{Align, scroll_into_view};
 pub use tree::{
     BoxId, BoxKind, IfcData, LayoutBox, LayoutTree, PseudoBox, ReplacedContent, ReplacedContext,
     TextBrush,

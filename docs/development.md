@@ -82,10 +82,11 @@ crates/
 ├── page          # event loop, timers, lifecycle, navigation, rAF, Page API
 ├── cli           # `oxidepage eval | dump-layout | dump-display-list | render`
 ├── style         # stylo integration: stylesheet set, cascade, CSSOM ops
-├── layout        # box tree, taffy driver, parley IFCs, geometry, image store
+├── layout        # box tree, taffy driver, parley IFCs, geometry, transforms,
+│                 # page breaks, image store
 ├── paint         # box tree → display list (backgrounds, borders, text, images)
-├── raster-skia   # display list → tiny-skia CPU raster → RGBA / PNG
-├── export-pdf    # display list → single-page PDF (pdf-writer)
+├── raster-skia   # display list → tiny-skia CPU raster → RGBA / PNG / JPEG
+├── export-pdf    # display list → paginated PDF (pdf-writer)
 ├── raster-vello, engine, capi, cdp        # stubs for later phases
 xtask/            # cargo xtask: vendoring, codegen, WPT / golden / reftest runners
 tests/

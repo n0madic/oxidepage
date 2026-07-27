@@ -203,6 +203,22 @@ pub struct LayoutBox {
     /// decorative gradients and "click-through" scrims all rely on it, and
     /// without it a great many real pages have an unclickable body.
     pub pointer_events_none: bool,
+    /// Whether any of `transform`/`translate`/`rotate`/`scale` is set
+    /// ([`crate::transform::has_transform`]). Captured at construction because
+    /// two passes need the answer before the matrix exists: `positioning` runs
+    /// before layout (a transformed box is a containing block for absolute
+    /// *and* fixed descendants), and the post-layout resolve pass uses it to
+    /// skip the overwhelming majority of boxes.
+    pub has_transform: bool,
+    /// The box's resolved transform in its **own** coordinate space (border-box
+    /// top-left at the origin, `transform-origin` baked in), filled by
+    /// [`crate::transform::resolve_transforms`] after rounding. `None` for an
+    /// untransformed box and for a list that resolves to the identity.
+    ///
+    /// Geometry and hit-testing read it here because they have no access to
+    /// computed styles; paint resolves the same function against the absolute
+    /// border box. The two agree by [`oxidepage_base::Transform2D::at_origin`].
+    pub transform: Option<oxidepage_base::Transform2D>,
     /// Computed `order` (initial 0). Taffy has no `order` field — it expects
     /// the caller to pre-sort `children` by it, which
     /// `construct::collect_flex_grid_children` does for flex/grid containers
@@ -267,6 +283,8 @@ impl LayoutBox {
             position: style::computed_values::position::T::Static,
             z_index: 0,
             pointer_events_none: false,
+            has_transform: false,
+            transform: None,
             order: 0,
             intrinsic_size_keywords: SmallVec::new(),
             text_align: parley::layout::Alignment::Start,

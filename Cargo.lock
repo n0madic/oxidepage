@@ -1533,6 +1533,7 @@ version = "0.1.0"
 dependencies = [
  "app_units",
  "criterion",
+ "euclid",
  "html5ever",
  "oxidepage-base",
  "oxidepage-dom",
@@ -1599,7 +1600,6 @@ dependencies = [
 name = "oxidepage-paint"
 version = "0.1.0"
 dependencies = [
- "euclid",
  "image",
  "oxidepage-base",
  "oxidepage-dom",
@@ -1617,6 +1617,7 @@ dependencies = [
 name = "oxidepage-raster-skia"
 version = "0.1.0"
 dependencies = [
+ "image",
  "oxidepage-base",
  "oxidepage-paint",
  "parley",
