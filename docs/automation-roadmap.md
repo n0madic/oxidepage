@@ -37,15 +37,16 @@ Ready to be exposed almost as-is:
 | viewport / DPR emulation | `Page::set_viewport`, `Viewport { dpr }` |
 | user agent | `NavigatorProfile` |
 | cookies | RFC 6265bis jar, `NetService::cookies()` |
-| console, errors, dialogs | `Page::drain_console` / `drain_errors` / `drain_dialog_events` (`crates/page/src/lib.rs:3654`) |
+| console, errors, dialogs | `Page::drain_console` / `drain_errors` / `drain_dialog_events` (`crates/page/src/lib.rs`) |
 | DOM queries, geometry | arena + `querySelector*` + CSSOM-View surface |
 | `evaluate` | `Page::eval` (by value only) |
 | load lifecycle | `WaitUntil`, `readyState`, `Page::settle` |
 | navigation, history, lifecycle events | stage 1, ADR-0022 |
+| multiple pages, contexts, async commands, push events | stage 5, ADR-0027 (`crates/engine`) |
 
-Missing outright: multiple pages, remote object handles, request interception, isolated worlds, frames, and the whole
-`cdp` crate (`crates/cdp/src/lib.rs` is a three-line stub; so is
-`crates/engine/src/lib.rs`).
+Missing outright: remote object handles, request interception, isolated worlds,
+frames, and the whole `cdp` crate (`crates/cdp/src/lib.rs` is a three-line
+stub).
 
 ## Stage map
 
@@ -55,7 +56,7 @@ Missing outright: multiple pages, remote object handles, request interception, i
 | 2 | Trusted input (mouse/keyboard/focus/typing) — **landed** | `click`, `type`, `press`, `hover` | ADR-0023 | 5–7 w |
 | 3 | Dialogs & structured page events — **landed** | real sites stop throwing on `alert` | ADR-0025 | 1–2 w |
 | 4 | Transform-aware geometry, capture completeness — **landed** | correct click points, `page.pdf()` | ADR-0026 | 3–4 w |
-| 5 | `engine`: Browser, contexts, multi-page, async commands | anything protocol-shaped | yes | 4–5 w |
+| 5 | `engine`: Browser, contexts, multi-page, async commands — **landed** | anything protocol-shaped | ADR-0027 | 4–5 w |
 | 6 | CDP transport + Target/Page/Runtime/Network/Log | **Puppeteer basic green** | yes | 5–7 w |
 | 7 | `Input` + `DOM` domains | Puppeteer interaction green | no | 2–3 w |
 | 8 | `Fetch` interception, file inputs, downloads | Puppeteer feature-complete (90%) | yes | 4–5 w |
@@ -340,7 +341,7 @@ and one WPT expectation flipped to PASS
 
 ---
 
-## Stage 5 — `engine`: Browser, contexts, multiple pages, async commands
+## Stage 5 — `engine`: Browser, contexts, multiple pages, async commands — **landed (ADR-0027)**
 
 **Why here.** This is design Phase 8, and it is the hard prerequisite for any
 protocol: today a `Page` is a synchronous single-threaded loop that an embedder
@@ -354,9 +355,9 @@ answers *while* the page runs, and push events as they happen.
   context: cookie jar, Web Storage, permissions, UA/viewport defaults. One OS
   thread per page, as design §7 specifies; handles are `Send` façades over
   crossbeam command channels.
-- Event-loop change: `run_until_stalled_until` (`crates/page/src/lib.rs:1605`)
-  gains a command task source, and `settle`'s single blocking wait
-  (`crates/page/src/lib.rs:1667`) becomes a `crossbeam::Select` over `net_rx` and
+- Event-loop change: `Page::run_until_stalled_until` (`crates/page/src/lib.rs`)
+  gains a command task source, and `Page::settle`'s single blocking wait
+  becomes a `crossbeam::Select` over `net_rx` and
   `cmd_rx` with the same deadline. ADR-0004's "one blocking wait, no busy-wait"
   property is preserved — that is the acceptance criterion for this change.
 - An outbound `PageEvent` bus (lifecycle, console, errors, dialogs, network) to
@@ -369,12 +370,84 @@ answers *while* the page runs, and push events as they happen.
   handle (`closed`, `close()`, `focus()`, `location` write). Scripts that call
   `w.focus()` on the result are common enough to matter.
 
+**What landed beyond the plan.**
+
+- **Commands are boxed closures, not a command enum** —
+  `PageJob { control, run: Box<dyn FnOnce(&Page) + Send> }`. `Page::dom()`
+  returns a `Ref<'_, DomTree>`, which is neither `Send` nor `'static` and
+  physically cannot cross a channel, so an enum protocol would have to
+  enumerate every owned projection a caller might ever want, in advance.
+  `PageHandle::with(|page| …)` takes the borrow *on the page thread* instead and
+  covers the whole tail of the `Page` API, including methods that do not exist
+  yet.
+- **Web Storage landed in full.** The scope listed it as per-context state
+  without saying what that implied; it was an open question, and the answer is
+  a real `Storage` IDL interface backed by Rust, `localStorage` per (context,
+  origin), `sessionStorage` per page, a real `StorageEvent` delivered to the
+  sibling pages of the context, and a 5 MiB per-area quota throwing
+  `QuotaExceededError`. The `bootstrap.js` `Proxy` stays, because it *is* the
+  named-property surface the code generator cannot express.
+- **Dialogs got a dedicated answer channel with two mandatory exits** (timeout
+  and sender-disconnect, both falling back to `Dismiss`) — the obligation
+  ADR-0025 recorded when it made `run_dialog` synchronous. The answer must not
+  ride the command port: a parked page services no ordinary job, so an answer
+  queued there would sit behind the very block it is meant to release.
+- **Operational surface the driver side needs and the tests use:**
+  `Page::request_close`/`suspend`/`resume`/`is_suspended`/`is_idle`, and
+  `Page::loop_stats` → `LoopStats`, the counter that *proves* the loop parks
+  rather than spins. On the bus, `PageEvent::Crashed` (a page thread panic kills
+  the page, not the browser) and `PageEvent::Dropped { count }` — a channel can
+  only refuse the newest event where the pull streams drop the oldest, and the
+  marker is what keeps that difference from being silent.
+
+**Deviations.**
+
+- **The `PageEvent` bus carries no network events**, contrary to the scope
+  bullet. Nothing about a request is retained today, and stage 6 needs a bounded
+  response-body LRU for `Network.getResponseBody` regardless — so retaining
+  request metadata is that stage's job, done once, rather than a half version
+  here that stage 6 would have to replace.
+- **No named `window.open` targets.** `window.open(u, "x")` called twice opens
+  two pages where a browser reuses the named one. A named-target registry is
+  only meaningful alongside `window.opener` and cross-page messaging, and those
+  are stage 11's problem — and this stage's non-goals.
+- **Reading `w.location` throws `SecurityError`**, exactly as a cross-origin
+  `WindowProxy` does — which is what it *is*: a separate browsing context, on
+  another thread, that this realm cannot synchronously introspect. A getter that
+  blocked on a round trip would deadlock the first time two pages opened each
+  other. The write half works, resolved against the opener's document.
+- **`w.focus()` is reported, not obeyed.** It reaches the driver as
+  `PageEvent::FocusRequested`; focusing a browsing context means something only
+  with a window manager, and there is none here. Told rather than silently
+  dropped, which is what keeps it inside P6.
+- **"Permissions per context" is struck, not deferred.** There is no Permissions
+  API in the engine at all — no `navigator.permissions`, no Geolocation, no
+  Notification — so nothing could be granted or denied, and a `PermissionState`
+  map that no code consults would be exactly the always-installed no-op P6
+  forbids. It becomes real when the first API that consults it does, which is
+  not stage 10 either.
+- **`ResourcePolicy` is per browser, not per context**, because the SSRF
+  connector is baked into the shared hyper client and a per-context policy would
+  need a client per context — throwing away the connection reuse that motivated
+  sharing. Byte and request budgets go the other way and stay per page.
+- **The CLI deliberately stays on `Page`.** `crates/cli` does not depend on
+  `engine`; it drives one page synchronously through `settle` plus the pull
+  streams, exactly as before. `engine` is purely additive and no layering edge
+  reversed: a page with no command port, no event sink and no shared net config
+  behaves byte-for-byte as it did.
+
 **Non-goals.** `capi`/cbindgen (independent of automation), a windowed embedder,
 cross-page `postMessage`, `SharedWorker`-style shared anything.
 
-**Verification.** `crates/engine/tests/`: two pages in one context share cookies,
-two contexts do not; a command answered while a page is mid-`settle`; no
-regression in the `geometry_rmw` and `reflow` benchmarks.
+**Verification.** `crates/page/tests/commands.rs` and `crates/engine/tests/`
+(`browser.rs`, `events.rs`, `dialogs.rs`, `window_open.rs`, `storage.rs`, over a
+loopback server in `tests/common/mod.rs`): two pages in one context share
+cookies and two contexts do not; a command answered while a page is
+mid-`settle`; a job sent during a document load runs after it while a close sent
+at the same moment runs immediately; an idle page with a live command port
+consumes no CPU; a dialog answered over the protocol path, plus the timeout and
+disconnect fallbacks; `localStorage` shared between sibling pages and isolated
+between contexts. No regression in the `geometry_rmw` and `reflow` benchmarks.
 
 ---
 

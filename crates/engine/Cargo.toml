@@ -1,6 +1,6 @@
 [package]
 name = "oxidepage-engine"
-description = "Public embedding API: Browser, Page, options"
+description = "Public embedding API: Browser, BrowserContext, Page handles"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+oxidepage-page = { workspace = true }
+oxidepage-net = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros"] }
 
 [lints]
 workspace = true

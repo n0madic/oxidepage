@@ -11,7 +11,24 @@
 // support, so the optional-argument form stands in — see ADR-0025 for the one
 // expression that diverges (`alert(undefined)`).
 interface Window : EventTarget {
+  // A live window is never closed. Here rather than only on `WindowProxy`
+  // because `window.open(url, "_self")` returns *this* window, and the
+  // near-universal `const w = window.open(..); if (w && !w.closed)` idiom
+  // would otherwise read `undefined` — a silently wrong answer, which is worse
+  // than an absent one (P6).
+  readonly attribute boolean closed;
+  // Paired with `closed` for the same reason. HTML's close steps *ignore* the
+  // call for a browsing context that script did not open, and this engine has
+  // no opener tracking, so ignoring is what it does — with a console warning,
+  // so it is a reported no-op rather than the silent kind P6 forbids. Leaving
+  // it off is worse than either: `window.open('', '_self'); window.close();`
+  // is a widespread self-close shim, and an absent member turns its second
+  // statement into an uncaught TypeError that aborts the rest of the task.
+  undefined close();
   any matchMedia(DOMString query);
+  // Returns a `WindowProxy` when the embedder can open one, and `null` when it
+  // cannot — which is a browser's own answer for a blocked popup, not a stub.
+  any open(optional DOMString url = "", optional DOMString target = "_blank", optional DOMString features = "");
   undefined alert(optional DOMString message = "");
   boolean confirm(optional DOMString message = "");
   DOMString? prompt(optional DOMString message = "", optional DOMString defaultValue = "");
@@ -555,6 +572,40 @@ dictionary SubmitEventInit : EventInit {
 interface SubmitEvent : Event {
   constructor(DOMString type, optional SubmitEventInit eventInitDict = {});
   readonly attribute HTMLElement? submitter;
+};
+
+// Web Storage (ADR-0027 D13). A real interface rather than a `bootstrap.js`
+// class, because script brand-checks (`localStorage instanceof Storage` —
+// VueUse's `useStorage` does) and monkey-patches (`Storage.prototype.setItem`,
+// which every analytics wrapper does), and because the data now lives in Rust
+// where a whole browsing context can share it.
+//
+// The named-property surface (`s.foo`, `delete s.foo`, `Object.keys(s)`) is a
+// `Proxy` installed over this in `bootstrap.js`: WebIDL's named getter/setter/
+// deleter have no representation in this codegen, and `ownKeys` is derivable
+// from `length` + `key(i)`, so no extra members are needed here.
+interface Storage {
+  readonly attribute unsigned long length;
+  DOMString? key(unsigned long index);
+  DOMString? getItem(DOMString key);
+  undefined setItem(DOMString key, DOMString value);
+  undefined removeItem(DOMString key);
+  undefined clear();
+};
+
+// A handle on a *sibling* browsing context — what `window.open` returns.
+//
+// Deliberately small (P6, ADR-0027 D12). The other window runs on another
+// thread with its own realm, so `document`, `postMessage` and `opener` cannot
+// be answered without machinery this stage does not have; they are therefore
+// **not installed**, and feature detection stays honest. `location` is
+// write-only for the same reason a cross-origin `WindowProxy`'s is in a real
+// browser: navigating a sibling is allowed, reading its URL is not.
+interface WindowProxy {
+  readonly attribute boolean closed;
+  undefined close();
+  undefined focus();
+  attribute any location;
 };
 
 interface MediaQueryList : EventTarget {

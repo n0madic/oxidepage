@@ -10,7 +10,7 @@ OxidePage is a modular, embeddable **headless web engine** in Rust, assembled fr
 2. `docs/adr/` — ADRs record deviations from and refinements of the baseline. **ADRs win over the design document where they conflict.**
 3. `docs/status.md` — current phase status; keep it in sync with behavior changes. `README.md` itself is user-facing (what the project does, install, CLI/library usage) — don't put implementation status or dev workflow there.
 
-Write a new ADR (copy `docs/adr/0000-template.md`) for any change to crate boundaries, public API shape, dependency selection, security posture, or a design principle. ADR-0003…0026 cover the phases already landed and are the fastest way to learn *why* a subsystem looks the way it does.
+Write a new ADR (copy `docs/adr/0000-template.md`) for any change to crate boundaries, public API shape, dependency selection, security posture, or a design principle. ADR-0003…0027 cover the phases already landed and are the fastest way to learn *why* a subsystem looks the way it does.
 
 ## Build & test
 
@@ -26,7 +26,7 @@ cargo fmt --all --check
 cargo clippy -p oxidepage-paint --all-targets --features svg,webp -- -D warnings
 cargo test -p oxidepage-paint --features svg,webp
 
-# Size-optimized binary (13.6 MiB vs release's 19.6 MiB, <1% slower):
+# Size-optimized binary (14.4 MiB vs release's 20.6 MiB, <1% slower):
 cargo build --profile min-size -p oxidepage-cli   # -> target/min-size/oxidepage
 ```
 
@@ -81,7 +81,8 @@ So **fixing a bug breaks CI until you update the expectation**. The expectation 
 
 ```sh
 cargo run -p oxidepage-cli -- eval <file.html | http(s)://URL> [expr] [--viewport WxH] [--settle-ms N]
-cargo run -p oxidepage-cli -- dump-layout | dump-display-list | screenshot -o x.png [--dpr N] [--full-page] | pdf -o x.pdf
+cargo run -p oxidepage-cli -- dump-layout | dump-display-list
+cargo run -p oxidepage-cli -- render <file|url> -o out.{png,jpg,pdf,html} [--dpr N] [--full-page] [--paper A4]
 ```
 
 `--allow-private` is needed to hit loopback/private hosts (SSRF filter is on by default).
@@ -94,13 +95,15 @@ cargo run -p oxidepage-cli -- dump-layout | dump-display-list | screenshot -o x.
 base ──┬─ dom ── style ── layout ── paint ─┬─ raster-skia ─┐
        │                                   └─ export-pdf ──┤
        ├─ net ─────────────────────────────────────────────┤
-js ────┴───────────── bindings ─────────────────────────────┴── page ── cli
+js ────┴───────────── bindings ─────────────────────────────┴── page ─┬─ cli
+                                                                      └─ engine
 idl (build-time only: consumed by xtask codegen, not by any runtime crate)
 ```
 
 - **`idl` is not a dependency of `bindings`.** It is a codegen library driven only by `cargo xtask codegen`; its output is checked in as `crates/bindings/src/generated.rs`.
 - **`page` is the only crate that sees the whole stack.** `bindings` deliberately does not depend on `paint`/`raster`/`page` — the render cache lives on `Page`, not on `PageState`.
-- `capi`, `cdp`, `engine`, `raster-vello` are documented **stubs** for later phases.
+- **`engine` is above `page`, and `cli` does not go through it** (ADR-0027). `Browser` → `BrowserContext` → `PageHandle` are `Send + Sync` façades over one OS thread per `Page` — `Page` is permanently `!Send` (rquickjs without `parallel`, stylo's thread-locals), so only messages cross. The edge points one way and stays that way: `page` learns nothing about browsers or protocols because a command is an opaque `Box<dyn FnOnce(&Page) + Send>`. Adding a `page → engine` dependency is how that inverts.
+- `capi`, `cdp`, `raster-vello` are documented **stubs** for later phases.
 
 ### Pipeline
 
@@ -138,9 +141,11 @@ The cached display list is keyed on a `PaintStamp` (dom/style/element-scroll/ima
 
 ### Event loop (`crates/page/src/lib.rs`)
 
-`run_until_stalled_until(deadline)` drains task sources in a fixed order: finalized wrappers → style updates → script updates → custom-element reactions → image updates → visible/background image loads → inline-SVG raster → font-face loads → scroll events → observer delivery (ResizeObserver/IntersectionObserver — deliberately *outside* "update the rendering", per ADR-0011) → net events → one due timer → a rendering opportunity on a 16 ms cadence.
+`run_until_stalled_until(deadline)` drains task sources in a fixed order: finalized wrappers → queued navigation → **embedder commands** → style updates → script updates → custom-element reactions → image updates → visible/background image loads → inline-SVG raster → font-face loads → sibling `storage` events → scroll events → observer delivery (ResizeObserver/IntersectionObserver — deliberately *outside* "update the rendering", per ADR-0011) → net events → one due timer → a rendering opportunity on a 16 ms cadence.
 
-`Page::settle(budget)` is the **settle budget**: run to stall, return iff no timer, no pending rAF, and no in-flight net. Otherwise it does exactly **one blocking wait** — `net_rx.recv_deadline(min(next_timer, next_render, budget_end))`. That single call unifies the async net thread with the synchronous page thread (ADR-0004): no busy-wait, no polling.
+`Page::settle(budget)` is the **settle budget**: run to stall, return iff no timer, no pending rAF, and no in-flight net. Otherwise it does exactly **one blocking wait** — `wait_for_work(min(next_timer, next_render, budget_end))`, a `crossbeam::Select` over the net receiver and the embedder's command port. That single call unifies the async net thread, the timer heap and a driver's commands with the synchronous page thread (ADR-0004, ADR-0027 D4): no busy-wait, no polling. It is the *only* park — `await_subresources` and `await_pending_stylesheets` call the same helper, so the count of blocking waits per iteration stays one. **A disconnected `Receiver` is permanently ready in a `Select`**, so `wait_for_work` returns `false` on command-port disconnect and the caller must stop looping; re-registering it converts the one park into a 100%-CPU spin visible only as a CPU graph.
+
+**The command port is a task source, and ordinary jobs obey the navigation guard.** A `PageJob` arriving mid-wait runs immediately only if `!in_job && !suspended && !navigating && !state.parsing()`; otherwise it parks in `pending_jobs` and drains at the top of the loop, after the navigation drain (which invalidates every node id a job might hold) and before the page's own sources (a job is the driver's turn and must not be starved). This is the same guard ADR-0022 gave script navigation, for the same reason: `await_subresources` and `await_pending_stylesheets` re-enter the loop from *inside* `load_document`, holding `RefCell` borrows on dom and style plus live parser handles, so a job that evaluated script there is a deterministic `BorrowMutError`, not a race. **`control` jobs are the exception and run at any wait point** — today `Page::request_close`, `Page::suspend` and `Page::resume`, which is what keeps a page interruptible while it is blocked on a slow load. `PageJob::control` is public, so the bar is a convention you must hold: `Cell`s and channels only. Anything that enters JS, borrows the DOM or flushes layout is a `BorrowMutError` waiting for the right timing. A dialog answer is the related case that is *not* a job at all — it travels on its own rendezvous channel, because a page parked in `run_dialog` services no ordinary job and an answer queued on the command port would sit behind the very block it is meant to release.
 
 `Page::with_cx` is the single entry into JS; it arms the `ScriptBudget` (10 s default, enforced via the engine interrupt callback) at the outermost call, so a task and its microtasks share one deadline. Microtask checkpoints run after every callback into JS.
 

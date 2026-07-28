@@ -25,7 +25,7 @@ use oxidepage_base::NetErrorKind;
 use tokio::io::AsyncReadExt;
 use url::Url;
 
-use crate::cache::HttpCache;
+use crate::cache::{CachePartition, HttpCache};
 use crate::client::HttpClient;
 use crate::cookies::{CookieJar, CookieSource, registrable_domain};
 use crate::error::{NetError, NetResult};
@@ -253,6 +253,30 @@ pub struct FetchOutcome {
     pub body: Bytes,
 }
 
+/// The shareable half of a [`FetchEngine`]: the connection pool and the HTTP
+/// cache a whole browser has in common (design §7, ADR-0027 D7).
+///
+/// The budget counters are deliberately *not* here. `max_requests` and
+/// `max_total_bytes` are documented per page, and a `FetchEngine` built over
+/// shared parts still mints its own — sharing them would silently turn a
+/// per-page bound into a browser-wide one.
+pub struct SharedFetchParts {
+    pub client: HttpClient,
+    /// The policy `client`'s SSRF connector was built with.
+    ///
+    /// Carried **together with** the client rather than passed alongside it,
+    /// because they must be the same policy: the connector enforces the address
+    /// filter at connect time and this one is re-checked per redirect hop. A
+    /// caller free to pair a `permissive_localhost` client with a strict policy
+    /// could turn the private-address block into a no-op, with nothing to warn
+    /// them. Only [`NetPool`](crate::NetPool) mints these, so the pairing has
+    /// exactly one origin.
+    pub(crate) policy: Arc<ResourcePolicy>,
+    pub cache: Arc<Mutex<HttpCache>>,
+    /// Isolation key for this engine's cache entries.
+    pub partition: CachePartition,
+}
+
 /// The fetch engine: a client bound to a policy plus the page-shared cookie
 /// jar, HTTP cache, and per-page resource budget counters. Cloneable (all
 /// shared state is behind `Arc`), so `NetService` can hand a clone to each
@@ -263,6 +287,8 @@ pub struct FetchEngine {
     pub policy: Arc<ResourcePolicy>,
     pub cookies: Arc<Mutex<CookieJar>>,
     cache: Arc<Mutex<HttpCache>>,
+    /// Isolation key for this engine's entries in the (possibly shared) cache.
+    partition: CachePartition,
     /// Cumulative request count (against [`ResourcePolicy::max_requests`]).
     request_count: Arc<AtomicU32>,
     /// Cumulative response bytes (against [`ResourcePolicy::max_total_bytes`]).
@@ -281,15 +307,47 @@ impl FetchEngine {
         request_defaults: RequestDefaults,
     ) -> NetResult<Self> {
         let client = HttpClient::new(Arc::clone(&policy))?;
-        Ok(Self {
+        Ok(Self::with_shared(
+            SharedFetchParts {
+                client,
+                policy,
+                cache: Arc::new(Mutex::new(HttpCache::default())),
+                partition: CachePartition::default(),
+            },
+            cookies,
+            request_defaults,
+        ))
+    }
+
+    /// Builds an engine over a connection pool and cache someone else owns.
+    ///
+    /// The policy travels *inside* `parts`, with the client it was used to
+    /// build: the SSRF connector is baked into the client, so a pool built for
+    /// one policy must never serve another (ADR-0004 D1), and making that a
+    /// caller's responsibility would have been an invariant enforced only by a
+    /// doc comment.
+    #[must_use]
+    pub fn with_shared(
+        parts: SharedFetchParts,
+        cookies: Arc<Mutex<CookieJar>>,
+        request_defaults: RequestDefaults,
+    ) -> Self {
+        let SharedFetchParts {
+            client,
+            policy,
+            cache,
+            partition,
+        } = parts;
+        Self {
             client,
             policy,
             cookies,
-            cache: Arc::new(Mutex::new(HttpCache::default())),
+            cache,
+            partition,
             request_count: Arc::new(AtomicU32::new(0)),
             total_bytes: Arc::new(AtomicU64::new(0)),
             request_defaults,
-        })
+        }
     }
 
     /// Charges one request against the per-page request-count budget.
@@ -438,7 +496,7 @@ impl FetchEngine {
         .then(|| cache_request_parts(&url))
         .transpose()?;
         if let Some(parts) = &cache_parts {
-            let hit = lock_recovering(&self.cache).get(parts, now);
+            let hit = lock_recovering(&self.cache).get(self.partition, parts, now);
             if let Some(cached) = hit {
                 self.charge_bytes(cached.body.len() as u64)?;
                 return Ok(cached_outcome(cached, &url));
@@ -601,7 +659,13 @@ impl FetchEngine {
                 && !parts.headers.contains_key(VARY)
                 && let Some(res_parts) = decoded_response_parts(&parts)
             {
-                lock_recovering(&self.cache).store(req_parts, &res_parts, body_bytes.clone(), now);
+                lock_recovering(&self.cache).store(
+                    self.partition,
+                    req_parts,
+                    &res_parts,
+                    body_bytes.clone(),
+                    now,
+                );
             }
 
             // Decide what script may observe. An opaque (`no-cors`

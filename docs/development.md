@@ -44,7 +44,7 @@ cargo bench -p oxidepage-page --bench geometry_rmw
 cargo build --profile min-size -p oxidepage-cli   # -> target/min-size/oxidepage
 ```
 
-13.6 MiB vs. release's 19.6 MiB, for well under 1% wall-clock cost; build
+14.4 MiB vs. release's 20.6 MiB, for well under 1% wall-clock cost; build
 time roughly triples. The `min-size` profile keeps `opt-level = 3` and
 `panic = "unwind"` **on purpose**, and the reasons are load-bearing — read
 the comment above the profile in `Cargo.toml` before touching it. In short: a
@@ -79,7 +79,10 @@ crates/
 │                 # JS event dispatch, observers, console, globals
 ├── net           # fetch stack: SSRF connector, HTTP(S) client, cookies,
 │                 # cache, redirect/referrer pipeline, NetService bridge
-├── page          # event loop, timers, lifecycle, navigation, rAF, Page API
+├── page          # event loop, timers, lifecycle, navigation, rAF, command
+│                 # port, Page API
+├── engine        # Browser / BrowserContext / PageHandle: one thread per page,
+│                 # Send+Sync handles over command channels, shared net pool
 ├── cli           # `oxidepage eval | dump-layout | dump-display-list | render`
 ├── style         # stylo integration: stylesheet set, cascade, CSSOM ops
 ├── layout        # box tree, taffy driver, parley IFCs, geometry, transforms,
@@ -87,7 +90,7 @@ crates/
 ├── paint         # box tree → display list (backgrounds, borders, text, images)
 ├── raster-skia   # display list → tiny-skia CPU raster → RGBA / PNG / JPEG
 ├── export-pdf    # display list → paginated PDF (pdf-writer)
-├── raster-vello, engine, capi, cdp        # stubs for later phases
+├── raster-vello, capi, cdp                # stubs for later phases
 xtask/            # cargo xtask: vendoring, codegen, WPT / golden / reftest runners
 tests/
 ├── html5lib-tests/   # vendored html5lib tree-construction suite
@@ -98,10 +101,13 @@ docs/adr/         # architecture decision records
 ```
 
 `page` is the only crate that sees the whole stack — it is the natural entry
-point for embedding the engine as a Rust library. `bindings` deliberately
-does not depend on `paint`/`raster-skia`/`page`; the render cache lives on
-`Page`, not on `PageState`. `capi`, `cdp`, `engine`, and `raster-vello` are
-documented stubs for later phases.
+point for embedding one page as a Rust library, and what the CLI drives.
+`engine` sits above it for embedders that want several: it owns the page
+threads and hands out `Send + Sync` handles, so it depends on `page` and
+nothing depends on it (`cli` does **not**). `bindings` deliberately does not
+depend on `paint`/`raster-skia`/`page`; the render cache lives on `Page`, not
+on `PageState`. `capi`, `cdp`, and `raster-vello` are documented stubs for
+later phases.
 
 ## Adding a DOM interface or method
 

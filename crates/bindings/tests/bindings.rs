@@ -9,6 +9,7 @@ use oxidepage_bindings::{
     BindCx, ConsoleLevel, ConsoleMessage, DialogEvent, DialogRequest, DialogResponse, HostHooks,
     PageState, ScriptError, install,
 };
+use oxidepage_bindings::{PrivateStorageAreas, SharedStorage, StorageAreaKind};
 use oxidepage_dom::{ParseOptions, parse_document};
 use oxidepage_js::{JsEngine, JsRealm, JsValue, QuickJsEngine, RealmOptions};
 use oxidepage_net::{CookieJar, NetEvent, NetRequest, ResponseType};
@@ -23,6 +24,7 @@ struct TestHooks {
     /// auto-dismiss default applies once it runs out.
     dialog_answers: RefCell<std::collections::VecDeque<DialogResponse>>,
     dialogs: RefCell<Vec<DialogEvent>>,
+    storage: PrivateStorageAreas,
 }
 
 impl Default for TestHooks {
@@ -34,11 +36,18 @@ impl Default for TestHooks {
             next_id: std::cell::Cell::new(1),
             dialog_answers: RefCell::new(std::collections::VecDeque::new()),
             dialogs: RefCell::new(Vec::new()),
+            storage: PrivateStorageAreas::default(),
         }
     }
 }
 
 impl HostHooks for TestHooks {
+    /// One area per (kind, origin), private to this test page — the standalone
+    /// behavior, with no browsing context to share with.
+    fn storage(&self, kind: StorageAreaKind, origin: &str) -> SharedStorage {
+        self.storage.area(kind, origin)
+    }
+
     fn console_message(&self, message: ConsoleMessage) {
         self.console.borrow_mut().push(message);
     }

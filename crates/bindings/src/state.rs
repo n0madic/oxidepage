@@ -27,6 +27,8 @@ use crate::netdata::{
     FormDataData, HeadersData, PendingNet, RequestData, ResponseData, UrlData, UrlSearchParamsData,
     XhrData,
 };
+use crate::storage::{SharedStorage, StorageAreaKind, StorageHandle};
+use crate::window_open::{OpenWindowRequest, OpenedWindow, WindowProxyData};
 
 /// Host-object tags (the `tag` half of the engine payload).
 pub(crate) const TAG_NODE: u32 = 1;
@@ -76,6 +78,33 @@ pub trait HostHooks {
     fn get_cookie(&self, document_url: &str) -> String;
     /// `document.cookie` setter: stores one cookie from script.
     fn set_cookie(&self, document_url: &str, cookie: &str);
+
+    /// HTML's "window open steps": open a new browsing context.
+    ///
+    /// `None` is a **real answer**, not a stub — it is what a browser does with
+    /// a blocked popup, and `window.open` then returns `null`. It is also the
+    /// default, because a bare `Page` has no sibling to open: only a driver
+    /// that owns several pages ([`oxidepage-engine`]) can implement this.
+    ///
+    /// Called with JavaScript on the stack, so it takes and returns plain data
+    /// for the same reason [`HostHooks::run_dialog`] does.
+    ///
+    /// [`oxidepage-engine`]: https://docs.rs/oxidepage-engine
+    fn open_window(&self, request: OpenWindowRequest) -> Option<OpenedWindow> {
+        let _ = request;
+        None
+    }
+
+    /// The storage area backing `localStorage` / `sessionStorage` for the
+    /// document at `origin`.
+    ///
+    /// One method rather than six accessors on purpose: quota accounting and
+    /// sibling notification all live on [`StorageArea`], not smeared across
+    /// this trait — which has three implementations, so every method added
+    /// here is an edit in three places.
+    ///
+    /// [`StorageArea`]: crate::storage::StorageArea
+    fn storage(&self, kind: StorageAreaKind, origin: &str) -> SharedStorage;
 }
 
 /// Host data addressed by slab key (everything host-backed except nodes,
@@ -99,6 +128,10 @@ pub(crate) enum HostData {
     /// [`PageState::custom_elements`]).
     CustomElementRegistry,
     MediaQueryList(Rc<MediaQueryListData>),
+    /// A handle on a sibling browsing context (`window.open`'s return value).
+    WindowProxy(Rc<WindowProxyData>),
+    /// `localStorage` / `sessionStorage`.
+    Storage(Rc<StorageHandle>),
     /// An `AbortSignal`. The controller and its signal share one
     /// [`AbortSignalData`] behind an `Rc`.
     AbortSignal(Rc<AbortSignalData>),
@@ -609,6 +642,12 @@ pub(crate) struct JsRefs {
     /// (`AbortSignal.abort`/`timeout`, `performance.mark`/`measure`/entries).
     /// Called once after `register_interfaces` and `install_window`.
     pub install_late_globals: JsValue,
+    /// `(init) => new StorageEvent("storage", init)`, over the *pristine*
+    /// constructor so page script cannot change what the engine dispatches.
+    pub new_storage_event: JsValue,
+    /// `(fn) => undefined` — hands the proxy's `ownKeys` trap its native
+    /// one-pass key lister.
+    pub set_storage_keys: JsValue,
     /// `(callback) => void` — the engine's own microtask enqueuer, over a
     /// pristine resolved promise. Queues the mutation-observer compound
     /// microtask so it is *ordered against* promise reactions.
@@ -778,6 +817,13 @@ pub struct PageState {
     /// by a different node inheriting a stale cached wrapper.
     pub(crate) same_object: RefCell<HashMap<(u32, u32, &'static str), JsValue>>,
     pub(crate) hooks: Rc<dyn HostHooks>,
+    /// This document's identity among the subscribers of its storage areas, so
+    /// a `storage` event is delivered to the *other* documents and never back
+    /// to the one that wrote (HTML).
+    pub(crate) storage_subscriber: crate::storage::StorageSubscriber,
+    /// Every `Storage` handle installed in this realm, so a navigation can
+    /// re-point them all at the new origin's areas (see `refresh_storage`).
+    pub(crate) storage_handles: RefCell<Vec<Rc<StorageHandle>>>,
     /// In-flight `fetch`/XHR requests awaiting completion, keyed by id.
     pub(crate) pending_net: RefCell<HashMap<RequestId, PendingNet>>,
     /// Scroll containers whose position changed from script (`None` = the
@@ -935,6 +981,12 @@ pub struct PageState {
 }
 
 impl PageState {
+    /// This document's identity among the subscribers of its storage areas.
+    #[must_use]
+    pub fn storage_subscriber(&self) -> crate::storage::StorageSubscriber {
+        self.storage_subscriber
+    }
+
     pub fn new(
         dom: Rc<RefCell<DomTree>>,
         hooks: Rc<dyn HostHooks>,
@@ -969,6 +1021,8 @@ impl PageState {
             pending_consts: RefCell::new(Vec::new()),
             same_object: RefCell::new(HashMap::new()),
             hooks,
+            storage_subscriber: crate::storage::StorageSubscriber::next(),
+            storage_handles: RefCell::new(Vec::new()),
             pending_net: RefCell::new(HashMap::new()),
             pending_scroll_targets: RefCell::new(Vec::new()),
             pending_navigation: RefCell::new(VecDeque::new()),

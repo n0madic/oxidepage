@@ -17,6 +17,7 @@ use oxidepage_js::JsThrow;
 use crate::cx::BindCx;
 use crate::events::{EventData, EventTargetKey, dispatch_event};
 use crate::state::PendingNavigation;
+use crate::window_open::OpenWindowRequest;
 
 /// Dispatches one trusted event at `node` and reports whether it went
 /// un-cancelled (i.e. whether the default action should still run).
@@ -392,7 +393,33 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
             });
         return;
     }
-    if let Some(target) = target.filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("_self")) {
+    // An absent or empty `target` navigates the current context, and so do
+    // `_self`/`_parent`/`_top` — there is only one context here. All of them
+    // fall through to the in-place navigation below.
+    if let Some(target) =
+        target.filter(|t| !t.is_empty() && !crate::window_open::target_is_current(t))
+    {
+        // `_blank` opens a new browsing context — same hook, same plain-data
+        // contract as `window.open` (ADR-0027 D12). A *named* target does not:
+        // naming a target is how a page says "reuse one context for all these
+        // links", and with no named-target registry, opening a fresh page per
+        // click is a worse approximation than the single context this engine
+        // has. It would also change behavior once the popup cap was reached, so
+        // one link would act differently depending on how often it had already
+        // been clicked. Without a hook at all (a bare `Page`, the CLI) even
+        // `_blank` falls through to the warning below.
+        if target.eq_ignore_ascii_case("_blank") {
+            let opener_url = cx.state.dom.borrow().document_url().to_owned();
+            let opened = cx.state.hooks.open_window(OpenWindowRequest {
+                url: Some(resolved.clone()),
+                target: target.clone(),
+                features: String::new(),
+                opener_url,
+            });
+            if opened.is_some() {
+                return;
+            }
+        }
         cx.warn(&format!(
             "link activation: target=`{target}` is not implemented (one browsing context); \
              navigating in place"

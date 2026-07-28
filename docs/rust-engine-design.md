@@ -574,6 +574,16 @@ All JS reads answer from the fragment tree via one internal service:
 
 ### 5.12 Embedding API, C ABI, CLI
 
+> **Superseded in part by ADR-0027.** The parenthesis below — that the `Browser`
+> indirection "turned out unneeded" and that multiple pages share "nothing but the
+> process" — contradicted §7, and §7 is the side that won. It was accurate for the
+> scope it was written in (`page` as the whole embedding API: nothing about a page's
+> state needs to cross a thread boundary), but the things worth sharing between pages
+> are not page state at all — a connection pool, a response cache, a cookie jar, a
+> font scan. `crates/engine` now implements §7 as written, and is no longer a stub.
+> Constructing a `Page` directly stays fully supported and is what the CLI does; the
+> paragraph is kept for the history.
+
 The `page` crate's `Page` is already the embedding API in practice — a page-per-thread
 handle constructed directly, not through a separate `Browser` type (that indirection
 turned out unneeded: `Page::new` owns its own realm and net access, and multiple pages
@@ -600,8 +610,13 @@ let pdf: Vec<u8> = page.print_to_pdf();
   embedder that wants multiple pages runs one per OS thread, each with its own `Page`.
   This is simpler than the originally sketched command-channel handle, and was possible
   because nothing about the page's state needs to cross a thread boundary once created.
-- **`capi`**, **`cdp`**, **`engine`** (a higher-level façade over `page`, if one proves
-  necessary) remain documented stub crates — Phase 8/9 in §10, not started.
+  *(The one-page-per-thread half is permanent — rquickjs is pinned without `parallel`
+  and stylo keeps thread-locals. The command-channel handle came back anyway, one level
+  up, because a protocol server needs to command a page **while it runs**: ADR-0027 D1.)*
+- **`engine`** is the `Send + Sync` façade over those threads — `Browser` →
+  `BrowserContext` → `PageHandle`, per §7 and ADR-0027. Landed; no longer a stub.
+- **`capi`** and **`cdp`** remain documented stub crates — the rest of Phase 8, and
+  Phase 9, in §10.
 - **`cli`** (`oxidepage`, `crates/cli`): `oxidepage eval <file|url> [expr]`,
   `dump-layout`, `dump-display-list`, and `render -o out.{png,pdf,html}` (format inferred
   from the extension, or set with `--format`; folds what this section originally called

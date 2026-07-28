@@ -1,20 +1,36 @@
 //! An in-memory HTTP cache (design doc §5.5), RFC 9111 semantics via
 //! `http-cache-semantics`.
 //!
-//! Keyed by `(method, URL)`; `Vary` is honored through the cache policy's
-//! request matching. Error responses are never stored. The cache is a pure
-//! performance optimization — correctness never depends on it — so a stale
+//! Keyed by `(partition, method, URL)`; `Vary` is honored through the cache
+//! policy's request matching. Error responses are never stored. The cache is a
+//! pure performance optimization — correctness never depends on it — so a stale
 //! entry is simply a miss (no conditional revalidation in Phase 3).
+//!
+//! One cache is shared by a whole [`Browser`](../../oxidepage_engine) (design
+//! §7), so the key carries a [`CachePartition`]: a browsing context must not be
+//! able to observe another's traffic through cache timing. A standalone
+//! `NetService` uses the default partition and behaves exactly as before
+//! (ADR-0027 D7).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::SystemTime;
 
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode, Version};
 use http_cache_semantics::{BeforeRequest, CachePolicy};
 
-/// Default entry cap before oldest-accessed eviction.
-const DEFAULT_CAP: usize = 256;
+/// Default entry cap before oldest-accessed eviction, for a cache one page
+/// owns privately.
+pub const DEFAULT_CAP: usize = 256;
+
+/// The isolation key of a cache entry.
+///
+/// A [`HttpCache`] shared across browsing contexts would otherwise let one
+/// context probe another's history through hit/miss timing. Each
+/// `BrowserContext` gets its own partition; a standalone `NetService` uses
+/// [`CachePartition::default`], so nothing changes for a single page.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
+pub struct CachePartition(pub u64);
 
 /// A response reconstructed from the cache.
 pub struct CachedResponse {
@@ -35,7 +51,14 @@ struct Entry {
 
 /// An LRU-ish in-memory response cache.
 pub struct HttpCache {
-    entries: HashMap<String, Entry>,
+    entries: HashMap<(CachePartition, String), Entry>,
+    /// `last_access` → key, so eviction pops the oldest in `O(log n)`.
+    ///
+    /// A plain `min_by_key` over `entries` was fine while each page had its own
+    /// 256-entry cache; once one cache is shared by every page of every context
+    /// and sized for it, that scan runs on every store past the cap while
+    /// holding the lock each of those pages does its lookups through.
+    by_access: BTreeMap<u64, (CachePartition, String)>,
     cap: usize,
     tick: u64,
 }
@@ -51,23 +74,32 @@ impl HttpCache {
     pub fn new(cap: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            by_access: BTreeMap::new(),
             cap,
             tick: 0,
         }
     }
 
-    fn key(req: &http::request::Parts) -> String {
-        format!("{} {}", req.method, req.uri)
+    fn key(partition: CachePartition, req: &http::request::Parts) -> (CachePartition, String) {
+        (partition, format!("{} {}", req.method, req.uri))
     }
 
-    /// Returns a fresh cached response for `req`, if one applies.
-    pub fn get(&mut self, req: &http::request::Parts, now: SystemTime) -> Option<CachedResponse> {
-        let key = Self::key(req);
+    /// Returns a fresh cached response for `req` within `partition`, if one
+    /// applies.
+    pub fn get(
+        &mut self,
+        partition: CachePartition,
+        req: &http::request::Parts,
+        now: SystemTime,
+    ) -> Option<CachedResponse> {
+        let key = Self::key(partition, req);
         let tick = self.next_tick();
         let entry = self.entries.get_mut(&key)?;
         match entry.policy.before_request(req, now) {
             BeforeRequest::Fresh(_) => {
+                self.by_access.remove(&entry.last_access);
                 entry.last_access = tick;
+                self.by_access.insert(tick, key.clone());
                 Some(CachedResponse {
                     status: entry.status,
                     version: entry.version,
@@ -80,9 +112,10 @@ impl HttpCache {
         }
     }
 
-    /// Stores a response if it is cacheable and not an error.
+    /// Stores a response in `partition` if it is cacheable and not an error.
     pub fn store(
         &mut self,
+        partition: CachePartition,
         req: &http::request::Parts,
         res: &http::response::Parts,
         body: Bytes,
@@ -98,7 +131,11 @@ impl HttpCache {
             return;
         }
         let tick = self.next_tick();
-        let key = Self::key(req);
+        let key = Self::key(partition, req);
+        if let Some(previous) = self.entries.get(&key) {
+            self.by_access.remove(&previous.last_access);
+        }
+        self.by_access.insert(tick, key.clone());
         self.entries.insert(
             key,
             Entry {
@@ -120,16 +157,13 @@ impl HttpCache {
 
     fn evict(&mut self) {
         while self.entries.len() > self.cap {
-            if let Some(key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, e)| e.last_access)
-                .map(|(k, _)| k.clone())
-            {
-                self.entries.remove(&key);
-            } else {
+            let Some((&oldest, _)) = self.by_access.iter().next() else {
                 break;
-            }
+            };
+            let Some(key) = self.by_access.remove(&oldest) else {
+                break;
+            };
+            self.entries.remove(&key);
         }
     }
 
@@ -174,12 +208,15 @@ mod tests {
         let mut cache = HttpCache::default();
         let now = SystemTime::now();
         cache.store(
+            CachePartition::default(),
             &req("http://x/a"),
             &res("max-age=60"),
             Bytes::from_static(b"hi"),
             now,
         );
-        let got = cache.get(&req("http://x/a"), now).expect("fresh hit");
+        let got = cache
+            .get(CachePartition::default(), &req("http://x/a"), now)
+            .expect("fresh hit");
         assert_eq!(&got.body[..], b"hi");
     }
 
@@ -188,13 +225,18 @@ mod tests {
         let mut cache = HttpCache::default();
         let now = SystemTime::now();
         cache.store(
+            CachePartition::default(),
             &req("http://x/b"),
             &res("no-store"),
             Bytes::from_static(b"hi"),
             now,
         );
         assert_eq!(cache.len(), 0);
-        assert!(cache.get(&req("http://x/b"), now).is_none());
+        assert!(
+            cache
+                .get(CachePartition::default(), &req("http://x/b"), now)
+                .is_none()
+        );
     }
 
     #[test]
@@ -202,13 +244,54 @@ mod tests {
         let mut cache = HttpCache::default();
         let now = SystemTime::now();
         cache.store(
+            CachePartition::default(),
             &req("http://x/c"),
             &res("max-age=1"),
             Bytes::from_static(b"hi"),
             now,
         );
         let later = now + std::time::Duration::from_secs(5);
-        assert!(cache.get(&req("http://x/c"), later).is_none());
+        assert!(
+            cache
+                .get(CachePartition::default(), &req("http://x/c"), later)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn partitions_do_not_share_entries() {
+        let mut cache = HttpCache::default();
+        let now = SystemTime::now();
+        let (a, b) = (CachePartition(1), CachePartition(2));
+        cache.store(
+            a,
+            &req("http://x/shared"),
+            &res("max-age=60"),
+            Bytes::from_static(b"from-a"),
+            now,
+        );
+        // The same URL in another partition is a miss, however fresh the entry.
+        assert!(cache.get(b, &req("http://x/shared"), now).is_none());
+        let hit = cache.get(a, &req("http://x/shared"), now).expect("own hit");
+        assert_eq!(&hit.body[..], b"from-a");
+
+        // ... and a store in `b` does not overwrite `a`.
+        cache.store(
+            b,
+            &req("http://x/shared"),
+            &res("max-age=60"),
+            Bytes::from_static(b"from-b"),
+            now,
+        );
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            &cache.get(a, &req("http://x/shared"), now).unwrap().body[..],
+            b"from-a"
+        );
+        assert_eq!(
+            &cache.get(b, &req("http://x/shared"), now).unwrap().body[..],
+            b"from-b"
+        );
     }
 
     #[test]
@@ -223,6 +306,7 @@ mod tests {
             .into_parts()
             .0;
         cache.store(
+            CachePartition::default(),
             &req("http://x/d"),
             &err_res,
             Bytes::from_static(b"err"),

@@ -2040,7 +2040,10 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.finish_interface("DOMRectList", &proto_dom_rect_list, CtorSpec::Illegal)?;
 
     let proto_window = cx.begin_interface("Window", Some("EventTarget"))?;
+    cx.define_getter(&proto_window, "closed", gen_window_get_closed)?;
+    cx.define_method(&proto_window, "close", 0, gen_window_close)?;
     cx.define_method(&proto_window, "matchMedia", 1, gen_window_match_media)?;
+    cx.define_method(&proto_window, "open", 0, gen_window_open)?;
     cx.define_method(&proto_window, "alert", 0, gen_window_alert)?;
     cx.define_method(&proto_window, "confirm", 0, gen_window_confirm)?;
     cx.define_method(&proto_window, "prompt", 0, gen_window_prompt)?;
@@ -4857,6 +4860,27 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
             construct: gen_submit_event_constructor,
         },
     )?;
+
+    let proto_storage = cx.begin_interface("Storage", None)?;
+    cx.define_getter(&proto_storage, "length", gen_storage_get_length)?;
+    cx.define_method(&proto_storage, "key", 1, gen_storage_key)?;
+    cx.define_method(&proto_storage, "getItem", 1, gen_storage_get_item)?;
+    cx.define_method(&proto_storage, "setItem", 2, gen_storage_set_item)?;
+    cx.define_method(&proto_storage, "removeItem", 1, gen_storage_remove_item)?;
+    cx.define_method(&proto_storage, "clear", 0, gen_storage_clear)?;
+    cx.finish_interface("Storage", &proto_storage, CtorSpec::Illegal)?;
+
+    let proto_window_proxy = cx.begin_interface("WindowProxy", None)?;
+    cx.define_getter(&proto_window_proxy, "closed", gen_window_proxy_get_closed)?;
+    cx.define_method(&proto_window_proxy, "close", 0, gen_window_proxy_close)?;
+    cx.define_method(&proto_window_proxy, "focus", 0, gen_window_proxy_focus)?;
+    cx.define_accessor(
+        &proto_window_proxy,
+        "location",
+        gen_window_proxy_get_location,
+        gen_window_proxy_set_location,
+    )?;
+    cx.finish_interface("WindowProxy", &proto_window_proxy, CtorSpec::Illegal)?;
 
     let proto_media_query_list = cx.begin_interface("MediaQueryList", Some("EventTarget"))?;
     cx.define_getter(
@@ -9187,10 +9211,29 @@ fn gen_dom_rect_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
     imp::dom_rect_list::item(cx, this, a0)
 }
 
+fn gen_window_get_closed(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    Ok(JsValue::Bool(imp::window::closed(cx, this)?))
+}
+
+fn gen_window_close(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    imp::window::close(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_window_match_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window(&call.this)?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::window::match_media(cx, this, a0)
+}
+
+fn gen_window_open(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    let a0 = cx.arg_dom_string_or(call, 0, "")?;
+    let a1 = cx.arg_dom_string_or(call, 1, "_blank")?;
+    let a2 = cx.arg_dom_string_or(call, 2, "")?;
+    imp::window::open(cx, this, a0, a1, a2)
 }
 
 fn gen_window_alert(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
@@ -14584,6 +14627,79 @@ fn gen_submit_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::submit_event::constructor(cx, call, a0, a1)
+}
+
+fn gen_storage_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_storage(&call.this)?;
+    Ok(JsValue::Number(imp::storage::length(cx, this)?))
+}
+
+fn gen_storage_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_storage(&call.this)?;
+    let a0 = cx.arg_u32(call, 0)?;
+    Ok(match imp::storage::key(cx, this, a0)? {
+        Some(s) => JsValue::String(s),
+        None => JsValue::Null,
+    })
+}
+
+fn gen_storage_get_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_storage(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    Ok(match imp::storage::get_item(cx, this, a0)? {
+        Some(s) => JsValue::String(s),
+        None => JsValue::Null,
+    })
+}
+
+fn gen_storage_set_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_storage(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_dom_string(call, 1)?;
+    imp::storage::set_item(cx, this, a0, a1)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_storage_remove_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_storage(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::storage::remove_item(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_storage_clear(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_storage(&call.this)?;
+    imp::storage::clear(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_window_proxy_get_closed(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    Ok(JsValue::Bool(imp::window_proxy::closed(cx, this)?))
+}
+
+fn gen_window_proxy_close(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    imp::window_proxy::close(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_window_proxy_focus(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    imp::window_proxy::focus(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_window_proxy_get_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    imp::window_proxy::location(cx, this)
+}
+
+fn gen_window_proxy_set_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    let a0 = call.arg(0);
+    imp::window_proxy::set_location(cx, this, a0)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_media_query_list_get_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

@@ -1497,6 +1497,12 @@ dependencies = [
 [[package]]
 name = "oxidepage-engine"
 version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "oxidepage-net",
+ "oxidepage-page",
+ "tokio",
+]
 
 [[package]]
 name = "oxidepage-export-pdf"

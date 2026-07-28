@@ -970,103 +970,33 @@
             });
         }
 
-        // === Web Storage (Storage / localStorage / sessionStorage) ===
-        // In-memory, per page (no persistence in a headless engine). The members
-        // live on `Storage.prototype`, exactly as in browsers: script brand-checks
-        // with `localStorage instanceof Storage` (VueUse's `useStorage` does, and
-        // a bare `localStorage` object makes it throw a ReferenceError) and
-        // analytics libraries monkey-patch `Storage.prototype.setItem`, so
-        // per-instance closures would not do. The named-property surface
-        // (`s.foo`, `delete s.foo`, `Object.keys(s)`) comes from a Proxy over a
-        // backing Map. `Storage` has no `[LegacyOverrideBuiltIns]`, so anything on
-        // the prototype chain wins over a stored key of the same name —
-        // `localStorage.length` is the item count even after `setItem("length", …)`.
-        if (globalThis.Storage === undefined) {
-            const TOKEN = {};
-            // Keyed by both the Proxy and its target, so the members work whether
-            // `this` arrives as `localStorage` (the Proxy) or as the raw instance
-            // (`Storage.prototype.getItem.call(target)`).
-            const backing = new WeakMapCtor();
-            const storeOf = (receiver) => {
-                const store = weakMapGet.call(backing, receiver);
-                if (store === undefined) throw new TypeError("Illegal invocation");
-                return store;
-            };
-            class Storage {
-                constructor(token) {
-                    if (token !== TOKEN) throw new TypeError("Illegal constructor");
-                }
-                get length() { return storeOf(this).size; }
-                key(index) {
-                    const keys = arrayFrom(storeOf(this).keys());
-                    const k = keys[index >>> 0];
-                    return k === undefined ? null : k;
-                }
-                getItem(key) {
-                    const v = mapGet.call(storeOf(this), StringCtor(key));
-                    return v === undefined ? null : v;
-                }
-                setItem(key, value) {
-                    mapSet.call(storeOf(this), StringCtor(key), StringCtor(value));
-                }
-                removeItem(key) { mapDelete.call(storeOf(this), StringCtor(key)); }
-                clear() { storeOf(this).clear(); }
-            }
-            reflectDefineProperty(Storage.prototype, Symbol.toStringTag,
-                { value: "Storage", writable: false, enumerable: false, configurable: true });
-            defGlobal("Storage", Storage);
-
-            const makeStorage = () => {
-                const store = new MapCtor();
-                const target = new Storage(TOKEN);
-                const proxy = new Proxy(target, {
-                    get(t, prop, receiver) {
-                        if (typeof prop === "symbol" || reflectHas(t, prop)) {
-                            return reflectGet(t, prop, receiver);
-                        }
-                        const v = mapGet.call(store, prop);
-                        return v === undefined ? undefined : v;
-                    },
-                    set(t, prop, value) {
-                        // A member name is never shadowed by a stored key.
-                        if (typeof prop === "symbol" || reflectHas(t, prop)) return true;
-                        mapSet.call(store, StringCtor(prop), StringCtor(value));
-                        return true;
-                    },
-                    has(t, prop) {
-                        if (typeof prop === "symbol" || reflectHas(t, prop)) return true;
-                        return mapHas.call(store, prop);
-                    },
-                    deleteProperty(t, prop) {
-                        if (typeof prop !== "symbol") mapDelete.call(store, StringCtor(prop));
-                        return true;
-                    },
-                    ownKeys() { return arrayFrom(store.keys()); },
-                    getOwnPropertyDescriptor(t, prop) {
-                        if (typeof prop !== "symbol" && mapHas.call(store, prop)) {
-                            return { value: mapGet.call(store, prop), writable: true, enumerable: true, configurable: true };
-                        }
-                        return reflectGetOwnPropertyDescriptor(t, prop);
-                    },
-                });
-                weakMapSet.call(backing, target, store);
-                weakMapSet.call(backing, proxy, store);
-                return proxy;
-            };
-            for (const name of ["localStorage", "sessionStorage"]) {
-                if (globalThis[name] === undefined) {
-                    reflectDefineProperty(globalThis, name, {
-                        value: makeStorage(), writable: false, enumerable: true, configurable: true,
-                    });
-                }
-            }
-        }
+        // === Web Storage: the named-property surface ===
+        // `Storage`, `localStorage` and `sessionStorage` are installed from Rust
+        // (ADR-0027 D13) — the data lives in a `StorageArea` a whole browsing
+        // context can share, and `Storage` is a real IDL interface, so
+        // `localStorage instanceof Storage` (VueUse's `useStorage` brand-checks)
+        // and monkey-patching `Storage.prototype.setItem` (every analytics
+        // wrapper) work because that is genuinely the prototype in use.
+        //
+        // What stays here is the part WebIDL calls a named getter/setter/deleter
+        // and this codegen has no way to express: `s.foo`, `delete s.foo`,
+        // `Object.keys(s)`. It is a Proxy *over the Rust-backed instance*, so
+        // every trap goes through the same `getItem`/`setItem`/`key` the methods
+        // do — one source of truth, no shadow copy to drift.
+        //
+        // `Storage` has no `[LegacyOverrideBuiltIns]`, so anything on the
+        // prototype chain wins over a stored key of the same name:
+        // `localStorage.length` is the item count even after
+        // `setItem("length", …)`.
+        wrapStorageGlobals();
 
         // === StorageEvent ===
-        // Constructible by script — VueUse mints one on every `useStorage` write —
-        // which is the whole reason it exists here. The engine never *fires* one:
-        // a storage event notifies the *other* documents of the origin, and a
-        // headless page has none, so there is no one to deliver it to.
+        // Constructible by script (VueUse mints one on every `useStorage` write)
+        // *and* fired by the engine: when a sibling page of the same browsing
+        // context and origin writes, `dispatch_storage_event` mints one through
+        // this constructor and dispatches it at the window (ADR-0027 D13). Still
+        // a bootstrap class rather than a generated interface because it carries
+        // no host state — it is an `Event` subclass with five readonly fields.
         if (globalThis.StorageEvent === undefined && typeof globalThis.Event === "function") {
             const orNull = (v) => v === undefined || v === null ? null : StringCtor(v);
             class StorageEvent extends globalThis.Event {
@@ -1090,6 +1020,9 @@
                 { value: "StorageEvent", writable: false, enumerable: false, configurable: true });
             defGlobal("StorageEvent", StorageEvent);
         }
+        // Capture whatever `StorageEvent` ended up global, before page script
+        // can replace it — this is what the engine dispatches through.
+        captureStorageEvent();
 
         // === NodeIterator / TreeWalker ===
         // Pure-JS DOM traversal over the existing Node navigation accessors,
@@ -1440,13 +1373,99 @@
         });
     };
 
+    // Wraps the Rust-installed `localStorage`/`sessionStorage` in the Proxy that
+    // provides their named-property surface. Called once, from
+    // `installLateGlobals`: a navigation re-points the Rust-side handle these
+    // wrap rather than replacing them, so the globals never need redefining.
+    // `storageKeys(store)` is a native helper passed in from Rust, never
+    // exposed as a property: it returns the whole key list in one pass.
+    let storageKeys = null;
+    const setStorageKeys = (fn) => { storageKeys = fn; };
+
+    const wrapStorageGlobals = () => {
+        // Pristine references to the host methods, captured once. The traps
+        // implement the *named property* surface, which in a browser is defined
+        // directly on the storage object and is independent of `getItem`/
+        // `setItem`. Routing the traps through the patchable prototype would
+        // make `Storage.prototype.getItem = function (k) { return this[k]; }` —
+        // a plausible polyfill — recurse into the `get` trap until the stack
+        // blows, and would make a write-counting wrapper double-count
+        // `localStorage.x = 1`.
+        const StorageProto = globalThis.Storage && globalThis.Storage.prototype;
+        if (!StorageProto) return;
+        const rawGet = StorageProto.getItem;
+        const rawSet = StorageProto.setItem;
+        const rawRemove = StorageProto.removeItem;
+        for (const name of ["localStorage", "sessionStorage"]) {
+            const backing = globalThis[name];
+            if (backing === undefined || backing === null) continue;
+            const proxy = new Proxy(backing, {
+                get(t, prop, receiver) {
+                    if (typeof prop === "symbol" || reflectHas(t, prop)) {
+                        return reflectGet(t, prop, receiver);
+                    }
+                    const v = rawGet.call(t, prop);
+                    return v === null ? undefined : v;
+                },
+                set(t, prop, value) {
+                    // A member name is never shadowed by a stored key.
+                    if (typeof prop === "symbol" || reflectHas(t, prop)) return true;
+                    rawSet.call(t, StringCtor(prop), StringCtor(value));
+                    return true;
+                },
+                has(t, prop) {
+                    if (typeof prop === "symbol" || reflectHas(t, prop)) return true;
+                    return rawGet.call(t, prop) !== null;
+                },
+                deleteProperty(t, prop) {
+                    if (typeof prop !== "symbol") rawRemove.call(t, StringCtor(prop));
+                    return true;
+                },
+                // One native call, not `length` + n × `key(i)`: the backing
+                // store is a BTreeMap, so `key(i)` is a walk from the start and
+                // takes the area's lock each time — enumerating 5000 keys that
+                // way is ~12.5M steps and 5000 lock round trips on a mutex a
+                // whole browsing context contends on.
+                ownKeys(t) {
+                    return storageKeys(t);
+                },
+                getOwnPropertyDescriptor(t, prop) {
+                    if (typeof prop !== "symbol") {
+                        const v = rawGet.call(t, prop);
+                        if (v !== null) {
+                            return { value: v, writable: true, enumerable: true, configurable: true };
+                        }
+                    }
+                    return reflectGetOwnPropertyDescriptor(t, prop);
+                },
+            });
+            reflectDefineProperty(globalThis, name, {
+                value: proxy, writable: false, enumerable: true, configurable: true,
+            });
+        }
+    };
+
+    // `new StorageEvent("storage", init)` from Rust: the engine fires one at a
+    // page when a *sibling* of the same context and origin writes (ADR-0027
+    // D13). Captured here so a page that replaces the global `StorageEvent`
+    // cannot change what the engine dispatches.
+    // Captured at install time, not read from the global on each dispatch:
+    // `defGlobal` leaves `StorageEvent` writable, so resolving it lazily would
+    // let page script substitute its own constructor and have it invoked from a
+    // Rust-driven dispatch point. `installLateGlobals` fills this in, because
+    // that is where `StorageEvent` is defined.
+    let StorageEventCtor = null;
+    const captureStorageEvent = () => { StorageEventCtor = globalThis.StorageEvent; };
+    const newStorageEvent = (init) => new StorageEventCtor("storage", init);
+
     return {
         newWrapperMap, cacheGet, cacheSet,
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
         setToStringTag, makeDomException, structuredClone,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
         freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
-        ceConstruct, installLateGlobals, enqueueMicrotask,
+        ceConstruct, installLateGlobals, enqueueMicrotask, newStorageEvent,
+        setStorageKeys,
         objectPrototype: Object.prototype,
     };
 })()

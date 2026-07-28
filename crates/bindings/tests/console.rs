@@ -11,6 +11,7 @@ use oxidepage_bindings::{
     BindCx, ConsoleLevel, ConsoleMessage, DialogRequest, DialogResponse, HostHooks,
     PREVIEW_MAX_ENTRIES, PREVIEW_MAX_STRING, PageState, ScriptError, ValuePreview, install,
 };
+use oxidepage_bindings::{PrivateStorageAreas, SharedStorage, StorageAreaKind};
 use oxidepage_dom::{ParseOptions, parse_document};
 use oxidepage_js::{JsEngine, JsRealm, JsValue, PromiseState, QuickJsEngine, RealmOptions};
 use oxidepage_net::NetRequest;
@@ -20,9 +21,16 @@ struct Hooks {
     console: RefCell<Vec<ConsoleMessage>>,
     errors: RefCell<Vec<ScriptError>>,
     next_id: std::cell::Cell<u32>,
+    storage: PrivateStorageAreas,
 }
 
 impl HostHooks for Hooks {
+    /// One area per (kind, origin), private to this test page — the standalone
+    /// behavior, with no browsing context to share with.
+    fn storage(&self, kind: StorageAreaKind, origin: &str) -> SharedStorage {
+        self.storage.area(kind, origin)
+    }
+
     fn console_message(&self, message: ConsoleMessage) {
         self.console.borrow_mut().push(message);
     }

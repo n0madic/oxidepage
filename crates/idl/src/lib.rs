@@ -188,6 +188,8 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         "FontFaceSet" => "this_font_face_set",
         "CustomElementRegistry" => "this_custom_element_registry",
         "MediaQueryList" => "this_media_query_list",
+        "WindowProxy" => "this_window_proxy",
+        "Storage" => "this_storage",
         "AbortController" => "this_abort_controller",
         "AbortSignal" => "this_abort_signal",
         "ResizeObserver" => "this_resize_observer",

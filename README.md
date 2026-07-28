@@ -197,6 +197,48 @@ for dialog in page.drain_dialog_events() {
 }
 ```
 
+### Several pages at once
+
+A `Page` runs on the thread that built it and never leaves it. When you want
+more than one, the `engine` crate runs each on its own thread and gives you
+`Send + Sync` handles to them, grouped into contexts — pages of one context
+share cookies and `localStorage`, pages of different contexts share neither,
+and the whole browser shares one connection pool and HTTP cache:
+
+```toml
+[dependencies]
+oxidepage-engine = { git = "https://github.com/n0madic/oxidepage" }
+```
+
+```rust
+use oxidepage_engine::{Browser, BrowserOptions, NewPageOptions, WaitUntil};
+
+let browser = Browser::new(BrowserOptions::default())?;
+let context = browser.default_context();      // or browser.new_context(..)
+let page = context.new_page(NewPageOptions::default())?;
+
+// The outer result is the engine's — the page thread answered, or it didn't.
+// The inner one is the page's own: a navigation that fails is not an engine
+// error.
+page.navigate("https://example.com", WaitUntil::Load)?.expect("navigated");
+let title = page.eval_to_string("document.title")?.expect("evaluated");
+
+// Console output, errors, dialogs and navigation milestones are pushed as
+// they happen, instead of being polled for.
+for event in page.events().try_iter() {
+    println!("{event:?}");
+}
+
+browser.close();
+```
+
+Calls on a handle are answered *by* the page, so anything the typed methods
+don't cover you can run on the page thread yourself:
+
+```rust
+let url = page.with(|p| p.dom().document_url().to_owned())?;
+```
+
 ## Documentation
 
 - [`docs/development.md`](docs/development.md) — build/test/lint commands

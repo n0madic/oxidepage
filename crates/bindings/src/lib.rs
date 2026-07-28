@@ -23,6 +23,8 @@ mod netdata;
 pub mod preview;
 mod script;
 pub mod state;
+pub mod storage;
+pub mod window_open;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -49,6 +51,11 @@ pub use state::{
     HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState, PendingNavigation,
     ReadyState, ScreenData, SessionHistory, TimingMilestone,
 };
+pub use storage::{
+    MAX_STORAGE_ORIGINS, PrivateStorageAreas, QuotaExceeded, STORAGE_QUOTA_BYTES, SharedStorage,
+    StorageArea, StorageAreaKind, StorageNotification, StorageSubscriber, evict_unreferenced_areas,
+};
+pub use window_open::{OpenWindowRequest, OpenedWindow, WindowOp, target_is_current};
 
 use netdata::{HeadersData, PendingNet, PendingResponse, ResponseData};
 use state::{AbortSignalData, HostData, JsRefs, TAG_NODE, TAG_SLAB};
@@ -124,6 +131,9 @@ pub fn install_with_profiles<R: JsRealm>(
         // `crypto`, same-origin URL updates for `history`). Installed before
         // `installLateGlobals`, which captures and deletes them.
         install_native_helpers(&cx).map_err(engine_error)?;
+        // `localStorage`/`sessionStorage`, before `installLateGlobals` wraps
+        // each in the `Proxy` that gives it its named-property surface.
+        install_storage(&cx).map_err(engine_error)?;
         // Globals that need the generated classes and other globals in place
         // (`AbortSignal.abort`/`timeout`, `performance` entries).
         install_late_globals(&cx).map_err(engine_error)?;
@@ -194,6 +204,8 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), J
         object_prototype,
         ce_construct: get("ceConstruct")?,
         install_late_globals: get("installLateGlobals")?,
+        new_storage_event: get("newStorageEvent")?,
+        set_storage_keys: get("setStorageKeys")?,
         enqueue_microtask: get("enqueueMicrotask")?,
         mutation_notify: JsValue::Object(scope.new_function(
             "notifyMutationObservers",
@@ -204,11 +216,204 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), J
     Ok(())
 }
 
-/// Global scope: window/self/document/location, EventTarget-ness of the
-/// window, console, and timers.
-/// WebIDL: an interface with an indexed property getter but no `iterable<>`
-/// declaration still exposes `@@iterator` = %Array.prototype.values% (and
-/// nothing else). Sites spread these (`[...element.attributes]` in Swiper).
+/// Installs `localStorage` and `sessionStorage` as real `Storage` instances
+/// (ADR-0027 D13).
+///
+/// The area comes from the embedder, keyed by the document's origin — which is
+/// how every page of one browsing context at one origin ends up sharing one
+/// `localStorage`. `bootstrap.js` then wraps each of these in the `Proxy` that
+/// provides the named-property surface.
+fn install_storage(cx: &BindCx<'_>) -> Result<(), JsThrow> {
+    let global = {
+        let js = cx.state.js.borrow();
+        js.as_ref().expect("bootstrap installed").global.clone()
+    };
+    install_storage_keys_helper(cx)?;
+    let origin = storage_origin(cx);
+    for kind in [StorageAreaKind::Local, StorageAreaKind::Session] {
+        let handle = Rc::new(storage::StorageHandle::new(
+            cx.state.hooks.storage(kind, &origin),
+            origin.clone(),
+            kind,
+            cx.state.storage_subscriber(),
+        ));
+        cx.state
+            .storage_handles
+            .borrow_mut()
+            .push(Rc::clone(&handle));
+        let value = cx.new_storage(handle)?;
+        cx.scope
+            .define_property(
+                &global,
+                kind.global_name(),
+                PropertyDef::Value {
+                    value: &value,
+                    writable: false,
+                    enumerable: true,
+                    // The bootstrap replaces this with a `Proxy` over it.
+                    configurable: true,
+                },
+            )
+            .map_err(JsThrow::from)?;
+    }
+    Ok(())
+}
+
+/// Gives the storage proxy's `ownKeys` trap a native one-pass key lister.
+///
+/// A captured function, never a property: the trap needs the whole key list at
+/// once. Called once per realm, from `install_storage`; a navigation
+/// re-points the existing handles rather than reinstalling anything.
+fn install_storage_keys_helper(cx: &BindCx<'_>) -> Result<(), JsThrow> {
+    let setter = {
+        let js = cx.state.js.borrow();
+        js.as_ref()
+            .map(|refs| refs.set_storage_keys.clone())
+            .ok_or_else(|| JsThrow::Type("bootstrap not installed".into()))?
+    };
+    let lister = cx
+        .scope
+        .new_function("storageKeys", 1, cx::native(storage_keys_glue))
+        .map_err(JsThrow::from)?;
+    cx.scope
+        .call(&setter, &JsValue::Undefined, &[JsValue::Object(lister)])
+        .map_err(JsThrow::from)?;
+    Ok(())
+}
+
+fn storage_keys_glue(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = call.args.first().unwrap_or(&JsValue::Undefined);
+    let handle = cx.this_storage(this)?;
+    let keys = handle.keys();
+    let values: Vec<JsValue> = keys.iter().cloned().map(JsValue::String).collect();
+    Ok(JsValue::Object(
+        cx.scope.new_array(&values).map_err(JsThrow::from)?,
+    ))
+}
+
+/// The key a document's storage areas are looked up by.
+///
+/// The **one** place this rule lives: the wrapper installation and the page's
+/// sibling subscription both go through it, and two documents share an area iff
+/// they agree here. A second copy of the rule is how a page ends up writing to
+/// one area while listening on another.
+///
+/// An opaque-origin document (`about:blank`, `data:`) shares with **nobody**,
+/// so its key carries `opaque_token` — a process-unique number — rather than
+/// its URL. Keying opaque documents by URL would give every `about:blank` page
+/// of a context one shared `localStorage`, which is the exact opposite of what
+/// an opaque origin means.
+///
+/// The token is per page, not per document, so two successive `about:blank`
+/// documents in one page share an area where the spec would mint a fresh
+/// opaque origin for each. That is a deliberate simplification: the boundary
+/// that matters is between pages.
+#[must_use]
+pub fn storage_origin_of(document_url: &str, opaque_token: u64) -> String {
+    match url::Url::parse(document_url) {
+        Ok(url) if url.origin().is_tuple() => url.origin().ascii_serialization(),
+        _ => format!("opaque:{opaque_token}"),
+    }
+}
+
+fn storage_origin(cx: &BindCx<'_>) -> String {
+    storage_origin_of(
+        cx.state.dom.borrow().document_url(),
+        cx.state.storage_subscriber().id(),
+    )
+}
+
+/// Re-points `localStorage` / `sessionStorage` at the areas of the document's
+/// *current* origin (ADR-0027 D13).
+///
+/// The realm outlives a navigation, so without this a page that moves to
+/// another origin would keep reading and writing the previous origin's data —
+/// a real bug the JS-`Map` implementation had, and the reason storage moved to
+/// Rust in the first place. Called at every commit.
+/// Takes `&PageState`, not `&BindCx`, on purpose: nothing here needs a JS
+/// scope, and entering one would not be free. `Page::with_cx` arms the script
+/// budget and runs `sync_named_properties`, which walks the document's id index
+/// and mutates the global object — at a navigation commit that would sync the
+/// *new* URL's realm against the *outgoing* document, which is both wasted work
+/// and the wrong pairing.
+pub fn refresh_storage(state: &PageState) {
+    let origin = storage_origin_of(
+        state.dom.borrow().document_url(),
+        state.storage_subscriber().id(),
+    );
+    // Re-point the handles that already exist rather than minting new
+    // wrappers. A script that captured `localStorage` before the navigation
+    // holds one of these, and leaving it aimed at the old area would let a
+    // b-origin document write a-origin data — and notify a-origin siblings
+    // about it. Re-pointing also means the globals and their proxies never
+    // need replacing, so a same-origin navigation costs nothing at all.
+    for handle in state.storage_handles.borrow().iter() {
+        handle.retarget(state.hooks.storage(handle.kind, &origin), origin.clone());
+    }
+}
+
+/// Fires a `storage` event at the `Window` (ADR-0027 D13).
+///
+/// Called when a *sibling* document of the same browsing context and origin
+/// wrote — never for this document's own write, which the area's subscriber id
+/// filters out before the notification ever reaches here (HTML fires at the
+/// *other* documents).
+///
+/// `StorageEvent` is a `bootstrap.js` class rather than a generated interface,
+/// so the event is minted through a captured reference to its constructor and
+/// then dispatched like any other engine-generated event.
+pub fn dispatch_storage_event(
+    cx: &BindCx<'_>,
+    notification: &storage::StorageNotification,
+) -> Result<(), JsThrow> {
+    let (make_event, global) = {
+        let js = cx.state.js.borrow();
+        let js = js
+            .as_ref()
+            .ok_or_else(|| JsThrow::Type("bootstrap not installed".into()))?;
+        (js.new_storage_event.clone(), js.global.clone())
+    };
+
+    let init = cx.scope.new_object().map_err(JsThrow::from)?;
+    let text = |value: &Option<String>| match value {
+        Some(value) => JsValue::String(value.clone()),
+        None => JsValue::Null,
+    };
+    let set = |key: &str, value: JsValue| -> Result<(), JsThrow> {
+        cx.scope.set(&init, key, &value).map_err(JsThrow::from)
+    };
+    set("key", text(&notification.key))?;
+    set("oldValue", text(&notification.old_value))?;
+    set("newValue", text(&notification.new_value))?;
+    // The *writer's* URL, carried on the notification — HTML's
+    // `StorageEvent.url` names the document whose storage changed, not the one
+    // being told about it.
+    set("url", JsValue::String(notification.url.clone()))?;
+    // `storageArea` is *this* document's handle on the area, which is what a
+    // listener compares against its own `localStorage`.
+    let area = cx
+        .scope
+        .get(&global, notification.kind.global_name())
+        .unwrap_or(JsValue::Null);
+    set("storageArea", area)?;
+
+    let event = cx
+        .scope
+        .call(&make_event, &JsValue::Undefined, &[JsValue::Object(init)])
+        .map_err(JsThrow::from)?;
+    let data = cx.this_event(&event)?;
+    // Minting the event through the page-visible constructor runs the ordinary
+    // `Event` path, which defaults `isTrusted` to false. Every other
+    // engine-fired event sets it (`fire_simple_event`, `fire_pop_state`), and a
+    // `storage` event the engine dispatched is as trusted as those are.
+    data.borrow_mut().is_trusted = true;
+    events::dispatch_event(cx, EventTargetKey::Window, &event, &data)?;
+    // A Rust-driven dispatch at a task boundary: the JS stack is empty now, so
+    // the checkpoint `invoke_listeners` skips per-listener happens here.
+    microtask_checkpoint(cx);
+    Ok(())
+}
+
 /// Runs the bootstrap's `installLateGlobals`, wiring globals that depend on the
 /// generated interface classes or on other globals installed by `install_window`.
 fn install_late_globals(cx: &BindCx<'_>) -> Result<(), JsThrow> {
@@ -255,6 +460,9 @@ fn install_native_helpers(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     Ok(())
 }
 
+/// WebIDL: an interface with an indexed property getter but no `iterable<>`
+/// declaration still exposes `@@iterator` = %Array.prototype.values% (and
+/// nothing else). Sites spread these (`[...element.attributes]` in Swiper).
 fn install_value_iterators(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     for interface in ["NamedNodeMap", "HTMLCollection"] {
         let proto = cx.interface_proto(interface)?;
@@ -263,6 +471,8 @@ fn install_value_iterators(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     Ok(())
 }
 
+/// Global scope: window/self/document/location, EventTarget-ness of the
+/// window, console, and timers.
 fn install_window(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     let global = {
         let js = cx.state.js.borrow();

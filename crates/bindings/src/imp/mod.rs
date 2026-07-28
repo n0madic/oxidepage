@@ -95,6 +95,7 @@ pub(crate) mod resize_observer_entry;
 pub(crate) mod response;
 pub(crate) mod screen;
 pub(crate) mod shadow_root;
+pub(crate) mod storage;
 pub(crate) mod style_sheet;
 pub(crate) mod style_sheet_list;
 pub(crate) mod submit_event;
@@ -111,6 +112,7 @@ pub(crate) mod url_parts;
 pub(crate) mod url_search_params;
 pub(crate) mod wheel_event;
 pub(crate) mod window;
+pub(crate) mod window_proxy;
 // The codegen derives the imp module names from `snake("XMLHttpRequest")` and
 // `snake("XMLHttpRequestEventTarget")`; `XMLHttpRequestUpload` has no members
 // of its own, so it needs no module at all.

@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use oxidepage_base::NetErrorKind;
-use oxidepage_net::{CookieJar, Credentials, FetchEngine, NetRequest, RequestMode, ResourcePolicy};
+use oxidepage_net::{
+    CachePartition, CookieJar, Credentials, FetchEngine, NetPool, NetRequest, RequestDefaults,
+    RequestMode, ResourcePolicy,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -215,6 +218,57 @@ async fn cache_serves_second_get_without_hitting_server() {
     fresh.bypass_cache = true;
     let third = eng.fetch(fresh).await.unwrap();
     assert_ne!(third.body, first.body, "bypass_cache must re-fetch");
+}
+
+/// Two engines over one shared connection pool and cache, in the partitions
+/// given — the shape a `Browser` builds for two pages (ADR-0027 D7).
+fn shared_engines(a: CachePartition, b: CachePartition) -> (FetchEngine, FetchEngine) {
+    let policy = Arc::new(ResourcePolicy {
+        allowlist: vec![std::net::Ipv4Addr::LOCALHOST.into()],
+        ..ResourcePolicy::default()
+    });
+    // Through a `NetPool`, which is the only thing that pairs a client with the
+    // policy its SSRF connector was built from.
+    let pool = NetPool::new(policy).unwrap();
+    let build = |partition| {
+        FetchEngine::with_shared(
+            pool.shared_parts(partition),
+            // A jar each: sharing the cache is a browser-level decision, and
+            // sharing the jar is a context-level one.
+            Arc::new(Mutex::new(CookieJar::new())),
+            RequestDefaults::default(),
+        )
+    };
+    (build(a), build(b))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_cache_serves_a_second_engine_in_the_same_partition() {
+    let port = spawn_router().await;
+    let (one, two) = shared_engines(CachePartition(7), CachePartition(7));
+    // `/cached`'s body embeds a server-side hit counter, so an identical body
+    // proves the second engine never reached the server.
+    let first = one.fetch(get(port, "/cached")).await.unwrap();
+    let second = two.fetch(get(port, "/cached")).await.unwrap();
+    assert_eq!(
+        first.body, second.body,
+        "a sibling page in the same partition must be served from the shared cache"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_partitions_do_not_see_each_others_entries() {
+    let port = spawn_router().await;
+    let (one, two) = shared_engines(CachePartition(1), CachePartition(2));
+    let first = one.fetch(get(port, "/cached")).await.unwrap();
+    let other = two.fetch(get(port, "/cached")).await.unwrap();
+    assert_ne!(
+        first.body, other.body,
+        "another context's entry must be a miss, not a hit"
+    );
+    // ... and the second context's own repeat still hits its own partition.
+    let again = two.fetch(get(port, "/cached")).await.unwrap();
+    assert_eq!(other.body, again.body);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

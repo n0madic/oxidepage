@@ -1,0 +1,749 @@
+//! [`PageHandle`]: a `Send + Sync` façade over a page living on its own thread.
+//!
+//! A `Page` is permanently `!Send`, so every method here is the same shape: put
+//! a closure on the command channel, block on a typed reply. `call` is the one
+//! helper that does it; the typed methods below are each one line over it, and
+//! [`PageHandle::with`] covers the whole tail of the `Page` API without thirty
+//! more wrappers (ADR-0027 D2).
+
+use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
+use oxidepage_page::{
+    DialogRequest, DialogResponse, LoopStats, OpenWindowRequest, OpenedWindow, Page, PageJob,
+    PageOptions, PageRecord, PaintOptions, PdfOptions, ScreenshotOptions, SharedLocalStorage,
+    SharedNetConfig, Viewport, WaitUntil, WindowOp,
+};
+
+use crate::context::{BrowserContext, PageSettings};
+use crate::dialog::DialogPolicy;
+use crate::error::{EngineError, EngineResult};
+use crate::event::PageEvent;
+use crate::options::NewPageOptions;
+
+/// The page thread's half of the dialog rendezvous.
+struct DialogChannel {
+    answers: Receiver<DialogResponse>,
+    /// Hands the page's own "a dialog is open" flag back to the handle.
+    publish_flag: Sender<Arc<AtomicBool>>,
+}
+
+/// A type-erased unit of work, before it is tagged control or ordinary.
+type BoxedWork = Box<dyn FnOnce(&Page) + Send>;
+
+/// What an opener can ask of a page it opened: the sibling's command channel
+/// and its event bus, and nothing more (see [`PageHandle::window_ops`]).
+pub(crate) struct WindowOps {
+    cmd_tx: Sender<PageJob>,
+    event_tx: Sender<PageEvent>,
+}
+
+impl WindowOps {
+    /// Applies one fire-and-forget [`WindowOp`].
+    ///
+    /// Never blocks: the caller is the *opener's* page thread, with JavaScript
+    /// on its stack and its own DOM borrowed.
+    pub(crate) fn apply(&self, op: WindowOp) {
+        match op {
+            WindowOp::Navigate(url) => {
+                let _ = self.cmd_tx.send(PageJob::new(move |page| {
+                    let _ = page.navigate(&url, WaitUntil::Load);
+                }));
+            }
+            WindowOp::Close => {
+                // The control job, without the join `close()` would do — the
+                // opener must not park waiting for a sibling to wind down.
+                let _ = self.cmd_tx.send(PageJob::control(Page::request_close));
+            }
+            // No window manager exists here, so this is reported rather than
+            // obeyed. Told, not silently dropped (P6).
+            WindowOp::Focus => {
+                let _ = self.event_tx.try_send(PageEvent::FocusRequested);
+            }
+        }
+    }
+}
+
+/// How long a failed round trip waits for the page thread to say *why* it
+/// failed. Only ever paid on an error path, and only until the thread finishes
+/// unwinding — see [`PageHandle::gone`].
+const CRASH_REPORT_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the page thread's epilogue will wait for room on the event bus to
+/// deliver its final [`PageEvent::Closed`] / [`PageEvent::Crashed`].
+const TERMINAL_EVENT_GRACE: Duration = Duration::from_millis(250);
+
+/// How long [`PageHandle::answer_dialog`] will wait for the page to reach its
+/// receive. Covers the gap between the `DialogOpening` event and the page's
+/// `recv`, nothing more.
+const DIALOG_ANSWER_GRACE: Duration = Duration::from_secs(2);
+
+/// How long a `window.open` waits for the page it is opening to exist.
+///
+/// Deliberately *not* the driver's command timeout. This wait happens on the
+/// **opener's** page thread with JavaScript on the stack, where the
+/// `ScriptBudget` interrupt cannot fire (the block is in Rust) and no control
+/// job can reach it — so it is a script-blocking budget, and it is sized like
+/// one. Past it `window.open` returns `null`, the popup-blocked answer.
+pub(crate) const OPEN_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Identifies a page within a [`Browser`](crate::Browser).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct PageId(pub u64);
+
+impl std::fmt::Display for PageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "page-{}", self.0)
+    }
+}
+
+/// Everything the driver side of a page holds.
+pub(crate) struct PageInner {
+    id: PageId,
+    cmd_tx: Sender<PageJob>,
+    events: Receiver<PageEvent>,
+    /// The bus's sending half, so the driver can report something the page
+    /// itself did not produce — a sibling's `w.focus()`, for one.
+    event_tx: Sender<PageEvent>,
+    /// Answers for a [`DialogPolicy::Ask`] dialog. Deliberately not the
+    /// command channel: the page runs no ordinary job while parked in a
+    /// dialog, so an answer queued there would never be reached (D11).
+    dialog_tx: Sender<DialogResponse>,
+    /// Set while the page is inside `run_dialog`.
+    ///
+    /// The answer channel is a rendezvous, so a send only lands while a receive
+    /// is actually in progress. This flag is what lets `answer_dialog`
+    /// distinguish "no dialog is open" (refuse immediately) from "the page is
+    /// about to start waiting" (block briefly, do not drop the answer).
+    dialog_pending: Arc<AtomicBool>,
+    /// How this page answers dialogs.
+    ///
+    /// Only [`DialogPolicy::Ask`] ever reads the answer channel. Without this,
+    /// `answer_dialog` on an auto-dismissing page saw the flag up — the page
+    /// *is* in `run_dialog` — and blocked on a rendezvous nobody would ever
+    /// complete, so every `alert()` cost a driver following the documented
+    /// flow a full `DIALOG_ANSWER_GRACE`.
+    dialog_policy: DialogPolicy,
+    /// "This page is closed" as script and the embedder see it. Set by the
+    /// page thread on its way out **and** by a sibling's `w.close()`, so
+    /// `w.closed` reads `true` on the line after the call, as in a browser.
+    closed: Arc<AtomicBool>,
+    /// "The page thread has left `run_page_thread`." Set only by the thread
+    /// epilogue.
+    ///
+    /// Deliberately *not* `closed`: an opener's `w.close()` sets that flag
+    /// from another thread while the sibling is still running (it may be parked
+    /// in a dialog for 30 s). [`PageHandle::join_bounded`] skips its poll once
+    /// the flag it watches is set and then calls `JoinHandle::join`, which is
+    /// only guaranteed not to block if the thread really has finished — so it
+    /// watches this one.
+    exited: Arc<AtomicBool>,
+    /// Why the thread stopped, if it stopped badly.
+    crash: Arc<Mutex<Option<String>>>,
+    join: Mutex<Option<std::thread::JoinHandle<()>>>,
+    command_timeout: Duration,
+    close_timeout: Duration,
+}
+
+/// A `Send + Sync` handle to a page running on its own thread.
+///
+/// Cloning is cheap and gives another handle to the *same* page.
+#[derive(Clone)]
+pub struct PageHandle(pub(crate) Arc<PageInner>);
+
+impl std::fmt::Debug for PageHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageHandle")
+            .field("id", &self.0.id)
+            .field("closed", &self.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PageHandle {
+    #[must_use]
+    pub fn id(&self) -> PageId {
+        self.0.id
+    }
+
+    /// The push event stream (ADR-0027 D6). Cloning the receiver splits the
+    /// stream between consumers rather than duplicating it, so keep one reader.
+    #[must_use]
+    pub fn events(&self) -> Receiver<PageEvent> {
+        self.0.events.clone()
+    }
+
+    /// Whether this page is closed. Read from an atomic — no round trip, so it
+    /// stays truthful for a page that cannot answer one.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.0.closed.load(Ordering::Acquire)
+    }
+
+    /// Whether the page's thread has actually finished.
+    #[must_use]
+    pub fn has_exited(&self) -> bool {
+        self.0.exited.load(Ordering::Acquire)
+    }
+
+    /// Runs `f` **on the page thread** and returns what it produced.
+    ///
+    /// The escape hatch for everything the typed methods do not cover. A
+    /// closure can hold a `Ref<'_, DomTree>` — which could never cross a
+    /// channel — for as long as it needs, and send back an owned projection:
+    ///
+    /// ```no_run
+    /// # use oxidepage_engine::{Browser, BrowserOptions, NewPageOptions};
+    /// # let browser = Browser::new(BrowserOptions::default()).unwrap();
+    /// # let page = browser.default_context().new_page(NewPageOptions::default()).unwrap();
+    /// let url = page.with(|p| p.dom().document_url().to_owned())?;
+    /// # Ok::<_, oxidepage_engine::EngineError>(())
+    /// ```
+    pub fn with<T, F>(&self, f: F) -> EngineResult<T>
+    where
+        F: FnOnce(&Page) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.call(PageJob::new, f)
+    }
+
+    /// Like [`PageHandle::with`], but the closure runs at whatever wait point
+    /// receives it, *including* one nested inside a navigation.
+    ///
+    /// Only sound for work that touches `Cell`s and channels — the page may be
+    /// holding borrows on its DOM, style and layout. Reaching any of those from
+    /// here is a `BorrowMutError` waiting for the right timing.
+    fn with_control<T, F>(&self, f: F) -> EngineResult<T>
+    where
+        F: FnOnce(&Page) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.call(PageJob::control, f)
+    }
+
+    fn call<T, F>(&self, wrap: fn(BoxedWork) -> PageJob, f: F) -> EngineResult<T>
+    where
+        F: FnOnce(&Page) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.call_within(wrap, self.0.command_timeout, f)
+    }
+
+    /// [`PageHandle::call`] with an explicit reply deadline, for the one caller
+    /// whose work is legitimately allowed to outlast the command timeout.
+    fn call_within<T, F>(
+        &self,
+        wrap: fn(BoxedWork) -> PageJob,
+        timeout: Duration,
+        f: F,
+    ) -> EngineResult<T>
+    where
+        F: FnOnce(&Page) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let job: BoxedWork = Box::new(move |page| {
+            let _ = reply_tx.send(f(page));
+        });
+        self.send(wrap(job))?;
+        match reply_rx.recv_timeout(timeout) {
+            Ok(value) => Ok(value),
+            Err(RecvTimeoutError::Timeout) => Err(EngineError::Timeout),
+            // The reply sender was dropped without answering: the thread died
+            // under the job. A panic leaves a message behind.
+            Err(RecvTimeoutError::Disconnected) => Err(self.gone()),
+        }
+    }
+
+    /// Queues `job` and returns immediately.
+    ///
+    /// The single send path, and the reason it never blocks: some callers are
+    /// themselves *on a page thread with JavaScript on the stack* (the
+    /// `window.open` hook, a `WindowProxy` op), where any wait is one the
+    /// `ScriptBudget` cannot interrupt. A failure is classified through
+    /// [`PageHandle::gone_now`] rather than [`PageHandle::gone`] — the latter
+    /// polls for up to `CRASH_REPORT_GRACE`, so a driver draining a queue
+    /// against a closed page would pay that per call. Anything the send path
+    /// grows later (accounting, refusal, tracing) lands here rather than in
+    /// four hand-rolled `cmd_tx.send` sites.
+    fn send(&self, job: PageJob) -> EngineResult<()> {
+        self.0.cmd_tx.send(job).map_err(|_| self.gone_now())
+    }
+
+    /// Posts work without waiting for it. Errors only if the page is gone.
+    pub fn post<F>(&self, f: F) -> EngineResult<()>
+    where
+        F: FnOnce(&Page) + Send + 'static,
+    {
+        self.send(PageJob::new(f))
+    }
+
+    /// [`PageHandle::post`] for a control job — one that runs at whatever wait
+    /// point receives it, including inside a navigation.
+    fn post_control(&self, f: impl FnOnce(&Page) + Send + 'static) -> EngineResult<()> {
+        self.send(PageJob::control(f))
+    }
+
+    /// [`PageHandle::gone`] without the wait: whatever the thread has published
+    /// so far. Used where blocking is not allowed.
+    fn gone_now(&self) -> EngineError {
+        match self.0.crash.lock() {
+            Ok(crash) => match crash.as_ref() {
+                Some(message) => EngineError::Crashed(message.clone()),
+                None => EngineError::Closed,
+            },
+            Err(_) => EngineError::Closed,
+        }
+    }
+
+    /// Why a channel to the page failed — `Crashed` if the thread panicked,
+    /// `Closed` if it simply stopped.
+    ///
+    /// The bounded wait is load-bearing. A panic drops the reply `Sender` as it
+    /// unwinds, so `recv` reports `Disconnected` *before* `catch_unwind` has
+    /// recorded the message: reading `crash` right away would report a real
+    /// crash as an ordinary close. The thread sets `exited` only after storing
+    /// the message, so waiting for that flag is what makes the two consistent.
+    fn gone(&self) -> EngineError {
+        let deadline = std::time::Instant::now() + CRASH_REPORT_GRACE;
+        while !self.has_exited() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.gone_now()
+    }
+
+    // === The typed surface ===
+
+    /// Navigates to `url` and waits as far as `wait`.
+    ///
+    /// The inner `Result` is the page's own: a navigation that fails (DNS,
+    /// HTTP, a blocked address) is not an engine error. `JsError` is `!Send`
+    /// — it can carry a `JsValue` — so it is rendered on the page thread,
+    /// where the realm that owns those values still exists.
+    pub fn navigate(&self, url: &str, wait: WaitUntil) -> EngineResult<Result<(), String>> {
+        let url = url.to_owned();
+        self.with(move |page| page.navigate(&url, wait).map_err(|e| e.to_string()))
+    }
+
+    /// Loads an in-memory document as the current one.
+    pub fn set_content(&self, html: &str) -> EngineResult<Result<(), String>> {
+        let html = html.to_owned();
+        self.with(move |page| page.load_html(&html).map_err(|e| e.to_string()))
+    }
+
+    /// Evaluates `source` and returns the result coerced to a string.
+    pub fn eval_to_string(&self, source: &str) -> EngineResult<Result<String, String>> {
+        let source = source.to_owned();
+        self.with(move |page| page.eval_to_string(&source).map_err(|e| e.to_string()))
+    }
+
+    /// Runs the page's loop until it goes idle, or `budget` elapses.
+    ///
+    /// The command timeout is raised to `budget` plus a margin for this call:
+    /// a settle that legitimately runs longer than the default timeout must not
+    /// report the page as unresponsive.
+    pub fn settle(&self, budget: Duration) -> EngineResult<()> {
+        self.call_within(PageJob::new, budget + self.0.command_timeout, move |page| {
+            page.settle(budget)
+        })
+    }
+
+    /// Encodes a screenshot to PNG.
+    pub fn screenshot(&self, options: ScreenshotOptions) -> EngineResult<Vec<u8>> {
+        self.with(move |page| page.screenshot_with(&options))
+    }
+
+    /// Renders the document to PDF.
+    pub fn pdf(&self, options: PdfOptions, paint: PaintOptions) -> EngineResult<Vec<u8>> {
+        self.with(move |page| page.pdf(&options, &paint))
+    }
+
+    /// The document serialized back to HTML.
+    pub fn content(&self) -> EngineResult<String> {
+        self.with(Page::document_html)
+    }
+
+    pub fn set_viewport(&self, viewport: Viewport) -> EngineResult<()> {
+        self.with(move |page| page.set_viewport(viewport))
+    }
+
+    /// Event-loop counters — the diagnostic that proves the loop parks rather
+    /// than spins.
+    ///
+    /// A *control* call: `Page::loop_stats` reads a `Cell` and nothing else,
+    /// which is the bar, and a diagnostic that could only be read from a page
+    /// healthy enough to service ordinary work would be unreadable in exactly
+    /// the situations it exists for — a suspended page, or one spinning.
+    pub fn loop_stats(&self) -> EngineResult<LoopStats> {
+        self.with_control(Page::loop_stats)
+    }
+
+    /// Freezes the page: its timers, network delivery and script all stop, and
+    /// only control work is serviced until [`PageHandle::resume`].
+    ///
+    /// A control call, so it takes effect even while the page is busy.
+    pub fn suspend(&self) -> EngineResult<()> {
+        self.with_control(Page::suspend)
+    }
+
+    /// Releases a page created with [`NewPageOptions::suspended`].
+    ///
+    /// A control call, so it gets through a page that is otherwise servicing
+    /// nothing.
+    pub fn resume(&self) -> EngineResult<()> {
+        self.with_control(Page::resume)
+    }
+
+    /// Answers the dialog the page is parked on under [`DialogPolicy::Ask`].
+    ///
+    /// Call it on [`PageEvent::DialogOpening`]. The answer channel is an
+    /// unbuffered rendezvous by intent — an answer nobody asked for must not be
+    /// queued up to release the *next* dialog — so this blocks briefly rather
+    /// than using `try_send`: a driver that answers the instant it sees the
+    /// event can easily get there before the page reaches its `recv`, and
+    /// dropping the answer for being a few microseconds early would leave the
+    /// dialog to time out.
+    ///
+    /// Returns [`EngineError::Timeout`] when no dialog is open.
+    pub fn answer_dialog(&self, response: DialogResponse) -> EngineResult<()> {
+        if !matches!(self.0.dialog_policy, DialogPolicy::Ask { .. })
+            || !self.0.dialog_pending.load(Ordering::Acquire)
+        {
+            return Err(EngineError::Timeout);
+        }
+        match self.0.dialog_tx.send_timeout(response, DIALOG_ANSWER_GRACE) {
+            Ok(()) => Ok(()),
+            Err(SendTimeoutError::Timeout(_)) => Err(EngineError::Timeout),
+            Err(SendTimeoutError::Disconnected(_)) => Err(self.gone()),
+        }
+    }
+
+    /// The flag a sibling's `WindowProxy.closed` reads. Shared, so the answer
+    /// needs no cross-thread round trip — which matters for the
+    /// `while (!w.closed)` poll pages actually write.
+    pub(crate) fn closed_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0.closed)
+    }
+
+    /// Applies one fire-and-forget [`WindowOp`] from an opener.
+    ///
+    /// Never blocks: the caller is the *opener's* page thread, with JavaScript
+    /// on its stack and its own DOM borrowed.
+    /// The two senders a sibling's `WindowProxy` needs, and nothing else.
+    ///
+    /// Deliberately *not* a `PageHandle` clone. The proxy lives as long as the
+    /// opener's script keeps a reference to it, and a `PageHandle` holds the
+    /// sibling's event `Receiver` — so capturing one would keep both ends of
+    /// that channel alive, meaning it could never disconnect and its whole
+    /// buffered backlog (up to `event_capacity`, console strings included)
+    /// would outlive the page it belongs to.
+    pub(crate) fn window_ops(&self) -> WindowOps {
+        WindowOps {
+            cmd_tx: self.0.cmd_tx.clone(),
+            event_tx: self.0.event_tx.clone(),
+        }
+    }
+
+    /// Asks the page to close and joins its thread, bounded by the browser's
+    /// close timeout.
+    ///
+    /// Idempotent. On timeout the channel is simply dropped — the thread will
+    /// notice and exit on its own — and the handle is marked closed, so a
+    /// wedged page can never hold up a [`Browser::close`](crate::Browser::close).
+    pub fn close(&self) {
+        // A control job: it sets a `Cell`, so it runs even mid-navigation.
+        let _ = self.post_control(Page::request_close);
+        self.join_bounded();
+    }
+
+    pub(crate) fn join_bounded(&self) {
+        let Ok(mut join) = self.0.join.lock() else {
+            return;
+        };
+        let Some(handle) = join.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + self.0.close_timeout;
+        // `JoinHandle` has no timed join, so poll the flag the thread sets on
+        // its way out and only then join — which is then guaranteed not to
+        // block. A thread that ignores the close is detached rather than
+        // waited on forever.
+        while !self.has_exited() {
+            if std::time::Instant::now() >= deadline {
+                // Detached, not waited on: a page wedged in Rust (a dialog, a
+                // synchronous document fetch) must never hold the browser open.
+                self.0.closed.store(true, Ordering::Release);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let _ = handle.join();
+    }
+}
+
+/// Spawns a page thread and blocks until its `Page` is built, so a construction
+/// failure is an ordinary `Result` rather than a panic on a thread nobody is
+/// watching.
+pub(crate) fn spawn_page(
+    id: PageId,
+    options: NewPageOptions,
+    net: SharedNetConfig,
+    local_storage: SharedLocalStorage,
+    context: BrowserContext,
+    settings: PageSettings,
+    // How long to wait for the page to be built: the driver's command timeout
+    // for `new_page`, the far shorter script-blocking budget for `window.open`.
+    launch_timeout: Duration,
+) -> EngineResult<PageHandle> {
+    let PageSettings {
+        event_capacity,
+        command_timeout,
+        close_timeout,
+        // The popup cap is the context's business — it is enforced before a
+        // page is ever spawned.
+        max_pages: _,
+    } = settings;
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<PageJob>();
+    let (event_tx, event_rx) = crossbeam_channel::bounded::<PageEvent>(event_capacity);
+    // Rendezvous: an answer is only accepted while the page is actually parked
+    // in `run_dialog`, never buffered for the next dialog.
+    let (dialog_tx, dialog_rx) = crossbeam_channel::bounded::<DialogResponse>(0);
+    // Filled in by the page thread once its `Page` exists: the flag belongs to
+    // the page (it is *the page* that is parked), and it must be raised before
+    // the announcement a driver answers on.
+    let (flag_tx, flag_rx) = crossbeam_channel::bounded::<Arc<AtomicBool>>(1);
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
+
+    let options_dialog_policy = options.resolved_dialog_policy();
+    let closed = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
+    let crash = Arc::new(Mutex::new(None));
+
+    let thread_closed = Arc::clone(&closed);
+    let thread_exited = Arc::clone(&exited);
+    let thread_crash = Arc::clone(&crash);
+    let thread_events = event_tx.clone();
+    let handle_events = event_tx.clone();
+    let join = std::thread::Builder::new()
+        .name(id.to_string())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_page_thread(
+                    options,
+                    net,
+                    local_storage,
+                    context,
+                    cmd_rx,
+                    event_tx,
+                    DialogChannel {
+                        answers: dialog_rx,
+                        publish_flag: flag_tx,
+                    },
+                    &ready_tx,
+                );
+            }));
+            if let Err(payload) = outcome {
+                let message = panic_message(&payload);
+                if let Ok(mut slot) = thread_crash.lock() {
+                    *slot = Some(message.clone());
+                }
+                let _ = thread_events
+                    .send_timeout(PageEvent::Crashed { message }, TERMINAL_EVENT_GRACE);
+            } else {
+                // A short blocking send rather than `try_send`: this is the
+                // event a driver ends its loop on, so losing it to a
+                // momentarily-full bus would strand that loop. It is still
+                // best-effort — a driver that never drains cannot be helped,
+                // and `PageHandle::is_closed` is the authoritative answer.
+                let _ = thread_events.send_timeout(PageEvent::Closed, TERMINAL_EVENT_GRACE);
+            }
+            thread_closed.store(true, Ordering::Release);
+            // Last of all: `join_bounded` and `gone` wait on this, and the
+            // crash message above must already be published when it is set.
+            thread_exited.store(true, Ordering::Release);
+        })
+        .map_err(|e| EngineError::Launch(e.to_string()))?;
+
+    // Bounded, because this is called from `HostHooks::open_window` on an
+    // *opener's* page thread with JavaScript on its stack: an unbounded wait
+    // there is unrecoverable — the `ScriptBudget` cannot fire (the block is in
+    // Rust) and no control job can reach a thread that is not at a wait point.
+    // `ready_rx` **first**. The thread publishes its dialog flag before it
+    // reports readiness, so by the time this returns `Ok` the flag is already
+    // sitting in its channel — while waiting on the flag first would park for
+    // the whole timeout on any construction failure, since this function still
+    // owns a `flag_tx` and the channel therefore never disconnects.
+    match ready_rx.recv_timeout(launch_timeout) {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => {
+            let _ = join.join();
+            return Err(EngineError::Launch(message));
+        }
+        // Wedged inside `Page::new`. Detached rather than joined — joining is
+        // the unbounded wait this timeout exists to avoid.
+        Err(RecvTimeoutError::Timeout) => return Err(EngineError::Timeout),
+        // The thread died before reporting: a panic inside `Page::new`.
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = join.join();
+            let message = crash
+                .lock()
+                .ok()
+                .and_then(|c| c.clone())
+                .unwrap_or_else(|| "page thread exited during construction".to_owned());
+            return Err(EngineError::Launch(message));
+        }
+    }
+
+    let dialog_pending = flag_rx
+        .try_recv()
+        .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
+
+    Ok(PageHandle(Arc::new(PageInner {
+        id,
+        cmd_tx,
+        events: event_rx,
+        event_tx: handle_events,
+        dialog_tx,
+        dialog_pending,
+        dialog_policy: options_dialog_policy,
+        closed,
+        exited,
+        crash,
+        join: Mutex::new(Some(join)),
+        command_timeout,
+        close_timeout,
+    })))
+}
+
+/// The whole life of a page thread: build the page, install the hooks that can
+/// only exist here (they are `Rc`), then hand the thread to the command loop.
+#[allow(clippy::too_many_arguments)]
+fn run_page_thread(
+    options: NewPageOptions,
+    net: SharedNetConfig,
+    local_storage: SharedLocalStorage,
+    context: BrowserContext,
+    cmd_rx: Receiver<PageJob>,
+    events: Sender<PageEvent>,
+    dialogs: DialogChannel,
+    ready_tx: &Sender<Result<(), String>>,
+) {
+    let dialog_policy = options.resolved_dialog_policy();
+    let suspended = options.suspended;
+
+    let page_options = PageOptions {
+        url: options.url,
+        viewport: options.viewport,
+        navigator: options.navigator.unwrap_or_default(),
+        screen: options.screen,
+        script_budget: options.script_budget,
+        lazy_images: options.lazy_images.unwrap_or(false),
+        whole_document_visible: options.whole_document_visible.unwrap_or(false),
+        // The policy lives on the shared pool; a per-page one would be ignored.
+        policy: None,
+        dialog_handler: None,
+        net: Some(net),
+        local_storage: Some(local_storage),
+        ..PageOptions::default()
+    };
+
+    let page = match Page::new(page_options) {
+        Ok(page) => page,
+        Err(error) => {
+            let _ = ready_tx.send(Err(error.to_string()));
+            return;
+        }
+    };
+
+    // Dropped counter and sink: `try_send` rather than `send`, because the sink
+    // runs with JavaScript on the stack and blocking it would park the page on
+    // a driver that stopped reading.
+    let dropped = Rc::new(std::cell::Cell::new(0u64));
+    {
+        let events = events.clone();
+        let dropped = Rc::clone(&dropped);
+        page.set_event_sink(Some(Rc::new(move |record: PageRecord| {
+            // A dialog announcement is the one record a driver *must* get: it
+            // is the only thing that tells it to answer, and losing it parks
+            // the page for the whole dialog timeout. Same treatment as the
+            // terminal events, for the same reason.
+            // Only under `Ask` does anyone have to act on the announcement.
+            // Under the automatic policies it is informational, and blocking
+            // the page thread for it — with JavaScript on the stack, inside
+            // `run_dialog` — would tax every `alert()` on a page whose driver
+            // is slow to drain the bus.
+            let load_bearing = matches!(dialog_policy, DialogPolicy::Ask { .. })
+                && matches!(record, PageRecord::DialogOpening(_));
+            let event = PageEvent::from_record(record);
+            if load_bearing {
+                let _ = events.send_timeout(event, TERMINAL_EVENT_GRACE);
+                return;
+            }
+            if events.try_send(event).is_err() {
+                dropped.set(dropped.get() + 1);
+                return;
+            }
+            // Report the backlog once there is room again, so a full bus is
+            // visible rather than silent.
+            let missed = dropped.replace(0);
+            if missed > 0
+                && events
+                    .try_send(PageEvent::Dropped { count: missed })
+                    .is_err()
+            {
+                dropped.set(missed);
+            }
+        })));
+    }
+
+    page.set_dialog_handler(Some(Rc::new(move |_request: &DialogRequest| {
+        // The timeout comes off the policy itself, so there is no fallback to
+        // pick: only `Ask` reaches the wait, and `Ask` carries its own bound.
+        let DialogPolicy::Ask { timeout } = dialog_policy else {
+            return dialog_policy.automatic().unwrap_or(DialogResponse::Dismiss);
+        };
+        // The page is parked here, with JS on the stack, until the driver
+        // answers or the timeout expires. Both exits are bounded; the
+        // `ScriptBudget` cannot help, since the block is in Rust (D11).
+        //
+        // `Page` raised its `dialog_open` flag before it announced this dialog,
+        // so an `answer_dialog` racing that announcement finds the flag up and
+        // blocks for the rendezvous instead of being refused.
+        dialogs
+            .answers
+            .recv_timeout(timeout)
+            .unwrap_or(DialogResponse::Dismiss)
+    })));
+
+    // `window.open` and `<a target=_blank>`: open a sibling into this page's
+    // own context. Plain data in, plain data out — the hook runs with JS on the
+    // stack, so it must not touch this page (ADR-0027 D12).
+    page.set_open_window_handler(Some(Rc::new(
+        move |request: &OpenWindowRequest| -> Option<OpenedWindow> { context.open_window(request) },
+    )));
+
+    let _ = dialogs.publish_flag.try_send(page.dialog_open_flag());
+
+    if suspended {
+        page.suspend();
+    }
+
+    let _ = ready_tx.send(Ok(()));
+    page.run_command_loop(cmd_rx);
+    // `page` drops here — on its own thread, in its declared field order, which
+    // is the teardown contract `Page` documents in place of a `Drop` impl.
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "page thread panicked".to_owned()
+    }
+}

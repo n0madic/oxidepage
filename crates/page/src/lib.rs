@@ -6,9 +6,15 @@
 //! checkpoints after every task and callback into JS, GC-finalization
 //! processing between tasks, and — new in Phase 3 — a networking task source.
 //!
-//! `Receiver::recv_deadline` unifies "a net event OR the next timer deadline
-//! OR the settle budget" into one blocking wait ([`Page::settle`]), so timers
-//! and network both progress with no busy-wait (ADR-0004).
+//! [`Page::wait_for_work`] unifies "a net event OR an embedder command OR the
+//! next timer deadline OR the settle budget" into one blocking wait
+//! ([`Page::settle`]), so timers, network and a driver's commands all progress
+//! with no busy-wait (ADR-0004, ADR-0027 D4).
+//!
+//! A page an embedder drives directly (the CLI, this crate's tests) has no
+//! command port and behaves exactly as it did before one existed; a driver that
+//! wants many pages puts each on its own thread and hands it
+//! [`Page::run_command_loop`] (ADR-0027).
 //!
 //! Document loading is a streaming parse with script execution at
 //! `</script>` suspension points. Classic inline scripts run immediately;
@@ -21,9 +27,11 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use oxidepage_base::RequestId;
 // Geometry is part of this crate's own public surface (`layout_rect`,
 // `content_quads`, `ScreenshotOptions::clip`), so an embedder needs no
@@ -44,7 +52,10 @@ use oxidepage_style::{BlockingImportLoader, CssFetcher, StyleEngine};
 use style::selector_parser::PseudoElement;
 use style::stylesheets::Origin;
 
+mod command;
 mod render;
+pub use command::{LoopStats, PageJob};
+
 pub use render::{ImageFormat, ScreenshotOptions};
 
 // The observable page-event vocabulary is built in `bindings` (the call sites
@@ -53,13 +64,16 @@ pub use render::{ImageFormat, ScreenshotOptions};
 // `oxidepage_bindings` dependency in an embedder's Cargo.toml (ADR-0025 D9).
 pub use oxidepage_bindings::{
     ConsoleLevel, ConsoleMessage, DialogEvent, DialogHandler, DialogKind, DialogRequest,
-    DialogResponse, PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING,
-    ScriptError, ScriptErrorKind, ValuePreview, render_preview, render_preview_top,
+    DialogResponse, MAX_STORAGE_ORIGINS, OpenWindowRequest, OpenedWindow, PREVIEW_MAX_DEPTH,
+    PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, PrivateStorageAreas,
+    STORAGE_QUOTA_BYTES, ScriptError, ScriptErrorKind, SharedStorage, StorageArea, StorageAreaKind,
+    StorageNotification, StorageSubscriber, ValuePreview, WindowOp, evict_unreferenced_areas,
+    render_preview, render_preview_top,
 };
 pub use oxidepage_export_pdf::{MAX_PDF_PAGES, Margins, PaperSize, PdfOptions};
 pub use oxidepage_js::{StackFrame, parse_stack};
 pub use oxidepage_layout::disable_system_fonts;
-pub use oxidepage_net::ResourcePolicy;
+pub use oxidepage_net::{CachePartition, CookieJar, NetPool, ResourcePolicy, SharedNetConfig};
 pub use oxidepage_paint::{DisplayList, PaintOptions};
 pub use oxidepage_raster_skia::{RasterImage, RasterOptions};
 pub use oxidepage_style::Viewport;
@@ -106,6 +120,14 @@ const MAX_NAVIGATION_EVENTS: usize = 1024;
 pub const MAX_CONSOLE_MESSAGES: usize = 1024;
 pub const MAX_SCRIPT_ERRORS: usize = 1024;
 pub const MAX_DIALOG_EVENTS: usize = 256;
+
+/// Sibling-page `storage` notifications retained before the oldest are dropped.
+///
+/// Bounded like every other stream on a `Page`, and for a sharper reason: the
+/// producer is *another page's thread*. A sibling writing in a loop while this
+/// page is parked in a long navigation would otherwise grow this queue without
+/// any bound this page controls.
+pub const MAX_STORAGE_EVENTS: usize = 1024;
 
 /// Where a commit puts its session-history entry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -188,6 +210,61 @@ pub struct NavigationEvent {
     /// Unix-epoch milliseconds, from the page's monotonic time origin.
     pub timestamp: f64,
 }
+
+/// One observable thing the page did, pushed to an [`EventSink`] as it
+/// happens (ADR-0027 D6).
+///
+/// Deliberately **not** `#[non_exhaustive]`: a driver maps these onto its own
+/// event vocabulary, and a new variant must break that mapping at compile time
+/// rather than be dropped silently — the same drift protection the IDL codegen
+/// buys in `bindings`.
+///
+/// The same vocabulary the pull API exposes — [`Page::drain_console`],
+/// [`Page::drain_errors`], [`Page::drain_dialog_events`],
+/// [`Page::drain_navigation_events`] — delivered the other way round. A driver
+/// that must forward events *while* a page works cannot poll a stream it is not
+/// running the loop for; an embedder that drives the page itself (the CLI) has
+/// no such problem and keeps the pull API.
+#[derive(Clone, Debug)]
+pub enum PageRecord {
+    Navigation(NavigationEvent),
+    Console(ConsoleMessage),
+    Error(ScriptError),
+    /// A dialog is **open** and the page is parked on it.
+    ///
+    /// Emitted before the handler runs, which is the only point at which
+    /// telling a driver is useful: a handler that waits for an answer from
+    /// another thread can only be answered by someone who knows the dialog
+    /// exists. The completed [`PageRecord::Dialog`] still follows.
+    DialogOpening(DialogRequest),
+    /// A dialog that has been answered, with the answer it got.
+    Dialog(DialogEvent),
+}
+
+/// Every origin's `localStorage`, shared by the pages of one browsing context.
+///
+/// A map rather than a single area because `localStorage` is keyed by origin,
+/// and a page that navigates cross-origin must not carry the old origin's data
+/// with it. Populated lazily: an origin gets an area the first time a document
+/// there asks for one.
+pub type SharedLocalStorage = Arc<Mutex<HashMap<String, SharedStorage>>>;
+
+/// Opens a new browsing context for `window.open` and `<a target=_blank>`
+/// (ADR-0027 D12).
+///
+/// **Runs with JavaScript on the stack**, under the same constraints as
+/// [`DialogHandler`]: plain data in, plain data out, and no path back into the
+/// `Page`. Returning `None` means "the popup was blocked" — a real browser
+/// answer, and what `window.open` reports as `null`.
+pub type OpenWindowHandler = Rc<dyn Fn(&OpenWindowRequest) -> Option<OpenedWindow>>;
+
+/// A sink installed by [`Page::set_event_sink`].
+///
+/// `Rc`, and called with JS on the stack, for the same reason
+/// [`DialogHandler`] is: it is invoked from deep inside the funnels that
+/// produce these records. It must not re-enter the page — send the record
+/// somewhere and return.
+pub type EventSink = Rc<dyn Fn(PageRecord)>;
 
 /// How far a [`Page::navigate`] waits before returning.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -403,6 +480,30 @@ pub struct PageOptions {
     /// [`load_html_page`] runs inline scripts *during* the call: a
     /// post-construction setter cannot answer a dialog raised at parse time.
     pub dialog_handler: Option<DialogHandler>,
+    /// Opens a sibling browsing context for `window.open` and a link with a
+    /// `target` other than `_self`.
+    ///
+    /// `None` — the default — means there is exactly one browsing context, so
+    /// `window.open` returns `null` and a `target=_blank` link navigates in
+    /// place with a warning. Only a driver that owns several pages
+    /// (`oxidepage-engine`) can do better.
+    pub open_window_handler: Option<OpenWindowHandler>,
+    /// `localStorage` areas shared with the rest of a browsing context, keyed
+    /// by origin (ADR-0027 D13).
+    ///
+    /// `None` — the default — gives the page its own areas, which is the
+    /// behavior a standalone `Page` has always had. `sessionStorage` is always
+    /// per page, so it is never shared through here.
+    pub local_storage: Option<SharedLocalStorage>,
+    /// Net stack shared with sibling pages: one tokio runtime and connection
+    /// pool per browser, one cookie jar and cache partition per browsing
+    /// context (ADR-0027 D7).
+    ///
+    /// `None` — the default — gives the page a private runtime, pool, cache and
+    /// jar, which is what a standalone `Page` and the CLI want. When set,
+    /// [`PageOptions::policy`] is ignored: the SSRF connector is baked into the
+    /// shared pool's client, so the policy is the pool's (D8).
+    pub net: Option<SharedNetConfig>,
 }
 
 /// Default wall-clock budget for a single task's stay in JavaScript.
@@ -499,6 +600,38 @@ impl Ord for Timer {
     }
 }
 
+/// A promise rejection with no handler *yet*.
+///
+/// Reporting one is a judgement call this engine cannot make perfectly. A
+/// browser reports at the end of the task and retracts later with
+/// `rejectionhandled`; the push sink has no retraction, so a premature report
+/// is a lie a driver cannot un-hear. The two obvious rules both fail: reporting
+/// at the first quiescent point blames
+/// `p = Promise.reject(); setTimeout(() => p.catch(f))`, and waiting for full
+/// idleness never reports anything at all on a page with a live `setInterval`.
+/// Counting loop iterations does not help either — *any* wakeup ends one, so a
+/// polling driver's own commands would age a rejection past its handler.
+///
+/// So: report when the page is idle (nothing can still attach a handler), or
+/// once [`UNHANDLED_REJECTION_GRACE`] of wall clock has passed. A handler
+/// attached later than that is reported as an error it briefly was.
+struct PendingRejection {
+    /// `JsError::rendered()`, the key the tracker retracts by.
+    key: String,
+    error: ScriptError,
+    queued_at: Instant,
+}
+
+/// How long a rejection is given to acquire a handler on a page that never goes
+/// idle, before it is reported to the [`EventSink`].
+///
+/// A browser reports at the end of the task that rejected — zero grace — and
+/// takes it back with `rejectionhandled`. With no retraction event to offer,
+/// this errs the other way, by a factor of a couple of thousand. A handler
+/// attached later than this is a page keeping a rejection alive for seconds,
+/// which is worth reporting either way.
+const UNHANDLED_REJECTION_GRACE: Duration = Duration::from_secs(2);
+
 /// Scheduler state shared with the bindings through [`HostHooks`].
 struct LoopHooks {
     timers: RefCell<BinaryHeap<Reverse<Timer>>>,
@@ -525,10 +658,19 @@ struct LoopHooks {
     /// stack is exactly the discriminating power it does have. (The bare
     /// message alone would retract more aggressively than the engine
     /// rejected.)
-    pending_rejections: RefCell<VecDeque<(String, ScriptError)>>,
+    pending_rejections: RefCell<VecDeque<PendingRejection>>,
     /// The embedder's answer for `alert`/`confirm`/`prompt`; `None`
     /// auto-dismisses.
     dialog_handler: RefCell<Option<DialogHandler>>,
+    /// Opens a sibling browsing context; `None` means there is only one.
+    open_window_handler: RefCell<Option<OpenWindowHandler>>,
+    /// `localStorage` per origin. Owned by the page unless a driver handed in
+    /// a map shared across a whole browsing context (ADR-0027 D13).
+    local_storage: RefCell<SharedLocalStorage>,
+    /// Areas private to this page: `sessionStorage` for every origin, plus the
+    /// "local" area of any opaque-origin document (which shares with nobody, so
+    /// a context-wide entry for it would only ever leak).
+    private_storage: PrivateStorageAreas,
     dialogs: RefCell<VecDeque<DialogEvent>>,
     /// Time origin for the payload timestamps the hooks stamp themselves.
     ///
@@ -542,6 +684,19 @@ struct LoopHooks {
     /// The net service, installed after the hooks (which the bindings
     /// captured) are created.
     net: RefCell<Option<Rc<NetService>>>,
+    /// Set for the whole of a `run_dialog` call — from before the dialog is
+    /// announced until after the answer is in.
+    ///
+    /// An `Arc<AtomicBool>` rather than a `Cell` because the party who answers
+    /// is on another thread and has to know a dialog is open *before* it can
+    /// answer one. Raised before [`PageRecord::DialogOpening`] is emitted, so a
+    /// driver that answers the instant it sees that event cannot lose the race.
+    dialog_open: Arc<AtomicBool>,
+    /// The driver's push sink (ADR-0027 D6). While installed, records go
+    /// *there* instead of into the bounded pull streams above — one consumer,
+    /// not two, so an event cannot be delivered twice or held back by a stream
+    /// nobody is draining.
+    event_sink: RefCell<Option<EventSink>>,
 }
 
 impl Default for LoopHooks {
@@ -559,6 +714,9 @@ impl Default for LoopHooks {
             errors: RefCell::new(VecDeque::new()),
             pending_rejections: RefCell::new(VecDeque::new()),
             dialog_handler: RefCell::new(None),
+            open_window_handler: RefCell::new(None),
+            local_storage: RefCell::new(Arc::new(Mutex::new(HashMap::new()))),
+            private_storage: PrivateStorageAreas::default(),
             dialogs: RefCell::new(VecDeque::new()),
             start: Cell::new(Instant::now()),
             time_origin_epoch_ms: Cell::new(
@@ -569,6 +727,8 @@ impl Default for LoopHooks {
                     * 1000.0,
             ),
             net: RefCell::new(None),
+            dialog_open: Arc::new(AtomicBool::new(false)),
+            event_sink: RefCell::new(None),
         }
     }
 }
@@ -576,6 +736,48 @@ impl Default for LoopHooks {
 impl LoopHooks {
     fn set_net(&self, net: Rc<NetService>) {
         *self.net.borrow_mut() = Some(net);
+    }
+
+    /// Delivers `record` to the driver's sink, or `false` if there is none.
+    ///
+    /// The sink is cloned out before the call for the reason
+    /// [`HostHooks::run_dialog`] clones the dialog handler: it is embedder code
+    /// running with JS on the stack, and holding the borrow across it would
+    /// turn a re-entrant `set_event_sink` into a panic.
+    fn emit(&self, record: PageRecord) -> bool {
+        let sink = self.event_sink.borrow().clone();
+        match sink {
+            Some(sink) => {
+                sink(record);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The one implementation of "a record goes to the sink **or** to its
+    /// bounded pull stream, never both".
+    ///
+    /// Callers pass the constructor rather than pattern-matching a returned
+    /// record: the `if let Some(PageRecord::X(x)) = emit(PageRecord::X(x))`
+    /// shape this replaces was infallible in fact but refutable to the
+    /// compiler, so naming the wrong variant compiled and silently dropped the
+    /// stream entry — and a stream added later could omit the else half
+    /// entirely and lose events whenever no sink was installed.
+    fn emit_or_push<T>(
+        &self,
+        stream: &RefCell<VecDeque<T>>,
+        cap: usize,
+        value: T,
+        wrap: fn(T) -> PageRecord,
+    ) {
+        // The value is moved down exactly one of the two paths, so neither
+        // costs a clone.
+        let sink = self.event_sink.borrow().clone();
+        match sink {
+            Some(sink) => sink(wrap(value)),
+            None => push_bounded(stream, cap, value),
+        }
     }
 
     /// Adopts the bindings' time origin, so every payload timestamp — console
@@ -650,6 +852,18 @@ impl LoopHooks {
         }
     }
 
+    /// Whether any timer is scheduled and not cancelled.
+    ///
+    /// [`Self::next_deadline`]'s answer, without its side effect: that one
+    /// prunes cancelled timers off the heap as it looks, which is right for the
+    /// loop's own deadline computation and wrong for a public `is_idle`
+    /// predicate an embedder may call from anywhere.
+    fn has_live_timer(&self) -> bool {
+        let timers = self.timers.borrow();
+        let cleared = self.cleared.borrow();
+        timers.iter().any(|Reverse(t)| !cleared.contains(&t.id))
+    }
+
     /// True while animation-frame callbacks are pending.
     fn has_pending_raf(&self) -> bool {
         !self.raf_callbacks.borrow().is_empty()
@@ -682,6 +896,23 @@ impl LoopHooks {
     }
 }
 
+/// Accumulates the time a blocking wait actually spent parked, whichever way
+/// [`Page::wait_for_work`] returns.
+struct ParkTimer<'a> {
+    stats: &'a Cell<LoopStats>,
+    entered: Instant,
+}
+
+impl Drop for ParkTimer<'_> {
+    fn drop(&mut self) {
+        let mut stats = self.stats.get();
+        stats.parked_micros = stats
+            .parked_micros
+            .saturating_add(self.entered.elapsed().as_micros() as u64);
+        self.stats.set(stats);
+    }
+}
+
 /// Drops from the front so an undrained stream cannot grow without bound; the
 /// newest entries are the ones an embedder acts on.
 ///
@@ -704,14 +935,28 @@ fn drain_stream<T>(stream: &RefCell<VecDeque<T>>) -> Vec<T> {
 
 impl HostHooks for LoopHooks {
     fn console_message(&self, message: ConsoleMessage) {
-        push_bounded(&self.console, MAX_CONSOLE_MESSAGES, message);
+        self.emit_or_push(
+            &self.console,
+            MAX_CONSOLE_MESSAGES,
+            message,
+            PageRecord::Console,
+        );
     }
 
     fn report_error(&self, error: ScriptError) {
-        push_bounded(&self.errors, MAX_SCRIPT_ERRORS, error);
+        self.emit_or_push(&self.errors, MAX_SCRIPT_ERRORS, error, PageRecord::Error);
     }
 
     fn run_dialog(&self, request: DialogRequest) -> DialogResponse {
+        // Raise the flag *before* announcing, and announce *before* answering.
+        // Both orderings are load-bearing: a handler that gets its answer from
+        // another thread blocks below, so a driver told only afterwards could
+        // never be the one to answer — and a driver that answers the instant it
+        // sees the announcement must find the flag already up, or its answer is
+        // refused for arriving too early.
+        self.dialog_open
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.emit(PageRecord::DialogOpening(request.clone()));
         // Clone the handler out and *drop the borrow* before calling it: the
         // handler is embedder code, and one that reinstalls itself would
         // otherwise panic on the borrow. (It cannot reach the page any other
@@ -729,17 +974,16 @@ impl HostHooks for LoopHooks {
             default_value,
             ..
         } = request;
-        push_bounded(
-            &self.dialogs,
-            MAX_DIALOG_EVENTS,
-            DialogEvent {
-                kind,
-                message,
-                default_value,
-                response: response.clone(),
-                timestamp: self.now_ms(),
-            },
-        );
+        let event = DialogEvent {
+            kind,
+            message,
+            default_value,
+            response: response.clone(),
+            timestamp: self.now_ms(),
+        };
+        self.dialog_open
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.emit_or_push(&self.dialogs, MAX_DIALOG_EVENTS, event, PageRecord::Dialog);
         response
     }
 
@@ -829,6 +1073,36 @@ impl HostHooks for LoopHooks {
             .lock()
             .map(|mut jar| jar.document_cookie(&url, std::time::SystemTime::now()))
             .unwrap_or_default()
+    }
+
+    fn storage(&self, kind: StorageAreaKind, origin: &str) -> SharedStorage {
+        // The decision is "shared with the context, or private to this page?",
+        // so the branch asks exactly that rather than rewriting `kind` into a
+        // `Session` it is not. An opaque-origin document shares with nobody, so
+        // even its *local* area is private: putting it in the context-wide map
+        // would add an entry no other document can ever reach, and a driver
+        // cycling pages would grow that map without bound.
+        let shared_with_context = kind == StorageAreaKind::Local && !origin.starts_with("opaque:");
+        if shared_with_context {
+            let areas = Arc::clone(&self.local_storage.borrow());
+            let mut areas = areas.lock().unwrap_or_else(|e| e.into_inner());
+            let area = Arc::clone(
+                areas
+                    .entry(origin.to_owned())
+                    .or_insert_with(StorageArea::shared),
+            );
+            evict_unreferenced_areas(&mut areas);
+            area
+        } else {
+            self.private_storage.area(kind, origin)
+        }
+    }
+
+    fn open_window(&self, request: OpenWindowRequest) -> Option<OpenedWindow> {
+        // Clone the handler out and drop the borrow before calling it, for the
+        // reason `run_dialog` does: this is embedder code with JS on the stack.
+        let handler = self.open_window_handler.borrow().clone();
+        handler.and_then(|handler| handler(&request))
     }
 
     fn set_cookie(&self, document_url: &str, cookie: &str) {
@@ -1087,6 +1361,60 @@ pub struct Page {
     next_render_at: Cell<Instant>,
     /// Per-task wall-clock budget enforced through the realm's interrupt.
     script_budget: Rc<ScriptBudget>,
+    /// The embedder's command port, installed by [`Page::run_command_loop`].
+    ///
+    /// `None` for a page an embedder drives directly (the CLI, every test in
+    /// this crate), and then every wait point behaves exactly as it did before
+    /// the port existed.
+    cmd_rx: RefCell<Option<Receiver<PageJob>>>,
+    /// Jobs received at a wait point the page could not safely run them at.
+    /// Drained as a task source at the top of the loop (ADR-0027 D3).
+    pending_jobs: RefCell<VecDeque<PageJob>>,
+    /// Set by a control job asking the loop to stop.
+    closing: Cell<bool>,
+    /// Set while the driver is holding the page suspended: ordinary jobs
+    /// accumulate in `pending_jobs` and only control jobs run (ADR-0027 D10).
+    suspended: Cell<bool>,
+    /// Set while an ordinary job is on the stack. A job is allowed to drive the
+    /// loop (`settle`, `navigate`), and that re-enters the drain — without this
+    /// the next queued job would run *underneath* the current one, breaking
+    /// their FIFO order and letting it observe borrows the outer job holds.
+    /// Control jobs deliberately ignore this: an answer to a dialog, or a
+    /// close, has to get through a page that is busy.
+    in_job: Cell<bool>,
+    /// Event-loop counters (see [`LoopStats`]).
+    stats: Cell<LoopStats>,
+    /// Nudges the event loop from another OS thread.
+    ///
+    /// A task source whose producer is not this thread — today only a sibling
+    /// page's `storage` write — must have a way to *wake* the loop, not just
+    /// leave work behind. An idle page parks indefinitely in
+    /// [`Page::wait_for_work`], so a queue push that signals nothing is a
+    /// notification that arrives only if something unrelated happens to wake
+    /// the page. The sender is handed to those producers; the receiver joins
+    /// the `Select`.
+    wake_tx: Sender<()>,
+    wake_rx: Receiver<()>,
+    /// Storage writes made by *other* pages of this browsing context, queued
+    /// from their threads and dispatched as `storage` events on this one
+    /// (ADR-0027 D13).
+    ///
+    /// A `Mutex`, not a `RefCell`: the producer is another OS thread. It is
+    /// only ever locked to push or to take the whole queue, never across a
+    /// dispatch, so a `storage` listener that writes cannot deadlock. Bounded
+    /// by [`MAX_STORAGE_EVENTS`], dropping the oldest.
+    storage_events: Arc<Mutex<VecDeque<StorageNotification>>>,
+    /// This page's subscriptions, kept so they can be dropped on navigation
+    /// when the document's origin — and so its areas — change.
+    storage_subs: RefCell<Vec<(SharedStorage, StorageSubscriber)>>,
+    /// The storage key the current handles and subscriptions were built for.
+    ///
+    /// Named `_cache` to keep it distinguishable from the `storage_origin()`
+    /// method, which recomputes the *live* key: they are used a line apart in
+    /// `rebind_storage`, both forms type-check in most positions, and swapping
+    /// them yields a page that writes to one area while filtering
+    /// notifications against another.
+    storage_origin_cache: RefCell<String>,
 }
 
 impl Page {
@@ -1103,6 +1431,9 @@ impl Page {
             lazy_images,
             whole_document_visible,
             dialog_handler,
+            open_window_handler,
+            local_storage,
+            net: shared_net,
         } = options;
         let viewport = viewport.unwrap_or_default();
         let screen = screen.unwrap_or_else(|| ScreenProfile::from_viewport(viewport));
@@ -1131,6 +1462,10 @@ impl Page {
         let dom = Rc::new(RefCell::new(tree));
         let hooks = Rc::new(LoopHooks::default());
         *hooks.dialog_handler.borrow_mut() = dialog_handler;
+        *hooks.open_window_handler.borrow_mut() = open_window_handler;
+        if let Some(local_storage) = local_storage {
+            *hooks.local_storage.borrow_mut() = local_storage;
+        }
         {
             // A promise that rejects with nobody listening is how a broken page
             // fails *silently*: the module evaluated, the app never mounted, and
@@ -1143,7 +1478,7 @@ impl Page {
                 if is_handled {
                     // A handler attached after the fact: retract the rejection.
                     let mut pending = hooks.pending_rejections.borrow_mut();
-                    if let Some(at) = pending.iter().position(|(k, _)| *k == key) {
+                    if let Some(at) = pending.iter().position(|p| p.key == key) {
                         pending.remove(at);
                     }
                     return;
@@ -1158,7 +1493,15 @@ impl Page {
                 // grow them without limit. Dropping the oldest costs the
                 // ability to retract it, which is the same trade the other
                 // streams make.
-                push_bounded(&hooks.pending_rejections, MAX_SCRIPT_ERRORS, (key, error));
+                push_bounded(
+                    &hooks.pending_rejections,
+                    MAX_SCRIPT_ERRORS,
+                    PendingRejection {
+                        key,
+                        error,
+                        queued_at: Instant::now(),
+                    },
+                );
             })));
         }
         let state = oxidepage_bindings::install_with_profiles(
@@ -1172,9 +1515,13 @@ impl Page {
         state.set_whole_document_visible(whole_document_visible);
         hooks.adopt_time_origin(state.time_origin());
 
-        let policy = policy.unwrap_or_default();
-        let (net, net_rx) = NetService::new_with_defaults(policy, request_defaults)
-            .map_err(|e| JsError::Engine(e.to_string()))?;
+        // A shared pool carries its own policy (its client's SSRF connector is
+        // bound to it), so `options.policy` only applies to a private stack.
+        let (net, net_rx) = match shared_net {
+            Some(config) => NetService::with_shared(config, request_defaults),
+            None => NetService::new_with_defaults(policy.unwrap_or_default(), request_defaults)
+                .map_err(|e| JsError::Engine(e.to_string()))?,
+        };
         let net = Rc::new(net);
         hooks.set_net(Rc::clone(&net));
         realm.set_module_loader(Rc::new(ModuleLoader {
@@ -1182,7 +1529,11 @@ impl Page {
             dom: Rc::clone(&state.dom),
         }));
 
-        Ok(Self {
+        // Capacity 1: this is a level trigger ("there is cross-thread work"),
+        // not a queue. A second nudge before the loop drains is redundant, and
+        // dropping it is what keeps a chatty sibling from growing anything.
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        let page = Self {
             state,
             hooks,
             realm,
@@ -1217,7 +1568,24 @@ impl Page {
             start_time: Cell::new(Instant::now()),
             next_render_at: Cell::new(Instant::now()),
             script_budget,
-        })
+            cmd_rx: RefCell::new(None),
+            pending_jobs: RefCell::new(VecDeque::new()),
+            closing: Cell::new(false),
+            suspended: Cell::new(false),
+            in_job: Cell::new(false),
+            stats: Cell::new(LoopStats::default()),
+            wake_tx,
+            wake_rx,
+            storage_events: Arc::new(Mutex::new(VecDeque::new())),
+            storage_subs: RefCell::new(Vec::new()),
+            storage_origin_cache: RefCell::new(String::new()),
+        };
+        // The initial document's areas. `install_storage` already resolved the
+        // same two areas for the wrappers; this takes the subscriptions that
+        // turn a sibling's write into a `storage` event here.
+        *page.storage_origin_cache.borrow_mut() = page.storage_origin();
+        page.resubscribe_storage();
+        Ok(page)
     }
 
     /// Loads an in-memory HTML document as the current document (the document
@@ -1330,16 +1698,217 @@ impl Page {
     }
 
     fn record_navigation(&self, kind: NavigationEventKind, url: &str, error: Option<String>) {
-        push_bounded(
+        let event = NavigationEvent {
+            kind,
+            url: url.to_owned(),
+            error,
+            timestamp: self.state.epoch_now_ms(),
+        };
+        self.hooks.emit_or_push(
             &self.navigation_events,
             MAX_NAVIGATION_EVENTS,
-            NavigationEvent {
-                kind,
-                url: url.to_owned(),
-                error,
-                timestamp: self.state.epoch_now_ms(),
-            },
+            event,
+            PageRecord::Navigation,
         );
+    }
+
+    // === Web Storage notifications (ADR-0027 D13) ===
+
+    /// Subscribes to this document's storage areas, so a write by a sibling
+    /// page of the same context and origin becomes a `storage` event here.
+    ///
+    /// Re-run on every commit: the areas are keyed by origin, so a cross-origin
+    /// navigation must drop the old subscriptions and take new ones — otherwise
+    /// the page would keep hearing about an origin it has left.
+    fn resubscribe_storage(&self) {
+        self.unsubscribe_storage();
+        // Any notification queued for the document that is going away: the
+        // subscriptions below are the *new* origin's, so anything still in the
+        // queue belongs to the area this page is leaving.
+        self.storage_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let subscriber = self.state.storage_subscriber();
+        let mut subs = self.storage_subs.borrow_mut();
+        // `Local` only. A `sessionStorage` area is private to this page by
+        // construction, so `others()` on it is permanently empty and its
+        // callback can never fire — subscribing would allocate a `Weak`, clone
+        // the waker, take the area's lock and retain a second `Arc`, on every
+        // cross-origin navigation, for nothing.
+        {
+            let area = self
+                .hooks
+                .storage(StorageAreaKind::Local, &self.storage_origin());
+            // **`Weak`, not `Arc`.** A page thread that panics never reaches
+            // `unsubscribe_storage`, and the area outlives it (it belongs to
+            // the browsing context). A strong reference would keep this page's
+            // queue alive forever, growing on every sibling write; a weak one
+            // dies with the page and the callback then reports itself dead, so
+            // the area prunes the entry on the next notification.
+            let queue = Arc::downgrade(&self.storage_events);
+            // Waking is half the job. The queue push alone leaves the work
+            // where an idle page — parked indefinitely in `wait_for_work` —
+            // will never look at it.
+            let waker = self.waker();
+            {
+                let mut guard = area.lock().unwrap_or_else(|e| e.into_inner());
+                // The callback runs on the *writing* page's thread, so it only
+                // parks the notification. Dispatching it here would mean
+                // entering another realm from the wrong thread.
+                guard.subscribe(
+                    subscriber,
+                    Arc::new(move |notification| {
+                        let Some(queue) = queue.upgrade() else {
+                            return false; // this page is gone; prune me
+                        };
+                        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        while queue.len() >= MAX_STORAGE_EVENTS {
+                            queue.pop_front();
+                        }
+                        queue.push_back(notification);
+                        drop(queue);
+                        // Level trigger, capacity 1: a full channel already
+                        // means "there is work", so a failed send is success.
+                        let _ = waker.try_send(());
+                        true
+                    }),
+                );
+            }
+            subs.push((area, subscriber));
+        }
+    }
+
+    /// Drops every subscription this page holds on a shared storage area.
+    fn unsubscribe_storage(&self) {
+        for (area, subscriber) in self.storage_subs.borrow_mut().drain(..) {
+            let mut area = area.lock().unwrap_or_else(|e| e.into_inner());
+            area.unsubscribe(subscriber);
+        }
+    }
+
+    /// The key this document's storage areas are looked up by.
+    ///
+    /// Delegates to `bindings`, which is where the rule lives: the wrapper
+    /// installation resolves the same key, and a second copy of the rule here
+    /// is exactly how a page ends up writing to one area and listening on
+    /// another.
+    fn storage_origin(&self) -> String {
+        let url = self.state.dom.borrow().document_url().to_owned();
+        oxidepage_bindings::storage_origin_of(&url, self.state.storage_subscriber().id())
+    }
+
+    /// Re-points this document's storage handles and subscriptions at the areas
+    /// of its current origin.
+    ///
+    /// A no-op for a same-origin navigation, which is the common case: the
+    /// areas `hooks.storage` would return are the very same `Arc`s.
+    fn rebind_storage(&self) {
+        let origin = self.storage_origin();
+        if *self.storage_origin_cache.borrow() == origin {
+            return;
+        }
+        *self.storage_origin_cache.borrow_mut() = origin;
+        // No `with_cx`: re-pointing the handles is pure Rust, and entering the
+        // realm here would run `sync_named_properties` against the document
+        // this commit is replacing.
+        oxidepage_bindings::refresh_storage(&self.state);
+        self.resubscribe_storage();
+    }
+
+    /// Task source: `storage` events queued by sibling pages. Returns whether
+    /// any were dispatched.
+    fn drain_storage_events(&self) -> bool {
+        let pending: Vec<_> = {
+            let mut queue = self
+                .storage_events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.is_empty() {
+                return false;
+            }
+            queue.drain(..).collect()
+        };
+        // The cached key, not a fresh parse: `rebind_storage` keeps it current
+        // at every commit, and recomputing it here would re-parse the document
+        // URL on every drain.
+        let origin = self.storage_origin_cache.borrow().clone();
+        let mut dispatched = false;
+        for notification in &pending {
+            // Delivery is not done under the area's lock, so a subscriber list
+            // is a snapshot: this page can unsubscribe and navigate to another
+            // origin between the snapshot and the call, and a notification for
+            // the origin it left would otherwise be dispatched at the *new*
+            // document — handing script another origin's keys and values.
+            if notification.origin != origin {
+                continue;
+            }
+            dispatched = true;
+            self.with_cx(|cx| {
+                if let Err(error) = oxidepage_bindings::dispatch_storage_event(cx, notification) {
+                    report_throw(&self.hooks, error);
+                }
+            });
+        }
+        // Whether anything was *dispatched*, not whether the queue was
+        // non-empty: a page that has just navigated cross-origin drops a whole
+        // burst of stale notifications, and reporting that as progress would
+        // force a redundant pass over every other task source.
+        dispatched
+    }
+
+    /// Installs (or removes) the push sink for [`PageRecord`]s (ADR-0027 D6).
+    ///
+    /// While a sink is installed the four pull streams stay empty: a record
+    /// goes to the sink *or* to its stream, never both. `None` restores the
+    /// pull-only behavior, which is what the CLI and every direct embedder use.
+    ///
+    /// Promise rejections are the one thing not pushed at the moment they
+    /// happen — a rejection with a handler attached later is retracted, so it
+    /// is not an error yet. They are forwarded by
+    /// [`Page::flush_unhandled_rejections`] once the page reaches
+    /// [idle](Page::is_idle), or after a grace period on a page that never
+    /// does.
+    pub fn set_event_sink(&self, sink: Option<EventSink>) {
+        *self.hooks.event_sink.borrow_mut() = sink;
+    }
+
+    /// Forwards promise rejections still unhandled to the installed
+    /// [`EventSink`], if any. A no-op without a sink (the pull API's
+    /// `drain_errors` reports them instead).
+    ///
+    /// Called at every quiescent point of the loop. A rejection is reported
+    /// once the page is idle, or once it has gone unhandled for
+    /// [`UNHANDLED_REJECTION_GRACE`]. See [`PendingRejection`] for why neither
+    /// condition alone is enough.
+    fn flush_unhandled_rejections(&self) {
+        if self.hooks.event_sink.borrow().is_none()
+            // Cheap emptiness check *before* `is_idle`, which walks the whole
+            // timer heap. A driver always installs a sink, so the guard above
+            // never fires under `engine` — and a polling app with thousands of
+            // live timers would otherwise pay that scan on every loop turn to
+            // discover there was nothing to report.
+            || self.hooks.pending_rejections.borrow().is_empty()
+        {
+            return;
+        }
+        let idle = self.is_idle();
+        let ripe: Vec<ScriptError> = {
+            let mut pending = self.hooks.pending_rejections.borrow_mut();
+            let mut ripe = Vec::new();
+            pending.retain(|entry| {
+                if idle || entry.queued_at.elapsed() >= UNHANDLED_REJECTION_GRACE {
+                    ripe.push(entry.error.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            ripe
+        };
+        for error in ripe {
+            self.hooks.emit(PageRecord::Error(error));
+        }
     }
 
     /// Resolves a possibly-relative URL against the current document URL.
@@ -1589,6 +2158,11 @@ impl Page {
             .borrow_mut()
             .set_document_url(final_url.clone());
         self.commit_history(final_url.clone(), target);
+        // The realm survives a navigation, so `localStorage`/`sessionStorage`
+        // must be re-pointed at the *new* origin's areas — and this page must
+        // re-subscribe there. Done at the commit, after the document URL is
+        // final and before any script of the new document can run.
+        self.rebind_storage();
         self.record_navigation(NavigationEventKind::Committed, &final_url, None);
 
         // Decode with full spec sniffing (BOM > HTTP charset > `<meta charset>`)
@@ -2348,13 +2922,331 @@ impl Page {
         self.run_until_stalled_until(Instant::now() + SUBRESOURCE_BUDGET);
     }
 
+    // === The embedder command port (ADR-0027 D2–D5) ===
+
+    /// The one blocking wait: park until a net event arrives, a command
+    /// arrives, or `deadline` passes. `None` parks indefinitely, so an idle
+    /// page with a command port costs no CPU at all.
+    ///
+    /// This is the single point ADR-0004's "one blocking wait, never a
+    /// busy-wait" property lives at — every waiting caller in this file goes
+    /// through it, and it parks exactly once per call whether one channel is
+    /// registered or two.
+    ///
+    /// Returns `false` when the command channel has disconnected, which is the
+    /// driver dropping its handle: the caller must stop looping. Re-selecting a
+    /// disconnected receiver would be the busy-wait this exists to prevent — a
+    /// disconnected `Receiver` is permanently *ready* in a `Select`, so
+    /// `select_deadline` would return instantly, forever.
+    fn wait_for_work(&self, deadline: Option<Instant>) -> bool {
+        let mut stats = self.stats.get();
+        stats.blocking_waits += 1;
+        self.stats.set(stats);
+        let entered = Instant::now();
+        let _park = ParkTimer {
+            stats: &self.stats,
+            entered,
+        };
+
+        // A `crossbeam_channel::Receiver` is a cheap `Arc` clone onto the same
+        // channel, so cloning it out releases the `RefCell` borrow before the
+        // (possibly very long) park — otherwise a control job that takes the
+        // port away would hit a `BorrowMutError`.
+        let cmd_rx = self.cmd_rx.borrow().clone();
+
+        // A suspended page delivers nothing of its own — and a net event
+        // *does* run script (it resolves a `fetch`/XHR promise and runs a
+        // microtask checkpoint), so leaving this arm live would let a frozen
+        // page execute callbacks behind the driver's back. Deregistering
+        // rather than receive-and-discard: the events must still be there on
+        // resume, and a registered-but-undrained ready channel would spin.
+        let suspended = self.suspended.get();
+        let mut select = crossbeam_channel::Select::new();
+        let net_op = (!suspended).then(|| select.recv(&self.net_rx));
+        // Always registered, port or not: a `storage` write by a sibling page
+        // must wake a page an embedder is driving by hand too.
+        let wake_op = select.recv(&self.wake_rx);
+        let cmd_op = cmd_rx.as_ref().map(|rx| select.recv(rx));
+        let op = match deadline {
+            Some(deadline) => match select.select_deadline(deadline) {
+                Ok(op) => op,
+                // Timed out: the caller re-runs whatever is now due.
+                Err(_) => return true,
+            },
+            None => select.select(),
+        };
+        let index = op.index();
+        if Some(index) == net_op {
+            match op.recv(&self.net_rx) {
+                Ok(event) => self.dispatch_net_event(event),
+                // Unreachable: `NetService` owns the sender for as long as the
+                // page owns the service. Returning `false` rather than `true`
+                // anyway, because a disconnected receiver is permanently ready
+                // in a `Select` — treating it as a spurious wakeup would turn
+                // the one park into a pegged core if that invariant ever broke.
+                Err(_) => {
+                    debug_assert!(false, "net channel disconnected while the page owns it");
+                    return false;
+                }
+            }
+        } else if index == wake_op {
+            // A level trigger: the work itself is picked up by the task source
+            // that owns it on the next pass.
+            let _ = op.recv(&self.wake_rx);
+        } else {
+            let cmd_rx = cmd_rx.as_ref().expect("command op registered");
+            debug_assert_eq!(Some(index), cmd_op);
+            match op.recv(cmd_rx) {
+                Ok(job) => self.accept_job(job),
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
+    /// A handle other threads use to wake this page's event loop.
+    fn waker(&self) -> Sender<()> {
+        self.wake_tx.clone()
+    }
+
+    /// Whether the loop is at a point an ordinary job may run at.
+    ///
+    /// The `navigating`/`parsing` pair is the same guard the queued-navigation
+    /// drain uses, and for the same reason: `await_subresources` and
+    /// `await_pending_stylesheets` park *inside* `load_document`, which holds
+    /// borrows on the DOM and style engines and live parser handles. A job that
+    /// evaluated script there would panic on those borrows.
+    fn can_run_jobs(&self) -> bool {
+        !self.in_job.get()
+            && !self.suspended.get()
+            && !self.navigating.get()
+            && !self.state.parsing()
+    }
+
+    /// Runs `job` now if it is safe to, otherwise parks it for the top of the
+    /// loop.
+    fn accept_job(&self, job: PageJob) {
+        if job.is_control() || self.can_run_jobs() {
+            self.run_job(job);
+        } else {
+            let mut stats = self.stats.get();
+            stats.jobs_deferred += 1;
+            self.stats.set(stats);
+            self.pending_jobs.borrow_mut().push_back(job);
+        }
+    }
+
+    fn run_job(&self, job: PageJob) {
+        let mut stats = self.stats.get();
+        stats.jobs_run += 1;
+        self.stats.set(stats);
+        // A control job runs *inside* whatever is on the stack (possibly
+        // another job), so it must not disturb the flag.
+        if job.is_control() {
+            job.run(self);
+            return;
+        }
+        let outer = self.in_job.replace(true);
+        job.run(self);
+        self.in_job.set(outer);
+    }
+
+    /// Task source: the jobs a nested wait parked. Returns whether any ran.
+    ///
+    /// Bounded by the queue length on entry, so a job that enqueues another
+    /// cannot starve the page's own task sources.
+    fn drain_commands(&self) -> bool {
+        // A page with no port pays exactly this one branch per loop iteration.
+        if self.cmd_rx.borrow().is_none() || !self.can_run_jobs() {
+            return false;
+        }
+        let mut budget = self.pending_jobs.borrow().len();
+        let mut ran = false;
+        while budget > 0 {
+            // Re-checked every iteration, not once for the batch: a job may
+            // suspend the page or start a navigation, and the jobs behind it
+            // must then park like any other.
+            if !self.can_run_jobs() {
+                break;
+            }
+            let Some(job) = self.pending_jobs.borrow_mut().pop_front() else {
+                break;
+            };
+            self.run_job(job);
+            ran = true;
+            budget -= 1;
+            if self.closing.get() {
+                break;
+            }
+        }
+        ran
+    }
+
+    /// Runs the loop until `done`, or until `budget` elapses.
+    ///
+    /// The one place a *budgeted* wait is expressed. There used to be three
+    /// copies of this loop, and they had already drifted: `settle` folded the
+    /// next rendering opportunity into its deadline while the two `await_*`
+    /// loops did not, so a page with a pending animation frame and no timer
+    /// parked for the whole remaining budget instead of waking to service it.
+    /// Worse, that shape is what let the suspend busy-wait be fixed in one
+    /// waiter and survive in the others. A fifth waiter added later gets all
+    /// three rules — give up on close/suspend, fold in every deadline, stop
+    /// when the command port disconnects — by construction.
+    fn wait_until(&self, budget: Duration, done: impl Fn(&Self) -> bool) {
+        let end = Instant::now() + budget;
+        loop {
+            self.run_until_stalled_until(end);
+            if done(self) || self.stop_waiting() {
+                return;
+            }
+            if Instant::now() >= end {
+                return;
+            }
+            if !self.wait_for_work(Some(self.next_wakeup().map_or(end, |at| at.min(end)))) {
+                return;
+            }
+        }
+    }
+
+    /// The earliest moment the loop has work of its own to do: the next timer,
+    /// or the next rendering opportunity when an animation frame is pending.
+    fn next_wakeup(&self) -> Option<Instant> {
+        let render_at = self
+            .hooks
+            .has_pending_raf()
+            .then(|| self.next_render_at.get());
+        [self.hooks.next_deadline(), render_at]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// Whether a waiting loop must give up rather than park again.
+    ///
+    /// Two reasons, and both have to be checked *in the loop* rather than only
+    /// on entry, because a `control` job delivers either of them **at the wait
+    /// point itself**:
+    ///
+    /// - closing: a `settle` that ran its full budget after a close request
+    ///   would still be executing script when the driver's bounded join gave up
+    ///   and detached the thread;
+    /// - suspended: nothing can progress, so there is nothing to wait for — and
+    ///   worse, `next_deadline` keeps yielding the now-past deadline of a timer
+    ///   a suspended page will never fire, so each iteration would park on an
+    ///   elapsed instant and return instantly. That is a pegged core for the
+    ///   rest of the budget: the busy-wait ADR-0004 exists to forbid, reached
+    ///   through the change that was meant to freeze the page.
+    fn stop_waiting(&self) -> bool {
+        self.closing.get() || self.suspended.get()
+    }
+
+    /// Asks the loop driven by [`Page::run_command_loop`] to stop.
+    ///
+    /// Safe from a control job: it sets a `Cell` and nothing else.
+    pub fn request_close(&self) {
+        self.closing.set(true);
+    }
+
+    /// Whether a close has been requested.
+    #[must_use]
+    pub fn is_closing(&self) -> bool {
+        self.closing.get()
+    }
+
+    /// Freezes the page: no timers fire, no network is delivered, no script
+    /// runs, and no ordinary job is serviced.
+    ///
+    /// Control jobs and [`Page::resume`] keep working, which is what makes a
+    /// suspended page controllable. A page suspended from birth has nothing to
+    /// hold back — [`Page::new`] does not navigate ([`PageOptions::url`] only
+    /// seeds the document URL) — but this is deliberately not limited to that
+    /// case: a page suspended later would otherwise keep running
+    /// attacker-controlled script while refusing every driver command, which is
+    /// the opposite of what a driver asks for when it suspends.
+    pub fn suspend(&self) {
+        self.suspended.set(true);
+    }
+
+    /// Resumes a [suspended](Page::suspend) page. Jobs parked meanwhile run at
+    /// the next pass of the loop, in the order they arrived.
+    pub fn resume(&self) {
+        self.suspended.set(false);
+    }
+
+    /// Event-loop counters since construction (see [`LoopStats`]).
+    #[must_use]
+    pub fn loop_stats(&self) -> LoopStats {
+        self.stats.get()
+    }
+
+    /// True when the loop has nothing left to do: no timer, no pending
+    /// animation frame, no in-flight subresource and no in-flight
+    /// `fetch`/XHR. Exactly the condition [`Page::settle`] returns on.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        !self.hooks.has_live_timer()
+            && !self.hooks.has_pending_raf()
+            && self.in_flight.get() == 0
+            && self.state.net_pending() == 0
+    }
+
+    /// Drives the page from `rx` until the channel closes or a control job
+    /// calls [`Page::request_close`] — the whole life of a page thread.
+    ///
+    /// The loop lives here rather than in the driver because only this crate
+    /// can install the receiver into [`Page::wait_for_work`], which is what
+    /// keeps a command and a net event sharing *one* park. What a command
+    /// *means* stays with the driver: a job is an opaque closure, so this crate
+    /// learns nothing about browsers or protocols.
+    pub fn run_command_loop(&self, rx: Receiver<PageJob>) {
+        *self.cmd_rx.borrow_mut() = Some(rx);
+        while !self.closing.get() {
+            self.run_until_stalled_until(Instant::now() + SUBRESOURCE_BUDGET);
+            if self.closing.get() {
+                break;
+            }
+            self.flush_unhandled_rejections();
+            // Park until something happens. With no timer, no pending frame and
+            // no network, `None` is an indefinite park — the page sleeps until
+            // the driver speaks.
+            // A suspended page fires nothing, so waking at a timer deadline it
+            // will not service would spin the loop at the timer's rate — the
+            // busy-wait ADR-0004 exists to prevent, reached through the change
+            // that was meant to freeze the page. It waits for a command.
+            let deadline = (!self.suspended.get())
+                .then(|| self.next_wakeup())
+                .flatten();
+            if !self.wait_for_work(deadline) {
+                break;
+            }
+        }
+        // Drop the port so a late `send` fails fast rather than queueing into a
+        // channel nobody will read.
+        self.cmd_rx.borrow_mut().take();
+        // Leave the shared storage areas' notify lists. They belong to the
+        // browsing context, not to this page, so a browser that opens and
+        // closes pages would otherwise accumulate one dead subscriber per page
+        // for the life of the context.
+        self.unsubscribe_storage();
+    }
+
     /// [`Self::run_until_stalled`] bounded by a wall-clock `deadline`. The
     /// nesting clamp already keeps a zero-delay self-reposting timer from
     /// spinning; this deadline is a hard backstop so no now-runnable workload
     /// (timers, floods of net events) can keep the loop from returning.
     fn run_until_stalled_until(&self, deadline: Instant) {
         loop {
+            let mut stats = self.stats.get();
+            stats.turns += 1;
+            self.stats.set(stats);
             self.process_finalized();
+            // A suspended page runs nothing of its own. GC finalization above
+            // is bookkeeping, not page work, and must keep running or the
+            // wrapper cache would grow for as long as the page is held.
+            if self.suspended.get() {
+                return;
+            }
             // A navigation queued by script (ADR-0022). It comes first because
             // it invalidates everything below it: the document, and with it
             // every queued update keyed on a node of the outgoing tree.
@@ -2382,6 +3274,18 @@ impl Page {
                 // new one rather than finishing this pass over the old.
                 continue;
             }
+            // The embedder's task source. After the navigation drain, because a
+            // queued navigation invalidates every node id a job might be
+            // holding; before the page's own sources, because a job is the
+            // driver's turn and must not be starved by page work.
+            if self.drain_commands() {
+                if self.closing.get() || Instant::now() >= deadline {
+                    break;
+                }
+                // A job may have navigated or run script; restart the drain
+                // order rather than finishing this pass against a stale view.
+                continue;
+            }
             // Tasks (timers, event handlers) may have inserted/removed
             // `<style>`/`<link>` elements; apply those to the style engine.
             self.drain_style_updates();
@@ -2405,6 +3309,9 @@ impl Page {
             // earlier read, now that this tick's font-face scan ran (a no-op
             // unless something is actually waiting).
             self.settle_font_ready();
+            // A sibling page of this browsing context wrote to a shared storage
+            // area; deliver the `storage` events it owes this document.
+            progressed |= self.drain_storage_events();
             // Script scrolls queue `scroll` events; dispatch them as tasks.
             progressed |= self.drain_scroll_events();
             // Deliver ResizeObserver/IntersectionObserver notifications. Driven
@@ -2439,66 +3346,23 @@ impl Page {
     /// Runs the loop until nothing is left to do — waiting for future timers
     /// and in-flight network — or `budget` elapses.
     ///
-    /// `recv_deadline` is the crux: one blocking wait that wakes on a net
-    /// event OR the next timer deadline OR the budget end.
+    /// [`Page::wait_for_work`] is the crux: one blocking wait that wakes on a
+    /// net event OR an embedder command OR the next timer deadline OR the
+    /// budget end.
     pub fn settle(&self, budget: Duration) {
-        let end = Instant::now() + budget;
-        loop {
-            self.run_until_stalled_until(end);
-            let next_timer = self.hooks.next_deadline();
-            let pending_raf = self.hooks.has_pending_raf();
-            if next_timer.is_none()
-                && !pending_raf
-                && self.in_flight.get() == 0
-                && self.state.net_pending() == 0
-            {
-                // Idle reached rather than the budget running out — the
-                // distinction a `NetworkIdle` milestone is there to record.
-                // Once per document: every `eval`/`dispatch_*` ends in a settle
-                // that reaches idle, and one milestone per call is noise the
-                // stream would never stop growing by.
-                if !self.network_idle_recorded.replace(true) {
-                    self.record_document_milestone(NavigationEventKind::NetworkIdle);
-                }
-                return;
-            }
-            let now = Instant::now();
-            if now >= end {
-                return;
-            }
-            // Wake at the earliest of: the next timer, the next rendering
-            // opportunity (bounding any endless rAF loop by the budget), or the
-            // budget end.
-            let render_at = pending_raf.then(|| self.next_render_at.get());
-            let deadline = [next_timer, render_at, Some(end)]
-                .into_iter()
-                .flatten()
-                .min()
-                .unwrap_or(end);
-            // On a deadline timeout the loop re-runs any now-due work.
-            if let Ok(event) = self.net_rx.recv_deadline(deadline) {
-                self.dispatch_net_event(event);
-            }
+        self.wait_until(budget, Self::is_idle);
+        // Idle reached rather than the budget running out — the distinction a
+        // `NetworkIdle` milestone is there to record. Once per document: every
+        // `eval`/`dispatch_*` ends in a settle that reaches idle, and one
+        // milestone per call is noise the stream would never stop growing by.
+        if self.is_idle() && !self.network_idle_recorded.replace(true) {
+            self.record_document_milestone(NavigationEventKind::NetworkIdle);
         }
     }
 
     /// Blocks (bounded by `budget`) until no network request is in flight.
     fn await_subresources(&self, budget: Duration) {
-        let end = Instant::now() + budget;
-        loop {
-            self.run_until_stalled_until(end);
-            if self.in_flight.get() == 0 {
-                return;
-            }
-            let now = Instant::now();
-            if now >= end {
-                return;
-            }
-            let deadline = self.hooks.next_deadline().map_or(end, |t| t.min(end));
-            if let Ok(event) = self.net_rx.recv_deadline(deadline) {
-                self.dispatch_net_event(event);
-            }
-        }
+        self.wait_until(budget, |page| page.in_flight.get() == 0);
     }
 
     /// Routes a net event to its handler: page-level async scripts stay here;
@@ -3573,21 +4437,7 @@ impl Page {
     /// Blocks (bounded by `budget`) until no stylesheet is loading, so a
     /// following script sees a consistent style set (render-blocking sheets).
     fn await_pending_stylesheets(&self, budget: Duration) {
-        let end = Instant::now() + budget;
-        loop {
-            self.run_until_stalled_until(end);
-            if self.pending_stylesheets.get() == 0 {
-                return;
-            }
-            let now = Instant::now();
-            if now >= end {
-                return;
-            }
-            let deadline = self.hooks.next_deadline().map_or(end, |t| t.min(end));
-            if let Ok(event) = self.net_rx.recv_deadline(deadline) {
-                self.dispatch_net_event(event);
-            }
-        }
+        self.wait_until(budget, |page| page.pending_stylesheets.get() == 0);
     }
 
     fn fire_timer(&self, timer: Timer) {
@@ -3699,7 +4549,7 @@ impl Page {
         errors.extend(
             drain_stream(&self.hooks.pending_rejections)
                 .into_iter()
-                .map(|(_key, error)| error),
+                .map(|pending| pending.error),
         );
         errors
     }
@@ -3720,6 +4570,24 @@ impl Page {
     /// [`Page::set_viewport`] for a page already alive.
     pub fn set_dialog_handler(&self, handler: Option<DialogHandler>) {
         *self.hooks.dialog_handler.borrow_mut() = handler;
+    }
+
+    /// The flag a driver reads to know this page is parked on a dialog.
+    ///
+    /// Shared, so the answer needs no round trip — which is the point: a page
+    /// inside `run_dialog` answers nothing.
+    #[must_use]
+    pub fn dialog_open_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.hooks.dialog_open)
+    }
+
+    /// Installs (or removes) the handler that opens sibling browsing contexts
+    /// for `window.open` and `<a target=_blank>`.
+    ///
+    /// `None` restores the single-browsing-context default: `window.open`
+    /// returns `null`, and a targeted link navigates in place with a warning.
+    pub fn set_open_window_handler(&self, handler: Option<OpenWindowHandler>) {
+        *self.hooks.open_window_handler.borrow_mut() = handler;
     }
 
     /// True once the `load` event has fired.

@@ -22,6 +22,8 @@ use crate::state::{
     JsRefs, MediaQueryListData, NavigatorData, PageState, RecordView, RectData, ResizeObserverData,
     RoEntryView, ScreenData, TAG_NODE, TAG_SLAB,
 };
+use crate::storage::StorageHandle;
+use crate::window_open::WindowProxyData;
 
 /// Glue-function signature emitted by the codegen.
 pub(crate) type NativeFn = fn(&BindCx<'_>, &HostCall) -> Result<JsValue, JsThrow>;
@@ -862,6 +864,23 @@ impl BindCx<'_> {
         })
     }
 
+    pub(crate) fn this_window_proxy(
+        &self,
+        value: &JsValue,
+    ) -> Result<Rc<WindowProxyData>, JsThrow> {
+        self.slab_data(value, "WindowProxy", |data| match data {
+            HostData::WindowProxy(proxy) => Some(Rc::clone(proxy)),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn this_storage(&self, value: &JsValue) -> Result<Rc<StorageHandle>, JsThrow> {
+        self.slab_data(value, "Storage", |data| match data {
+            HostData::Storage(storage) => Some(Rc::clone(storage)),
+            _ => None,
+        })
+    }
+
     pub(crate) fn this_abort_signal(
         &self,
         value: &JsValue,
@@ -1302,6 +1321,20 @@ impl BindCx<'_> {
 
     pub(crate) fn new_performance(&self) -> Result<JsValue, JsThrow> {
         self.new_slab_object("Performance", HostData::Performance)
+    }
+
+    /// Wraps one storage area as a `Storage` instance.
+    pub(crate) fn new_storage(&self, handle: Rc<StorageHandle>) -> Result<JsValue, JsThrow> {
+        self.new_slab_object("Storage", HostData::Storage(handle))
+    }
+
+    /// Wraps the sibling browsing context the embedder just opened.
+    pub(crate) fn new_window_proxy(
+        &self,
+        window: crate::window_open::OpenedWindow,
+    ) -> Result<JsValue, JsThrow> {
+        let data = Rc::new(WindowProxyData { window });
+        self.new_slab_object("WindowProxy", HostData::WindowProxy(data))
     }
 
     pub(crate) fn new_media_query_list(

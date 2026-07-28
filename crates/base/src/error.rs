@@ -44,6 +44,8 @@ pub enum DomExceptionKind {
     /// The object does not support the operation or argument (e.g.
     /// `XMLHttpRequest.open` with `async = false`).
     InvalidAccessError,
+    /// The quota has been exceeded (e.g. a `localStorage` write past 5 MiB).
+    QuotaExceededError,
 }
 
 impl DomExceptionKind {
@@ -65,6 +67,7 @@ impl DomExceptionKind {
             Self::NotAllowedError => "NotAllowedError",
             Self::SecurityError => "SecurityError",
             Self::InvalidAccessError => "InvalidAccessError",
+            Self::QuotaExceededError => "QuotaExceededError",
         }
     }
 }

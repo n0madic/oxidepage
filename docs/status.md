@@ -466,4 +466,82 @@ v1 limits.
   no `@media print` or relayout at paper width, and no CSS fragmentation
   properties, header/footer templates, tagged PDF or WebP encoding. Decisions and
   v1 limits: ADR-0026.
-- Phases 8+ (GPU raster, C ABI, CDP, …): not started.
+- **Browser, contexts, multiple pages, async commands**: done — stage 5 of the
+  automation roadmap, and design Phase 8's embedding surface. A `Page` is
+  permanently `!Send` (rquickjs is pinned without `parallel`; stylo keeps
+  thread-local caches), so the concurrency lives one level up: `crates/engine`,
+  a documented stub until now, is `Browser` → `BrowserContext` → `PageHandle`,
+  all `Send + Sync`, each a handle over a crossbeam channel to an OS thread that
+  owns exactly one `Page` for its whole life. Commands are **boxed closures**,
+  not a command enum: a closure runs *on* the page thread, so it can take the
+  `Ref<'_, DomTree>` that could never cross a channel and send back an owned
+  projection. `PageHandle::with(|page| …)` therefore covers the whole tail of
+  the `Page` API — including methods that do not exist yet — and
+  `navigate`/`eval_to_string`/`settle`/`screenshot`/`pdf`/`content`/
+  `set_viewport`/`loop_stats` are one-line typed wrappers over it, each round
+  trip bounded by a command timeout so a wedged page reports rather than hangs.
+  In `page` the port is a **task source**: ordinary jobs drain at the top of
+  `run_until_stalled_until` under the same `!navigating && !parsing` guard a
+  queued navigation uses (a job that ran mid-parse would be a deterministic
+  `BorrowMutError`, not a race), while a small, auditable set of **control**
+  jobs — closing a page and resuming a suspended one, which touch nothing but
+  `Cell`s — runs at whatever wait point receives it, and that is what keeps a
+  page interruptible while it is blocked on a slow load. A dialog answer is the
+  related case that is deliberately *not* a job: it comes over its own
+  rendezvous channel, because a page parked in `run_dialog` services no ordinary
+  job and an answer queued on the command port would sit behind the very block
+  it is meant to release (both of its exits — a timeout and the driver
+  disconnecting — fall back to the auto-dismiss a page with no handler gives).
+  The three `recv_deadline` sites collapsed
+  into one `Page::wait_for_work` over a `crossbeam::Select` of the net receiver
+  and the command port, so ADR-0004's "exactly one blocking wait per iteration"
+  is preserved literally rather than morally; a `None` deadline parks
+  indefinitely, so an idle page with a live port costs 0% CPU, and
+  `Page::loop_stats` counts the parks that prove it. Pages can start
+  **suspended** and `resume()` later, which is what stage 10's
+  `Runtime.runIfWaitingForDebugger` will need. `Page::set_event_sink` lays a
+  push `PageEvent` bus over the four funnels that already record an observable
+  fact (console, errors, dialogs, navigation milestones) — no second recording
+  path; with no sink installed behavior is byte-for-byte what it was, and the
+  pull API (`drain_console`/`drain_errors`/`drain_dialog_events`) stays for the
+  CLI. Unhandled rejections are the deliberate exception: they flush when the
+  page is *idle*, not at the funnel, because a handler attaching later must
+  still be able to retract one. Networking is shared where sharing is safe: a
+  `NetPool` owns one tokio runtime, one hyper connection pool and one HTTP cache
+  for the whole browser, the cache key grows a `CachePartition` so one context
+  cannot probe a sibling's history through hit/miss timing, the cookie jar is
+  per context, and the per-page byte and request budgets stay **per page** (a
+  limit that changed meaning when a second page opened would be worse than no
+  limit). `ResourcePolicy` is browser-wide, because the SSRF connector is baked
+  into the shared client. The expensive part of fonts — the system scan — was
+  already process-wide, and web fonts still deliberately do not leak between
+  pages. `window.open` is real: a `WindowProxy` IDL interface (`closed`,
+  `close()`, `focus()`, writable `location`) over one `HostHooks::open_window`
+  hook that `<a target=_blank>` shares. With no hook installed — a bare `Page`,
+  the CLI — `window.open` returns `null`, which is the answer every popup
+  blocker gives and is feature-detectable, and a targeted link still navigates
+  in place with a warning. Web Storage moved out of `bootstrap.js`: `Storage` is
+  a real IDL interface, `localStorage` is per (context, origin) and
+  `sessionStorage` per page, a write fires a real `StorageEvent` in the sibling
+  pages of the context, keys iterate in `BTreeMap` order so `key(i)` is stable
+  across calls, and a 5 MiB per-area quota throws `QuotaExceededError`; the JS
+  `Proxy` stays, because it *is* the named-property surface (`s.foo`,
+  `delete s.foo`, `Object.keys(s)`) the code generator cannot express. Reading a
+  sibling's `w.location` throws `SecurityError`, exactly as a cross-origin
+  `WindowProxy` does, and `w.focus()` is reported to the embedder as
+  `PageEvent::FocusRequested` rather than acted on — there is no window manager
+  to raise anything. **Not implemented:** named `window.open` targets,
+  `window.opener`, cross-page `postMessage` and `noopener` (so
+  `open(u, "x")` twice opens two pages); network events on the `PageEvent` bus
+  (stage 6 needs a bounded response-body LRU regardless, and a half-version now
+  is one that stage 6 would have to replace); a per-context `ResourcePolicy`;
+  a browser-wide concurrent-connection ceiling (the 16-fetch cap stays per
+  page); shared web fonts; and permissions per context — there is no Permissions
+  API in the engine at all, so a `PermissionState` map that no code consults
+  would be exactly the always-installed no-op P6 forbids. `capi`/cbindgen and a
+  windowed embedder remain out of scope. Decisions and v1 limits: ADR-0027.
+- Phases 8+: Phase 8 (embedding surface) is **half landed** — `engine` is real,
+  per the entry above; the C ABI (`capi` + cbindgen header, a ctypes example)
+  and the versioning policy are not. Phase 9 (CDP, `cdp`) and GPU raster
+  (`raster-vello`) are not started; those three crates are still documented
+  stubs.
