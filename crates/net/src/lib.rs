@@ -13,6 +13,8 @@
 //! - [`fetch`]: the hand-rolled redirect/cookie/referrer pipeline (re-enters
 //!   per hop, so SSRF is re-validated on every redirect).
 //! - [`file`]: opt-in, jailed `file://` loading.
+//! - [`data`]: `data:` URL decoding, handled beside `file://` above the scheme
+//!   gate so every consumer of the pipeline gets it without a special case.
 //! - [`service`]: `NetService`, the async net ↔ sync page bridge, plus
 //!   `NetPool` — the runtime, connection pool and cache a browser shares
 //!   across its pages (ADR-0027 D7).
@@ -21,6 +23,7 @@ pub mod cache;
 pub mod client;
 pub mod connector;
 pub mod cookies;
+pub mod data;
 pub mod error;
 pub mod fetch;
 pub mod file;
@@ -31,6 +34,7 @@ pub mod service;
 pub use cache::{CachePartition, HttpCache};
 pub use client::HttpClient;
 pub use cookies::{CookieJar, CookieSource};
+pub use data::DataBody;
 pub use error::{NetError, NetResult};
 pub use fetch::{
     Credentials, FetchEngine, FetchOutcome, NetRequest, RequestDefaults, RequestMode, ResponseHead,

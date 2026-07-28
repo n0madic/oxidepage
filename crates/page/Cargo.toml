@@ -29,6 +29,7 @@ percent-encoding = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros"] }
 image = { workspace = true }
+percent-encoding = { workspace = true }
 
 [[bench]]
 name = "geometry_rmw"

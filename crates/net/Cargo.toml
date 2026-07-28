@@ -23,6 +23,7 @@ webpki-roots = { workspace = true }
 crossbeam-channel = { workspace = true }
 async-compression = { workspace = true }
 url = { workspace = true }
+percent-encoding = { workspace = true }
 psl = { workspace = true }
 http-cache-semantics = { workspace = true }
 encoding_rs = { workspace = true }

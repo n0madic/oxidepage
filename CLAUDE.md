@@ -153,6 +153,8 @@ The cached display list is keyed on a `PaintStamp` (dom/style/element-scroll/ima
 
 `NetService` owns a multi-thread tokio runtime *living on the page thread*; requests are spawned and progress comes back as `NetEvent::{Headers, Chunk, Done, Error}` over a crossbeam channel, tagged by `RequestId`. `dispatch_net_event` routes by id through the page-owned maps (async scripts → sheets → images → fonts), falling through to `bindings::deliver_net_event` for script-initiated `fetch`/XHR. It **must** call `finish` on every terminal event or the bookkeeping grows unbounded.
 
+**`data:` is decoded above the scheme gate, not by widening it** (ADR-0029). `fetch_inner` returns early for `data:` beside `file://`, so every consumer — scripts of all four flavours, modules, sheets, `@import`, images, fonts, `fetch`/XHR — gets it for free and the async ones keep their `NetEvent` timing. Do **not** add `data` to `ResourcePolicy::allowed_schemes`: the early return is deliberately *outside* the redirect loop, which re-checks the gate per hop, and that is the only thing keeping an `http:` → `data:` redirect a network error. `net::data::decode` is the one decoder — it percent-decodes *before* base64, per the Fetch data: URL processor, and `page`'s inline image/`@font-face` paths call it rather than rolling their own.
+
 ### Adding a DOM interface or method
 
 `crates/bindings/src/generated.rs` is `@generated` — **never edit it**. Hand-written implementations live one-module-per-interface in `crates/bindings/src/imp/`, where function names are snake-cased member names (`set_*` for setters, `constructor` for IDL constructors). The generated glue *calls* these, so an IDL change surfaces as a compile error in `imp/` — that is the drift protection.

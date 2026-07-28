@@ -3697,11 +3697,13 @@ impl Page {
             return;
         }
 
-        // `data:` URLs decode inline (no network).
+        // `data:` URLs decode inline (no network), so the pixels are available
+        // to layout in this same turn. The decoder is the fetch stack's, so an
+        // inline decode and one that went over `net` agree byte for byte.
         if let Some(rest) = url.strip_prefix("data:") {
-            match decode_data_url(rest) {
-                Some((bytes, content_type)) => {
-                    self.finish_image(url, &bytes, content_type.as_deref());
+            match oxidepage_net::data::decode(rest) {
+                Some(body) => {
+                    self.finish_image(url, &body.bytes, Some(&body.content_type));
                 }
                 None => self.mark_image_broken(url),
             }
@@ -4017,8 +4019,8 @@ impl Page {
             // `data:` URLs decode inline (no network), so success or failure is
             // known immediately and a failure falls straight through.
             if let Some(rest) = url.strip_prefix("data:") {
-                let decoded = decode_data_url(rest)
-                    .is_some_and(|(bytes, _content_type)| self.finish_font(family, &bytes, attrs));
+                let decoded = oxidepage_net::data::decode(rest)
+                    .is_some_and(|body| self.finish_font(family, &body.bytes, attrs));
                 if decoded {
                     return;
                 }
@@ -4837,54 +4839,6 @@ fn attr_value(node: &oxidepage_dom::Node, name: &str) -> Option<String> {
         .iter()
         .find(|a| a.name.ns.is_empty() && &*a.name.local == name)
         .map(|a| a.value.to_string())
-}
-
-/// Decodes the body of a `data:` URL (the part after `data:`), returning the
-/// bytes and optional MIME type. Handles `;base64` and percent-encoded data.
-fn decode_data_url(rest: &str) -> Option<(Vec<u8>, Option<String>)> {
-    let (meta, payload) = rest.split_once(',')?;
-    let is_base64 = meta.ends_with(";base64");
-    let mime = {
-        let m = meta.strip_suffix(";base64").unwrap_or(meta);
-        let m = m.split(';').next().unwrap_or(m);
-        (!m.is_empty()).then(|| m.to_string())
-    };
-    let bytes = if is_base64 {
-        base64_decode(payload)?
-    } else {
-        percent_encoding::percent_decode_str(payload).collect()
-    };
-    Some((bytes, mime))
-}
-
-/// Decodes standard base64 (padding optional; ASCII whitespace ignored).
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    fn val(b: u8) -> Option<u8> {
-        match b {
-            b'A'..=b'Z' => Some(b - b'A'),
-            b'a'..=b'z' => Some(b - b'a' + 26),
-            b'0'..=b'9' => Some(b - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let mut out = Vec::with_capacity(input.len() / 4 * 3);
-    let mut acc = 0u32;
-    let mut bits = 0u32;
-    for &b in input.as_bytes() {
-        if b == b'=' || b.is_ascii_whitespace() {
-            continue;
-        }
-        let v = val(b)? as u32;
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
 }
 
 /// Collects absolute `background-image: url(...)` URLs from a computed style

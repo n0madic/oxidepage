@@ -562,3 +562,18 @@ Conformance work landing outside the phase plan:
   image holds neither, since it is connected anyway. Only `Image` is declared;
   `Audio` and `Option` are one IDL line plus one `imp` function away. Decisions
   and v1 limits: ADR-0028.
+- **`data:` subresources**: done. `data:` is decoded in the fetch pipeline
+  (`net::data`) by an early return beside `file://`, above the scheme gate, so
+  classic scripts in all four flavours, modules, `<link>` stylesheets,
+  `@import`, `fetch` and XHR all get it without a special case and the
+  asynchronous ones keep their ordinary `NetEvent` timing — an `async` script
+  still does not block the parser. `allowed_schemes` stays `http`/`https`: the
+  return is above the gate but *outside* the redirect loop, which re-checks the
+  gate per hop, so an `http:` → `data:` redirect remains a network error. The
+  decoder follows the Fetch data: URL processor, which percent-decodes *before*
+  base64 — the old `page`-local decoder did the reverse and so rejected every
+  body whose base64 arrived percent-encoded, the shape `Url`'s own serializer
+  produces. Images and `@font-face` still decode inline (bytes must reach layout
+  in the same turn) but now share that one decoder, which is what carries the
+  fix to them. MIME *parameters* survive, so `charset=` reaches the text
+  consumers. Decisions and v1 limits: ADR-0029.

@@ -633,3 +633,90 @@ async fn file_url_loads_through_engine() {
     assert_eq!(&out.body[..], b"<h1>local</h1>");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- `data:` is decoded above the scheme gate, but not across a redirect -----
+
+/// A `data:` URL is decoded into a normal 200 response, carrying the MIME type
+/// it declared as `Content-Type` so text consumers can find the charset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn data_url_is_fetched_without_a_scheme_allowlist_entry() {
+    let policy = ResourcePolicy::default();
+    assert!(
+        !policy.scheme_allowed("data"),
+        "the allowlist must stay http/https — `data:` is handled above the gate, not by widening it"
+    );
+
+    let req = NetRequest {
+        method: "GET".to_owned(),
+        url: "data:text/javascript;charset=utf-8;base64,ZDIgPSAndHdvJzs%3D".to_owned(),
+        headers: Vec::new(),
+        body: None,
+        credentials: Credentials::Omit,
+        mode: RequestMode::NoCors,
+        referrer: None,
+        initiator_origin: Some("https://example.com".to_owned()),
+        bypass_cache: false,
+    };
+    let out = engine_with(policy).fetch(req).await.unwrap();
+
+    assert_eq!(out.head.status, 200);
+    assert_eq!(out.head.response_type, ResponseType::Basic);
+    assert!(!out.head.redirected);
+    assert_eq!(&out.body[..], b"d2 = 'two';");
+    assert_eq!(
+        out.head.headers,
+        vec![(
+            "content-type".to_owned(),
+            "text/javascript;charset=utf-8".to_owned()
+        )]
+    );
+}
+
+/// A malformed `data:` URL is a load error, not an empty success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_data_url_is_an_error() {
+    let req = NetRequest {
+        method: "GET".to_owned(),
+        // No comma: the data: URL processor returns failure.
+        url: "data:text/javascript".to_owned(),
+        headers: Vec::new(),
+        body: None,
+        credentials: Credentials::Omit,
+        mode: RequestMode::NoCors,
+        referrer: None,
+        initiator_origin: None,
+        bypass_cache: false,
+    };
+    let err = engine_with(ResourcePolicy::default())
+        .fetch(req)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, NetErrorKind::InvalidUrl, "detail: {}", err.detail);
+}
+
+/// Handling `data:` at the top of the pipeline must not make it reachable
+/// *through* a redirect: the redirect loop re-checks the scheme allowlist, and
+/// Fetch requires a redirect to a non-HTTP(S) scheme to be a network error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redirect_to_a_data_url_stays_blocked() {
+    let port = spawn_server(|_text| {
+        http_response(
+            302,
+            "Found",
+            &[("Location", "data:text/html,<h1>redirected</h1>")],
+            b"",
+        )
+    })
+    .await;
+
+    let err = engine_with(loopback_policy())
+        .fetch(get(port, "/redirect"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, NetErrorKind::Blocked, "detail: {}", err.detail);
+    assert!(
+        err.detail.contains("data"),
+        "the error must name the rejected scheme: {}",
+        err.detail
+    );
+}

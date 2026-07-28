@@ -28,6 +28,7 @@ use url::Url;
 use crate::cache::{CachePartition, HttpCache};
 use crate::client::HttpClient;
 use crate::cookies::{CookieJar, CookieSource, registrable_domain};
+use crate::data;
 use crate::error::{NetError, NetResult};
 use crate::file;
 use crate::policy::ResourcePolicy;
@@ -453,6 +454,14 @@ impl FetchEngine {
         // `file://` is not an HTTP flow.
         if url.scheme() == "file" {
             return self.load_file(&url).await;
+        }
+        // Neither is `data:`: the bytes are in the URL, so there is no address
+        // to vet and no policy gate that could apply. Handling it here — above
+        // the scheme gate, but outside the redirect loop below, which re-checks
+        // `scheme_allowed` per hop — is what keeps an `http:` → `data:`
+        // redirect a network error, as Fetch requires.
+        if url.scheme() == "data" {
+            return data_outcome(&url);
         }
         if !self.policy.scheme_allowed(url.scheme()) {
             return Err(NetError::blocked(format!(
@@ -924,6 +933,29 @@ async fn decompress(encoding: &str, body: Bytes, max: u64) -> NetResult<Bytes> {
         ));
     }
     Ok(Bytes::from(out))
+}
+
+/// Wraps a decoded `data:` URL in the 200-response shape the rest of the stack
+/// consumes, so a `data:` body is indistinguishable from a fetched one to every
+/// caller — including the asynchronous ones, which keep their `NetEvent` timing.
+///
+/// The budget counters are deliberately not charged (matching `file://`, which
+/// also returns above them): there is no request to rate-limit and no body to
+/// stream, and `max_response_bytes` guards a decompression bomb arriving over
+/// the wire, not bytes the caller already had in memory.
+fn data_outcome(url: &Url) -> NetResult<FetchOutcome> {
+    let body = data::load_data(url)?;
+    Ok(FetchOutcome {
+        head: ResponseHead {
+            status: 200,
+            status_text: "OK".to_owned(),
+            final_url: url.to_string(),
+            headers: vec![("content-type".to_owned(), body.content_type)],
+            redirected: false,
+            response_type: ResponseType::Basic,
+        },
+        body: Bytes::from(body.bytes),
+    })
 }
 
 fn is_redirect(status: StatusCode) -> bool {

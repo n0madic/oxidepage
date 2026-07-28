@@ -1569,6 +1569,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "oxidepage-base",
+ "percent-encoding",
  "psl",
  "rustls",
  "thiserror",
