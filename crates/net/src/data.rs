@@ -47,9 +47,17 @@ pub fn load_data(url: &Url) -> NetResult<DataBody> {
 ///
 /// Exposed separately because the page's image and `@font-face` paths hold an
 /// already-serialized URL string and decode inline, without entering the fetch
-/// pipeline at all.
+/// pipeline at all. Those callers hand over the whole remainder, fragment
+/// included, so the fragment is dropped here rather than only in [`load_data`]
+/// — otherwise the two entry points disagree, and they must not: a `#` is not
+/// in the base64 alphabet, so `…;base64,R0lGOD…#x` would decode over the wire
+/// and come back a broken image inline.
 #[must_use]
 pub fn decode(input: &str) -> Option<DataBody> {
+    // Step 2's "exclude fragment", for callers who did not come through a
+    // parsed `Url`. In a *serialized* URL a literal `#` always starts the
+    // fragment; a `#` belonging to the body is spelled `%23`.
+    let input = input.split_once('#').map_or(input, |(head, _)| head);
     // Steps 5–8: the MIME type runs up to the first comma; no comma is failure.
     let (mime, encoded_body) = input.split_once(',')?;
     // Step 6.
@@ -258,6 +266,25 @@ mod tests {
         let d = decode("image/png;base64,iVBORw0KGgo=").unwrap();
         assert_eq!(d.bytes, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
         assert_eq!(d.content_type, "image/png");
+    }
+
+    /// The inline entry point sees the fragment, so it must drop it too — the
+    /// page's image and `@font-face` paths pass a whole serialized URL.
+    #[test]
+    fn decode_drops_the_fragment_like_load_data_does() {
+        assert_eq!(text("text/plain,hello#frag").unwrap(), "hello");
+        // A `#` is not in the base64 alphabet: keeping it would fail the decode
+        // outright rather than merely appending junk.
+        assert_eq!(text("text/plain;base64,aGk=#frag").unwrap(), "hi");
+        // A body's own `#` is percent-encoded and survives.
+        assert_eq!(text("text/plain,a%23b").unwrap(), "a#b");
+
+        // The two entry points agree, which is what the callers rely on.
+        let url = Url::parse("data:text/plain;base64,aGk=#frag").unwrap();
+        assert_eq!(
+            load_data(&url).unwrap(),
+            decode("text/plain;base64,aGk=#frag").unwrap()
+        );
     }
 
     #[test]

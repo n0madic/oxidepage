@@ -58,7 +58,12 @@ bytes the caller already held in memory.
 public, and `page`'s image and `@font-face` paths call it instead of the deleted
 `decode_data_url`/`base64_decode`. Those two paths keep decoding inline, so they
 are unchanged in timing; they now share one decoder with the pipeline, so an
-inline decode and one that went over `net` agree byte for byte.
+inline decode and one that went over `net` agree byte for byte. Making that
+agreement true costs one line: those callers hand over a whole serialized URL,
+so `decode` drops the fragment itself rather than leaving it to `load_data`'s
+spec-literal slice — `#` is not in the base64 alphabet, so an `<img>` whose
+`data:` URL carried one would otherwise break while the identical URL fetched
+over `net` decoded fine.
 
 ## Consequences
 
@@ -72,6 +77,17 @@ previously rejected any `data:` image or font whose base64 arrived encoded.
 `fetch()` and `XMLHttpRequest` gain `data:` support as a byproduct. That is what
 Fetch specifies, and it was not separately requested; it follows from putting the
 decode in the pipeline rather than at the call sites.
+
+So does **top-level navigation**: `Page::navigate` goes through the same
+`fetch_blocking`, so `data:text/html,…` now commits a document and runs its
+scripts. Browsers block *content*-initiated top-level `data:` navigation, and
+this ADR does not draw that line — the engine has no address bar, so the
+phishing rationale does not transfer, and an embedder asking for a `data:`
+document is a legitimate use. The consequence worth knowing is that a `data:`
+URL cannot be a base, so every *relative* subresource in such a document fails
+`resolve_url` and is dropped. The behaviour is pinned by a test rather than left
+to drift. Gating script-initiated top-level `data:` navigation specifically
+remains open, and would be its own decision.
 
 The security posture is unchanged in substance: a `data:` URL carries its own
 bytes, so there is no address for the SSRF filter to vet, no cookie to attach and

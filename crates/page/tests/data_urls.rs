@@ -239,6 +239,36 @@ fn script_charset_parameter_is_honoured() {
     assert_eq!(eval_string(&page, "s"), "дом");
 }
 
+/// Images and `@font-face` decode `data:` inline rather than through the fetch
+/// pipeline, and are handed the whole serialized URL. A fragment on the end must
+/// not reach the decoder: `#` is not in the base64 alphabet, so it broke the
+/// image outright while the very same URL fetched over `net` decoded fine.
+#[test]
+fn inline_image_decode_ignores_a_url_fragment() {
+    let png = {
+        let img = image::RgbaImage::from_pixel(7, 3, image::Rgba([10, 20, 30, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    };
+    let page = load(&format!(
+        r#"<!doctype html><img id="i" src="data:image/png;base64,{}#frag">"#,
+        base64_encode(&png)
+    ));
+
+    assert_no_errors(&page);
+    assert_eq!(
+        eval_string(
+            &page,
+            "const i = document.getElementById('i');
+             [i.naturalWidth, i.naturalHeight].join('x')"
+        ),
+        "7x3"
+    );
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -263,4 +293,37 @@ fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     out
+}
+
+/// Deciding `data:` in the pipeline rather than at the subresource call sites
+/// also makes it reachable by `Page::navigate`, which goes through the same
+/// `fetch_blocking`. That is a capability beyond the subresource scope, so it is
+/// pinned here rather than left to drift: the document commits, its scripts run,
+/// and — because a `data:` URL cannot be a base — every *relative* subresource
+/// in it fails to resolve.
+#[test]
+fn top_level_navigation_to_a_data_url_commits_but_cannot_be_a_base() {
+    let page = Page::new(PageOptions::default()).unwrap();
+    page.navigate(
+        "data:text/html,<h1 id=h>hi</h1><script>window.ran = 1</script>",
+        oxidepage_page::WaitUntil::Load,
+    )
+    .expect("navigate");
+    page.settle(Duration::from_secs(2));
+
+    assert_eq!(
+        eval_string(&page, "document.getElementById('h').textContent"),
+        "hi"
+    );
+    assert_eq!(eval_string(&page, "String(window.ran)"), "1");
+    // The document URL is opaque, so relative resolution has no base to work
+    // from. `new URL('a.css', document.URL)` is the resolution the loaders do.
+    assert_eq!(
+        eval_string(
+            &page,
+            "(() => { try { new URL('a.css', document.URL); return 'resolved'; }
+                      catch (e) { return 'unresolvable'; } })()"
+        ),
+        "unresolvable"
+    );
 }

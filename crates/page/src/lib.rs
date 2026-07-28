@@ -3698,8 +3698,10 @@ impl Page {
         }
 
         // `data:` URLs decode inline (no network), so the pixels are available
-        // to layout in this same turn. The decoder is the fetch stack's, so an
-        // inline decode and one that went over `net` agree byte for byte.
+        // to layout in this same turn. The decoder is the fetch stack's, and it
+        // is handed the whole serialized remainder — fragment included, which
+        // `net::data::decode` drops for exactly this caller — so an inline
+        // decode and one that went over `net` agree byte for byte.
         if let Some(rest) = url.strip_prefix("data:") {
             match oxidepage_net::data::decode(rest) {
                 Some(body) => {
