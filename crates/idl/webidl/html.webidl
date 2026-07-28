@@ -272,6 +272,7 @@ interface HTMLAreaElement : HTMLElement {
 };
 HTMLAreaElement includes HTMLHyperlinkElementUtils;
 
+[LegacyFactoryFunction=Image(optional unsigned long width, optional unsigned long height)]
 interface HTMLImageElement : HTMLElement {
   [CEReactions] attribute USVString src;
   [CEReactions] attribute USVString srcset;

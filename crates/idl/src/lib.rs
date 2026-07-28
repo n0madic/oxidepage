@@ -468,6 +468,9 @@ struct Interface {
     members: Vec<(String, Member)>, // (imp module, member)
     constructor: Option<Vec<Arg>>,
     has_constructor: bool,
+    /// `[LegacyFactoryFunction=Image(…)]`: extra global constructors that build
+    /// an instance of this interface. `(factory name, args)`.
+    legacy_factories: Vec<(String, Vec<Arg>)>,
 }
 
 fn integer_lit_i64(lit: &IntegerLit<'_>) -> Result<i64, CodegenError> {
@@ -563,6 +566,7 @@ fn is_event_handler(ty: &Type<'_>) -> bool {
 
 /// Extended attributes the codegen reads and acts on.
 const CE_REACTIONS: &str = "CEReactions";
+const LEGACY_FACTORY_FUNCTION: &str = "LegacyFactoryFunction";
 
 /// Extended attributes the codegen knowingly ignores, each for a reason:
 ///
@@ -609,6 +613,43 @@ fn ce_reactions(
         } else if !IGNORED_EXTENDED_ATTRS.contains(&name) {
             return err(format!("{context}: unknown extended attribute `[{name}]`"));
         }
+    }
+    Ok(found)
+}
+
+/// Reads an *interface*'s extended attribute list and returns its
+/// `[LegacyFactoryFunction=Name(args)]` entries — WebIDL's legacy spelling of a
+/// second, differently named constructor for the same interface (`Image`,
+/// `Audio`, `Option`). Anything else is a hard error, for the same reason an
+/// unknown member-level annotation is: it would be a silent behavior gap.
+fn legacy_factories(
+    universe: &Universe,
+    attrs: Option<&ExtendedAttributeList<'_>>,
+    interface: &str,
+) -> Result<Vec<(String, Vec<Arg>)>, CodegenError> {
+    let Some(attrs) = attrs else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    for attr in &attrs.body.list {
+        let ExtendedAttribute::NamedArgList(named) = attr else {
+            return err(format!(
+                "{interface}: unsupported interface extended attribute {attr:?}"
+            ));
+        };
+        if named.lhs_identifier.0 != LEGACY_FACTORY_FUNCTION {
+            return err(format!(
+                "{interface}: unknown interface extended attribute `[{}]`",
+                named.lhs_identifier.0
+            ));
+        }
+        let factory = named.rhs_identifier.0.to_owned();
+        let context = format!("{interface} legacy factory {factory}");
+        let (args, variadic) = convert_args(universe, &named.args.body, &context)?;
+        if !matches!(variadic, Variadic::None) {
+            return err(format!("{context}: variadic constructors unsupported"));
+        }
+        found.push((factory, args));
     }
     Ok(found)
 }
@@ -824,12 +865,14 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
                 return err(format!("duplicate interface `{name}`"));
             }
             index.insert(name.clone(), interfaces.len());
+            let factories = legacy_factories(&universe, interface.attributes.as_ref(), &name)?;
             interfaces.push(Interface {
                 parent: interface.inheritance.map(|i| i.identifier.0.to_owned()),
                 name,
                 members: Vec::new(),
                 constructor: None,
                 has_constructor: false,
+                legacy_factories: factories,
             });
         }
     }
@@ -1096,6 +1139,7 @@ fn emit_args(
             (ArgKind::U32, false, _) => format!("cx.arg_u32(call, {i})?"),
             (ArgKind::I32, false, _) => format!("cx.arg_i32(call, {i})?"),
             (ArgKind::U32, true, ArgDefault::U32(n)) => format!("cx.arg_u32_or(call, {i}, {n})?"),
+            (ArgKind::U32, true, ArgDefault::None) => format!("cx.arg_opt_u32(call, {i})?"),
             // A negative default would not survive `ArgDefault::U32`; the only
             // signed default in the IDL is `optional long delta = 0`.
             (ArgKind::I32, true, ArgDefault::U32(n)) => {
@@ -1397,6 +1441,35 @@ fn emit_interface(
         let _ = writeln!(
             registration,
             "    cx.finish_interface({name:?}, &{proto_var}, CtorSpec::Illegal)?;"
+        );
+    }
+
+    // `[LegacyFactoryFunction=…]`. Registered after `finish_interface`, which
+    // is what owns `proto.constructor`: a factory shares the prototype but
+    // never claims it.
+    for (factory, args) in &interface.legacy_factories {
+        let factory_snake = snake(factory);
+        let factory_fn = format!("gen_{factory_snake}_legacy_factory");
+        let mut body = String::new();
+        let _ = writeln!(
+            body,
+            "fn {factory_fn}(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {{"
+        );
+        let context = format!("{name} legacy factory {factory}");
+        let names = emit_args(&mut body, args, &Variadic::None, &context)?;
+        let mut call_args = vec!["cx".to_owned(), "call".to_owned()];
+        call_args.extend(names);
+        let _ = writeln!(
+            body,
+            "    imp::{iface_snake}::factory_{factory_snake}({})",
+            call_args.join(", ")
+        );
+        let _ = writeln!(body, "}}\n");
+        glue.push_str(&body);
+        let _ = writeln!(
+            registration,
+            "    cx.define_legacy_factory({factory:?}, &{proto_var}, {}, {factory_fn})?;",
+            required_len(args)
         );
     }
     registration.push('\n');

@@ -185,6 +185,18 @@ pub trait JsScope {
         f: HostFn,
     ) -> Result<JsObject, JsError>;
 
+    /// Creates a WebIDL `[LegacyFactoryFunction]` (`Image`, `Audio`, `Option`):
+    /// a second constructor for an existing interface. Identical to
+    /// [`JsScope::new_constructor`] except that `proto.constructor` is left
+    /// alone — it must keep naming the interface object, not the factory.
+    fn new_legacy_factory(
+        &self,
+        name: &str,
+        length: u32,
+        proto: &JsObject,
+        f: HostFn,
+    ) -> Result<JsObject, JsError>;
+
     /// Creates a host object carrying an opaque `(tag, data)` payload, with
     /// the given prototype. When the object is garbage-collected the payload
     /// is reported through [`JsRealm::take_finalized`].

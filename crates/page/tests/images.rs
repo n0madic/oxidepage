@@ -382,3 +382,175 @@ fn pseudo_element_background_image_loads_and_paints() {
         "::before background-image should load and paint an Image item;\n{json}"
     );
 }
+
+/// Regression: `new Image()` — the WebIDL `[LegacyFactoryFunction]` — was never
+/// installed, so `Image` was simply undefined and any feature-detection suite
+/// that probes an image (html5test.co does it at the very top) died on a
+/// `ReferenceError` before rendering anything.
+#[test]
+fn image_legacy_factory_constructs_a_loadable_img() {
+    let (page, counter) = run("");
+    // Identity: an HTMLImageElement in the page document, detached, sharing the
+    // interface prototype — without stealing `HTMLImageElement.prototype.
+    // constructor`, which stays the interface object.
+    assert_eq!(
+        page.eval_to_string(
+            "const i = new Image(32, 16);\
+             [i instanceof HTMLImageElement, i.localName, i.ownerDocument === document,\
+              String(i.parentNode), i.getAttribute('width'), i.getAttribute('height'),\
+              Image.prototype === HTMLImageElement.prototype,\
+              HTMLImageElement.prototype.constructor === HTMLImageElement].join(',')"
+        )
+        .unwrap(),
+        "true,img,true,null,32,16,true,true"
+    );
+    // Omitted arguments set no attribute at all (not `width=0`).
+    assert_eq!(
+        page.eval_to_string("String(new Image().getAttribute('width'))")
+            .unwrap(),
+        "null"
+    );
+    // Calling it without `new` throws, as any constructor does.
+    assert_eq!(
+        page.eval_to_string("try { Image(); 'no throw' } catch (e) { e.constructor.name }")
+            .unwrap(),
+        "TypeError"
+    );
+
+    // And it is a real, working image: setting `src` starts a load and the
+    // decoded intrinsic size lands on the detached element.
+    let before = counter.load(Ordering::SeqCst);
+    page.eval_to_string(
+        "window.probe = 'pending';\
+         const probed = new Image();\
+         probed.onload = () => {\
+             window.probe = probed.naturalWidth + 'x' + probed.naturalHeight;\
+         };\
+         probed.src = '/img.png';",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("window.probe").unwrap(), "100x50");
+    assert_eq!(counter.load(Ordering::SeqCst), before + 1);
+}
+
+/// The connectedness gate on image loading became a *node document* gate so
+/// that `new Image()` loads (see above). ADR-0017's rule must survive that: a
+/// document with no browsing context loads nothing, however its `<img>` is
+/// built.
+#[test]
+fn image_in_a_parsed_document_does_not_load() {
+    let (page, counter) = run("");
+    let before = counter.load(Ordering::SeqCst);
+    page.eval_to_string(
+        "const doc = new DOMParser().parseFromString('<img>', 'text/html');\
+         doc.querySelector('img').src = '/img.png';\
+         const made = doc.createElement('img');\
+         made.src = '/img.png';",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(1));
+    assert_eq!(counter.load(Ordering::SeqCst), before);
+}
+
+/// Regression: a load in flight must keep its `<img>` alive. The idiomatic
+/// preload — a *local* `new Image()`, its handlers, then `src` — is unreachable
+/// from JS the moment the function returns, and the queued load is drained a
+/// later turn of the event loop, *after* finalized wrappers are processed. A GC
+/// in that window used to free the node outright, so the load never started and
+/// neither event ever fired. (Feature-detection suites probe codecs exactly this
+/// way, and simply hung.)
+#[test]
+fn a_load_in_flight_keeps_a_detached_img_alive() {
+    let (page, _) = run("");
+    page.eval_to_string(
+        "window.fired = [];\
+         (function () {\
+             const i = new Image();\
+             i.onload = () => { window.fired.push('load'); };\
+             i.onerror = () => { window.fired.push('error'); };\
+             i.src = '/img.png';\
+         })();\
+         (function () {\
+             const broken = new Image();\
+             broken.onload = () => { window.fired.push('bad-load'); };\
+             broken.onerror = () => { window.fired.push('error'); };\
+             broken.src = '/broken.png';\
+         })();",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string("window.fired.sort().join(',')")
+            .unwrap(),
+        "error,load"
+    );
+}
+
+/// Regression: `create → set src → append` must fire `load` **once**.
+///
+/// Loading gates on the node document, so the `src` assignment queues an update
+/// while the element is still detached, and `appendChild` queues a second one
+/// when it connects. Two waiter entries on one URL meant two events — which
+/// silently breaks the counting idiom (`if (++loaded === total) done()`) every
+/// image preloader and carousel is built on.
+#[test]
+fn an_image_inserted_after_its_src_fires_load_once() {
+    let (page, counter) = run("");
+    page.eval_to_string(
+        "window.n = 0;\
+         const el = document.createElement('img');\
+         el.onload = () => { window.n++; };\
+         el.src = '/img.png';\
+         document.body.appendChild(el);",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("window.n").unwrap(), "1");
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+/// The same doubling by another route: any second queued update for an element
+/// already waiting must join the existing wait, not open a new one.
+#[test]
+fn a_second_queued_update_does_not_double_the_event() {
+    let (page, _) = run("<img id=i>");
+    page.eval_to_string(
+        "window.n = 0;\
+         const i = document.getElementById('i');\
+         i.onload = () => { window.n++; };\
+         i.src = '/img.png';\
+         i.loading = 'eager';",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("window.n").unwrap(), "1");
+}
+
+/// Regression: `<template>` contents are inert. Their fragment's node document
+/// is the page document (HTML's separate "template contents owner document" has
+/// no counterpart here), so the node-document gate alone would fetch an image
+/// the page never displays — and block `settle`/`load`/screenshots on it.
+#[test]
+fn image_in_template_contents_does_not_load() {
+    let (page, counter) = run("<template id=t><img></template>");
+    let before = counter.load(Ordering::SeqCst);
+    page.eval_to_string(
+        "document.getElementById('t').content.querySelector('img').src = '/img.png';\
+         const made = document.createElement('template');\
+         made.innerHTML = '<img>';\
+         made.content.querySelector('img').src = '/img.png';",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(1));
+    assert_eq!(counter.load(Ordering::SeqCst), before);
+
+    // Adopting the image out of the template makes it live again.
+    page.eval_to_string(
+        "const img = document.getElementById('t').content.querySelector('img');\
+         document.body.appendChild(img);",
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(counter.load(Ordering::SeqCst), before + 1);
+}

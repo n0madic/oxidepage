@@ -2337,9 +2337,11 @@ impl Page {
         self.pending_stylesheets.set(0);
         self.link_sheets.borrow_mut().clear();
         self.requested_images.borrow_mut().clear();
-        // The deferred nodes belong to the outgoing document; their ids go stale
-        // with it, and touching a stale id panics.
+        // The deferred nodes and image waiters belong to the outgoing document;
+        // their ids go stale with it, and touching a stale id panics. (The pins
+        // the waiters hold go with the arena.)
         self.deferred_images.borrow_mut().clear();
+        self.image_waiters.borrow_mut().clear();
         self.last_lazy_scan.set(None);
         self.requested_fonts.borrow_mut().clear();
         self.last_fontface_scan.set(u64::MAX);
@@ -3417,7 +3419,24 @@ impl Page {
     fn drain_image_updates(&self) {
         let updates = self.state.dom.borrow_mut().take_image_updates();
         for node in updates {
+            // `start_image_load` takes its own pin for the in-flight window, so
+            // the queue's pin (`push_image_update`) is released after it, never
+            // before: the settled path fires an event, and a GC inside that
+            // callback would find the node unpinned.
             self.start_image_load(node);
+            self.release_image_pin(node);
+        }
+    }
+
+    /// Releases one image-related pin and retries the collection the wrapper
+    /// finalizer may already have been refused. Without the retry a node whose
+    /// wrapper was GC'd while a load was queued or in flight would never be
+    /// freed at all — this pin is the last one, and nothing else comes back.
+    fn release_image_pin(&self, node: NodeId) {
+        let mut dom = self.state.dom.borrow_mut();
+        dom.unpin(node);
+        if !self.state.parsing() && !dom.observers().has_pending_records() {
+            dom.free_detached_tree_if_unpinned(node);
         }
     }
 
@@ -3429,15 +3448,24 @@ impl Page {
     /// that method's first act is to insert the URL into `requested_images`, and
     /// a URL sitting in that set is one nothing will ever fetch again.
     fn start_image_load(&self, node: NodeId) {
-        let (src, loading) = {
+        let (src, loading, detached) = {
             let dom = self.state.dom.borrow();
             // The queued id is a snapshot taken before this drain: replacing a
             // subtree (`innerHTML`) frees the `<img>` outright, so the id can be
-            // stale, not merely disconnected.
-            let Some(el) = dom.get(node).filter(|n| n.is_connected()) else {
+            // stale, not merely disconnected. Disconnected is fine and expected
+            // — `new Image()` never enters the tree — but the node must still
+            // belong to the rendered document and be outside any `<template>`
+            // contents, the two things `IS_CONNECTED` used to stand in for.
+            let Some(el) = dom.get(node).filter(|_| {
+                dom.node_document(node) == dom.document() && !dom.in_template_contents(node)
+            }) else {
                 return;
             };
-            (attr_value(el, "src"), attr_value(el, "loading"))
+            (
+                attr_value(el, "src"),
+                attr_value(el, "loading"),
+                !el.is_connected(),
+            )
         };
         let Some(src) = src.filter(|s| !s.is_empty()) else {
             return;
@@ -3445,6 +3473,34 @@ impl Page {
         let Some(url) = self.resolve_url(&src) else {
             return;
         };
+
+        // `data:` decodes inline (no network to save), and `loading="eager"` is
+        // the author asking for exactly that: no deferral. A detached image is
+        // eager for a harder reason — deferral is keyed on intersecting the
+        // viewport, which a node outside the tree can never do, so deferring it
+        // would be dropping it.
+        let eager = detached || url.starts_with("data:") || loading.as_deref() == Some("eager");
+        if self.lazy_images.get() && !eager {
+            // Whatever this node was waiting on, it is not waiting now: the
+            // queue is the only thing holding it, and a wait left behind would
+            // hold a pin nothing will ever release.
+            self.unregister_image_waiter(node);
+            self.deferred_images.borrow_mut().insert(node);
+            return;
+        }
+        // Undeferred (`loading` flipped to `eager`, or a `src` change on an
+        // already-deferred node): it loads now, so it leaves the queue.
+        self.deferred_images.borrow_mut().remove(&node);
+        self.begin_image_load(node, &url);
+    }
+
+    /// Fires the already-settled event, or makes `node` the sole waiter for
+    /// `url` and starts the fetch.
+    ///
+    /// The one place an `<img>` starts waiting, so the waiter entry, its pin
+    /// and the fetch cannot drift apart. Every caller reaches it having already
+    /// decided that this node loads this URL *now*.
+    fn begin_image_load(&self, node: NodeId, url: &str) {
         // A URL the store has already resolved fires its event right now. The
         // load that filled it is long finished, and `requested_images` means no
         // second request will ever be made for it — so an element registered as
@@ -3453,35 +3509,66 @@ impl Page {
         let settled = {
             let layout = self.state.layout.borrow();
             let images = layout.images();
-            if images.get(&url).is_some() {
+            if images.get(url).is_some() {
                 Some("load")
-            } else if images.is_broken(&url) {
+            } else if images.is_broken(url) {
                 Some("error")
             } else {
                 None
             }
         };
         if let Some(event) = settled {
+            self.unregister_image_waiter(node);
             self.fire_element_event(node, event);
             return;
         }
+        self.register_image_waiter(node, url);
+        self.start_image_load_url(url);
+    }
+
+    /// Registers `node` as a waiter on `url` and pins it for the wait.
+    ///
+    /// A load in flight keeps its `<img>` alive. `new Image()` is routinely
+    /// written as `const i = new Image(); i.onload = …; i.src = …;` inside a
+    /// function — the moment it returns, the only reference left is the
+    /// wrapper, and a GC before the load settles would free the node and
+    /// swallow the event. HTML says as much ("the img element must not be
+    /// garbage collected while it has pending activity").
+    ///
+    /// Exactly one entry per node, so exactly one pin and exactly one event:
+    /// `el.src = …` on a detached `<img>` followed by `appendChild` queues the
+    /// update twice (attribute change, then connection), and a preloader
+    /// counting `load`s must not see two.
+    fn register_image_waiter(&self, node: NodeId, url: &str) {
+        // Pin before releasing the old wait, so the node is never momentarily
+        // unpinned — `release_image_pin` collects.
+        self.state.dom.borrow_mut().pin(node);
+        self.unregister_image_waiter(node);
         self.image_waiters
             .borrow_mut()
-            .entry(url.clone())
+            .entry(url.to_owned())
             .or_default()
             .push(node);
+    }
 
-        // `data:` decodes inline (no network to save), and `loading="eager"` is
-        // the author asking for exactly that: no deferral.
-        let eager = url.starts_with("data:") || loading.as_deref() == Some("eager");
-        if self.lazy_images.get() && !eager {
-            self.deferred_images.borrow_mut().insert(node);
-            return;
+    /// Drops every wait `node` holds, releasing a pin for each. A `src`
+    /// reassigned mid-flight orphans the first wait: nothing will fetch that URL
+    /// a second time, so its `notify_image_waiters` never comes.
+    fn unregister_image_waiter(&self, node: NodeId) {
+        let dropped = {
+            let mut waiters = self.image_waiters.borrow_mut();
+            let mut dropped = 0usize;
+            waiters.retain(|_, nodes| {
+                let before = nodes.len();
+                nodes.retain(|waiter| *waiter != node);
+                dropped += before - nodes.len();
+                !nodes.is_empty()
+            });
+            dropped
+        };
+        for _ in 0..dropped {
+            self.release_image_pin(node);
         }
-        // Undeferred (`loading` flipped to `eager`, or a `src` change on an
-        // already-deferred node): it loads now, so it leaves the queue.
-        self.deferred_images.borrow_mut().remove(&node);
-        self.start_image_load_url(&url);
     }
 
     /// Starts loads for deferred `<img>` elements that now intersect the
@@ -3559,7 +3646,11 @@ impl Page {
             // geometry of every image ever deferred.
             self.deferred_images.borrow_mut().remove(&node);
             if let Some(url) = self.resolve_url(&src) {
-                self.start_image_load_url(&url);
+                // Through `begin_image_load`, not `start_image_load_url`: a
+                // deferred image registers no waiter (it holds no pin while it
+                // waits for the viewport), so this is where it starts waiting —
+                // and where an already-settled URL fires its event instead.
+                self.begin_image_load(node, &url);
             }
         }
         self.last_lazy_scan.set(Some(self.lazy_scan_gate()));
@@ -3863,6 +3954,9 @@ impl Page {
             if still_ours {
                 self.fire_element_event(node, event);
             }
+            // The other end of the pin `start_image_load` took, released after
+            // dispatch.
+            self.release_image_pin(node);
         }
     }
 

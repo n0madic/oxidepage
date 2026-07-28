@@ -1704,6 +1704,15 @@ impl BindCx<'_> {
         }
     }
 
+    /// `optional unsigned long` with no default: the caller must be able to
+    /// tell "omitted" from an explicit `0`.
+    pub fn arg_opt_u32(&self, call: &HostCall, i: usize) -> Result<Option<u32>, JsThrow> {
+        match call.arg(i) {
+            JsValue::Undefined => Ok(None),
+            _ => self.arg_u32(call, i).map(Some),
+        }
+    }
+
     pub fn arg_i32_or(&self, call: &HostCall, i: usize, default: i32) -> Result<i32, JsThrow> {
         match call.arg(i) {
             JsValue::Undefined => Ok(default),
@@ -2178,6 +2187,45 @@ impl BindCx<'_> {
                 ctor: ctor_obj,
             },
         );
+        Ok(())
+    }
+
+    /// Installs a WebIDL `[LegacyFactoryFunction]` — `new Image()` for
+    /// `HTMLImageElement`. It is a global constructor sharing the interface's
+    /// prototype, and deliberately *not* an interface object: it does not
+    /// claim `proto.constructor`, and it is absent from `state.interfaces`, so
+    /// brand checks and `this`-unwrapping keep naming the real interface.
+    pub(crate) fn define_legacy_factory(
+        &self,
+        name: &str,
+        proto: &JsObject,
+        length: u32,
+        construct: NativeFn,
+    ) -> Result<(), JsThrow> {
+        let inner = native(construct);
+        let host_fn: HostFn = Rc::new(move |scope, call| {
+            if !scope.is_function(&call.this) {
+                return Err(JsThrow::Type("Constructor requires 'new'".into()));
+            }
+            inner(scope, call)
+        });
+        let factory = self
+            .scope
+            .new_legacy_factory(name, length, proto, host_fn)
+            .map_err(JsThrow::from)?;
+        let global = self.with_js(|js| js.global.clone())?;
+        self.scope
+            .define_property(
+                &global,
+                name,
+                PropertyDef::Value {
+                    value: &JsValue::Object(factory),
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )
+            .map_err(JsThrow::from)?;
         Ok(())
     }
 

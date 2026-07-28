@@ -419,6 +419,70 @@ impl<'js> QuickScope<'js> {
         .map_err(|e| self.error_from(e))
     }
 
+    /// Builds a constructor function whose `prototype` property is `proto`.
+    /// `back_ref` wires `proto.constructor` back at it, which every interface
+    /// object does and a `[LegacyFactoryFunction]` must not (the prototype
+    /// belongs to the interface, and there can be more than one factory).
+    fn make_ctor(
+        &self,
+        name: &str,
+        length: u32,
+        proto: &JsObject,
+        f: HostFn,
+        back_ref: bool,
+    ) -> Result<JsObject, JsError> {
+        // Fix up the returned object's prototype from `new.target.prototype`
+        // (subclassing per spec). No captured fallback: the interface
+        // prototype must not be captured in the closure (a native reference
+        // the GC cannot trace would leak the `proto ↔ constructor` cycle),
+        // and `f` already creates its result with the interface prototype.
+        let f: HostFn = Rc::new(move |scope, call| {
+            let new_target = call.this.clone();
+            let result = f(scope, call)?;
+            if let (JsValue::Object(result_obj), JsValue::Object(nt)) = (&result, &new_target)
+                && scope.is_function(&new_target)
+                && let Ok(JsValue::Object(p)) = scope.get(nt, "prototype")
+            {
+                scope
+                    .set_prototype(result_obj, Some(&p))
+                    .map_err(JsThrow::from)?;
+            }
+            Ok(result)
+        });
+        let proto = self.export_object(proto)?;
+        let func = self.make_function(f)?;
+        func.set_name(name).map_err(|e| self.error_from(e))?;
+        func.set_length(length as usize)
+            .map_err(|e| self.error_from(e))?;
+        func.set_constructor(true);
+        // Wire `ctor.prototype` and `proto.constructor` per WebIDL
+        // (non-enumerable, which plain `set` would get wrong).
+        self.define_property(
+            &self.import_obj(func.clone().into_inner()),
+            "prototype",
+            PropertyDef::Value {
+                value: &self.import_ref(proto.clone().into_value()),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        )?;
+        if back_ref {
+            let ctor_value = func.clone().into_inner().into_value();
+            self.define_property(
+                &self.import_obj(proto),
+                "constructor",
+                PropertyDef::Value {
+                    value: &self.import(ctor_value),
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )?;
+        }
+        Ok(self.import_obj(func.into_inner()))
+    }
+
     /// The engine's backtrace text for the current stack.
     ///
     /// `JS_NewError` builds a backtrace unconditionally, so minting a
@@ -526,54 +590,17 @@ impl<'js> JsScope for QuickScope<'js> {
         proto: &JsObject,
         f: HostFn,
     ) -> Result<JsObject, JsError> {
-        // Fix up the returned object's prototype from `new.target.prototype`
-        // (subclassing per spec). No captured fallback: the interface
-        // prototype must not be captured in the closure (a native reference
-        // the GC cannot trace would leak the `proto ↔ constructor` cycle),
-        // and `f` already creates its result with the interface prototype.
-        let f: HostFn = Rc::new(move |scope, call| {
-            let new_target = call.this.clone();
-            let result = f(scope, call)?;
-            if let (JsValue::Object(result_obj), JsValue::Object(nt)) = (&result, &new_target)
-                && scope.is_function(&new_target)
-                && let Ok(JsValue::Object(p)) = scope.get(nt, "prototype")
-            {
-                scope
-                    .set_prototype(result_obj, Some(&p))
-                    .map_err(JsThrow::from)?;
-            }
-            Ok(result)
-        });
-        let proto = self.export_object(proto)?;
-        let func = self.make_function(f)?;
-        func.set_name(name).map_err(|e| self.error_from(e))?;
-        func.set_length(length as usize)
-            .map_err(|e| self.error_from(e))?;
-        func.set_constructor(true);
-        // Wire `ctor.prototype` and `proto.constructor` per WebIDL
-        // (non-enumerable, which plain `set` would get wrong).
-        let ctor_value = func.clone().into_inner().into_value();
-        self.define_property(
-            &self.import_obj(func.clone().into_inner()),
-            "prototype",
-            PropertyDef::Value {
-                value: &self.import_ref(proto.clone().into_value()),
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            },
-        )?;
-        self.define_property(
-            &self.import_obj(proto),
-            "constructor",
-            PropertyDef::Value {
-                value: &self.import(ctor_value),
-                writable: true,
-                enumerable: false,
-                configurable: true,
-            },
-        )?;
-        Ok(self.import_obj(func.into_inner()))
+        self.make_ctor(name, length, proto, f, true)
+    }
+
+    fn new_legacy_factory(
+        &self,
+        name: &str,
+        length: u32,
+        proto: &JsObject,
+        f: HostFn,
+    ) -> Result<JsObject, JsError> {
+        self.make_ctor(name, length, proto, f, false)
     }
 
     fn new_host_object(

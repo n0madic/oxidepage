@@ -479,7 +479,8 @@ impl DomTree {
     }
 
     /// Removes and returns the queued `<img>` updates (drained by the page to
-    /// start image loads).
+    /// start image loads). Each returned id carries one pin the caller must
+    /// release — see [`Self::push_image_update`].
     ///
     /// As with [`Self::take_style_updates`], an id may name a node freed since
     /// it was queued; revalidate (e.g. via [`Self::get`]) before use (L3).
@@ -488,8 +489,17 @@ impl DomTree {
         std::mem::take(&mut self.image_updates)
     }
 
-    /// Queues an `<img>` element whose `src` became relevant.
+    /// Queues an `<img>` element whose `src` became relevant, **pinning it**
+    /// until the drain releases it.
+    ///
+    /// A detached `<img>` is kept alive by its JS wrapper alone, and the drain
+    /// is a later turn of the event loop — one that runs *after* finalized
+    /// wrappers are processed. `new Image()` written the usual way (a local
+    /// variable, `onload`, then `src`) is unreachable the moment its function
+    /// returns, so without this pin a GC between the assignment and the drain
+    /// frees the node and the load silently never happens.
     pub fn push_image_update(&mut self, node: NodeId) {
+        self.pin(node);
         self.image_updates.push(node);
     }
 
@@ -1921,6 +1931,30 @@ impl DomTree {
         false
     }
 
+    /// True if `node` lives inside some `<template>`'s contents fragment.
+    ///
+    /// HTML puts those in a separate "template contents owner document" with no
+    /// browsing context, so nothing in them loads or renders. The engine reuses
+    /// the node document instead — a template's contents are *its* document's —
+    /// which is why inertness has to be asked for explicitly wherever
+    /// `IS_CONNECTED` is not the gate (ADR-0028). A shadow root carries
+    /// `shadow: Some(..)` and is not one of these; a plain detached fragment
+    /// carries no host and is not either.
+    #[must_use]
+    pub fn in_template_contents(&self, node: NodeId) -> bool {
+        let mut current = node;
+        while let Some(parent) = self.node(current).parent {
+            current = parent;
+        }
+        matches!(
+            self.node(current).data(),
+            NodeData::DocumentFragment {
+                host: Some(_),
+                shadow: None,
+            }
+        )
+    }
+
     /// The root of the tree containing `node`, following template-contents
     /// fragment → host links (a template's contents live and die with the
     /// tree its host belongs to).
@@ -3097,9 +3131,18 @@ impl DomTree {
     fn note_style_owner_attr(&mut self, element: NodeId, attr_local: &html5ever::LocalName) {
         // `loading` alongside `src`: writing `img.loading = "eager"` must undefer
         // an image the lazy loader is holding back (oxidepage-page, ADR-0014).
+        //
+        // Note the gate is the *node document*, not `is_connected()`: HTML runs
+        // "update the image data" on any `src` change, and `new Image().src = …`
+        // — the standard preload idiom, and how feature detection probes a
+        // codec — is detached by construction. The two things `IS_CONNECTED`
+        // was standing in for are asked for by name instead: a document with no
+        // browsing context (`DOMParser`, ADR-0017) loads nothing, and neither
+        // does a `<template>`'s contents.
         if (*attr_local == local_name!("src") || &**attr_local == "loading")
-            && self.node(element).is_connected()
             && self.node(element).is_image_element()
+            && self.node_document(element) == self.document
+            && !self.in_template_contents(element)
         {
             self.push_image_update(element);
         }

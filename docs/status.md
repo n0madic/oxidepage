@@ -545,3 +545,20 @@ v1 limits.
   and the versioning policy are not. Phase 9 (CDP, `cdp`) and GPU raster
   (`raster-vello`) are not started; those three crates are still documented
   stubs.
+
+Conformance work landing outside the phase plan:
+
+- **`new Image()`**: done. WebIDL `[LegacyFactoryFunction]` is a codegen
+  construct — the annotation emits a global constructor sharing the interface's
+  prototype without claiming `proto.constructor` — and interface-level extended
+  attributes are now parsed, with anything unrecognized a build-time error.
+  Image loading gates on the node document plus template inertness rather than
+  `IS_CONNECTED`, so a detached `<img>` loads while a `DOMParser` document
+  (ADR-0017) and a `<template>`'s contents still load nothing. A detached image
+  is never lazily deferred, and a queued or in-flight load pins its element —
+  the preload idiom keeps no reference to it, and a GC used to free the node and
+  swallow the event. One wait per node and one pin per wait, so `create → src →
+  append` fires `load` once and a reassigned `src` leaks nothing; a deferred
+  image holds neither, since it is connected anyway. Only `Image` is declared;
+  `Audio` and `Option` are one IDL line plus one `imp` function away. Decisions
+  and v1 limits: ADR-0028.

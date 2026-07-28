@@ -3880,6 +3880,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         &proto_html_image_element,
         CtorSpec::Illegal,
     )?;
+    cx.define_legacy_factory(
+        "Image",
+        &proto_html_image_element,
+        0,
+        gen_image_legacy_factory,
+    )?;
 
     let proto_html_link_element = cx.begin_interface("HTMLLinkElement", Some("HTMLElement"))?;
     cx.define_accessor_ce(
@@ -12498,6 +12504,12 @@ fn gen_html_image_element_set_referrer_policy(
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_referrer_policy(cx, this, a0)?;
     Ok(JsValue::Undefined)
+}
+
+fn gen_image_legacy_factory(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_opt_u32(call, 0)?;
+    let a1 = cx.arg_opt_u32(call, 1)?;
+    imp::html_image_element::factory_image(cx, call, a0, a1)
 }
 
 fn gen_html_link_element_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

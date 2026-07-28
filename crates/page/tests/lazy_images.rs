@@ -420,3 +420,30 @@ fn setting_loading_eager_from_js_undefers() {
 
     assert_eq!(hits.img(), 1, "loading=eager loads it where it stands");
 }
+
+/// Regression: a deferred image holds no pin, so removing it frees its node.
+///
+/// A deferred image is connected by construction — a detached one is never
+/// deferred (ADR-0028 D4) — so a pin buys nothing, and it would outlive the
+/// element: the release is `notify_image_waiters`, which only runs for a URL
+/// something actually fetched. An SPA churning lazy `<img>`s would grow the
+/// arena without bound, and the scan's own liveness sweep would become dead
+/// code (a pinned node can never be freed).
+#[test]
+fn a_deferred_image_does_not_pin_its_node() {
+    let (page, hits) = run(
+        &format!("{SPACER}<img id='i' src='/img.png' style='display:block'>"),
+        true,
+    );
+    assert_eq!(hits.img(), 0, "deferred");
+    let before = page.dom().node_count();
+
+    eval(&page, "document.getElementById('i').remove()");
+    page.collect_garbage();
+    settle(&page);
+
+    assert!(
+        page.dom().node_count() < before,
+        "a removed deferred image must be collectable ({before} nodes before)"
+    );
+}

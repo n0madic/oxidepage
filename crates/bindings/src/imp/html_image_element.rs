@@ -2,7 +2,7 @@
 //! backed by the layout engine's [`ImageStore`](oxidepage_layout::images::ImageStore).
 
 use oxidepage_base::NodeId;
-use oxidepage_js::JsThrow;
+use oxidepage_js::{HostCall, JsThrow, JsValue};
 
 use crate::cx::BindCx;
 use crate::imp::geometry_support::flush_layout;
@@ -110,4 +110,25 @@ pub(crate) fn height(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
 pub(crate) fn set_height(cx: &BindCx<'_>, this: NodeId, value: u32) -> Result<(), JsThrow> {
     set_u32(cx, this, "height", value);
     Ok(())
+}
+
+/// `new Image(width, height)` — the `[LegacyFactoryFunction]`. Per HTML it is
+/// `createElement("img")` on the *page* document plus the two optional content
+/// attributes; the element is returned detached, and `src` is what starts a
+/// load, so nothing is fetched here.
+pub(crate) fn factory_image(
+    cx: &BindCx<'_>,
+    _call: &HostCall,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<JsValue, JsThrow> {
+    let document = cx.state.dom.borrow().document();
+    let img = crate::imp::document::create_element(cx, document, "img".to_owned(), JsValue::Null)?;
+    if let Some(width) = width {
+        set_u32(cx, img, "width", width);
+    }
+    if let Some(height) = height {
+        set_u32(cx, img, "height", height);
+    }
+    cx.node_to_js(img)
 }
