@@ -31,7 +31,23 @@ fn spawn_loop(
         let page = load_html_page(html, PageOptions::default()).expect("page");
         page.run_command_loop(rx);
     });
+    await_running(&tx);
     (tx, handle)
+}
+
+/// Blocks until the page thread is actually running its command loop.
+///
+/// **Every stopwatch in this file depends on it.** Building a `Page` scans the
+/// system fonts, which costs well over a second on the first page in a process
+/// (the scan is cached process-wide afterwards, so which test pays depends on
+/// which one ran first — that is where the intermittency came from). Jobs sent
+/// before the loop starts sit in the channel, so a test that starts timing in
+/// the meantime measures `Page::new`, not command latency: the control-job
+/// assertion below was really asserting "the font scan finishes within 1.5 s",
+/// and failed whenever it did not. The page itself answers a control job ~15 ms
+/// after its loop starts, mid-navigation, every time.
+fn await_running(tx: &crossbeam_channel::Sender<PageJob>) {
+    call(tx, Duration::from_secs(60), |_| ());
 }
 
 /// Sends a job and waits for its answer, failing the test rather than hanging.
@@ -262,6 +278,7 @@ fn spawn_driven_page() -> (
         let page = Page::new(permissive_options()).expect("page");
         page.run_command_loop(rx);
     });
+    await_running(&tx);
     (tx, handle)
 }
 
