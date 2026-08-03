@@ -31,6 +31,7 @@ use crate::cookies::{CookieJar, CookieSource, registrable_domain};
 use crate::data;
 use crate::error::{NetError, NetResult};
 use crate::file;
+use crate::intercept::{AuthChallenge, AuthSource};
 use crate::policy::ResourcePolicy;
 
 /// Cookie/credentials mode (Fetch `credentials`).
@@ -92,8 +93,82 @@ impl Default for RequestDefaults {
     }
 }
 
+/// What a request is *for*, in CDP's spelling (ADR-0032 D6).
+///
+/// Deliberately a field on [`NetRequest`] rather than something derived from the
+/// constructor that built it: [`NetRequest::subresource`] serves scripts,
+/// images, fonts *and* stylesheets, so the constructor cannot know. Each call
+/// site names its own kind.
+///
+/// It matters beyond labelling. A driver's request-interception patterns filter
+/// on it, and Puppeteer's `isNavigationRequest` is `requestId === loaderId &&
+/// type === 'Document'` — so a document load that does not say so leaves
+/// `page.goto()` resolving to `null` (ADR-0032 D6a).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ResourceType {
+    /// A top-level document navigation.
+    Document,
+    /// A `<link rel=stylesheet>` or a CSS `@import`.
+    Stylesheet,
+    Image,
+    Media,
+    Font,
+    /// A classic or module script.
+    Script,
+    /// `XMLHttpRequest`.
+    Xhr,
+    /// The `fetch()` function.
+    Fetch,
+    #[default]
+    Other,
+}
+
+impl ResourceType {
+    /// The CDP `ResourceType` name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResourceType::Document => "Document",
+            ResourceType::Stylesheet => "Stylesheet",
+            ResourceType::Image => "Image",
+            ResourceType::Media => "Media",
+            ResourceType::Font => "Font",
+            ResourceType::Script => "Script",
+            ResourceType::Xhr => "XHR",
+            ResourceType::Fetch => "Fetch",
+            ResourceType::Other => "Other",
+        }
+    }
+
+    /// Parses a CDP `ResourceType` name, case-insensitively.
+    ///
+    /// Used by request-interception patterns, whose `resourceType` member comes
+    /// straight off an untrusted frame.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        let ty = match name.to_ascii_lowercase().as_str() {
+            "document" => ResourceType::Document,
+            "stylesheet" => ResourceType::Stylesheet,
+            "image" => ResourceType::Image,
+            "media" => ResourceType::Media,
+            "font" => ResourceType::Font,
+            "script" => ResourceType::Script,
+            "xhr" => ResourceType::Xhr,
+            "fetch" => ResourceType::Fetch,
+            "other" => ResourceType::Other,
+            _ => return None,
+        };
+        Some(ty)
+    }
+}
+
 /// An engine-neutral network request (built by the bindings without any
 /// dependency on hyper/http types).
+///
+/// `Clone` because request interception has to keep a copy: a paused request is
+/// re-issued under the same id after `continueWithAuth`, and the fetch that
+/// produced the challenge consumed the original (ADR-0032 D8).
+#[derive(Clone, Debug)]
 pub struct NetRequest {
     pub method: String,
     pub url: String,
@@ -108,6 +183,40 @@ pub struct NetRequest {
     pub initiator_origin: Option<String>,
     /// Skip the HTTP cache for this request.
     pub bypass_cache: bool,
+    /// What this request is for (ADR-0032 D6). Set by the call site; the
+    /// constructors below leave it at the kind they can actually infer.
+    pub resource_type: ResourceType,
+    /// Credentials the **user agent** is attaching, as `(header name, value)`.
+    ///
+    /// Deliberately not part of [`NetRequest::headers`]: `Authorization` and
+    /// every `Proxy-*` name are *forbidden request headers*, so anything in
+    /// that list is stripped before it reaches the wire. That rule exists to
+    /// stop **script** forging them — it must not stop the user agent from
+    /// answering a challenge it was asked to answer (ADR-0032 D8).
+    ///
+    /// A separate, single-purpose field rather than a general "trusted headers"
+    /// escape hatch: this is the one place the engine legitimately needs past
+    /// the filter, and a general one would be a way to smuggle any header at
+    /// all onto a cross-origin `no-cors` load.
+    pub auth: Option<(String, String)>,
+}
+
+impl Default for NetRequest {
+    fn default() -> Self {
+        Self {
+            method: "GET".to_owned(),
+            url: String::new(),
+            headers: Vec::new(),
+            body: None,
+            credentials: Credentials::default(),
+            mode: RequestMode::default(),
+            referrer: None,
+            initiator_origin: None,
+            bypass_cache: false,
+            resource_type: ResourceType::Other,
+            auth: None,
+        }
+    }
 }
 
 impl NetRequest {
@@ -124,6 +233,8 @@ impl NetRequest {
             referrer: None,
             initiator_origin: None,
             bypass_cache: false,
+            resource_type: ResourceType::Document,
+            auth: None,
         }
     }
 
@@ -196,6 +307,11 @@ impl NetRequest {
             referrer: Some(document_url),
             initiator_origin: initiator,
             bypass_cache: false,
+            // One constructor, four kinds of consumer: scripts, images, fonts
+            // and stylesheets all build a subresource request. The caller
+            // overrides this field; `Other` is the honest answer here.
+            resource_type: ResourceType::Other,
+            auth: None,
         }
     }
 
@@ -217,7 +333,16 @@ impl NetRequest {
             referrer: Some(document_url),
             initiator_origin: initiator,
             bypass_cache: false,
+            resource_type: ResourceType::Script,
+            auth: None,
         }
+    }
+
+    /// Names what this request is for (ADR-0032 D6).
+    #[must_use]
+    pub fn of_type(mut self, resource_type: ResourceType) -> Self {
+        self.resource_type = resource_type;
+        self
     }
 }
 
@@ -483,6 +608,11 @@ impl FetchEngine {
         // A working copy of the script headers so a cross-origin redirect can
         // strip credential-bearing headers for the following hops.
         let mut headers = request.headers.clone();
+        // The user agent's own credentials get the same treatment: they were
+        // answered to *this* origin's challenge, and replaying them to whatever
+        // a redirect points at is the leak `strip_cross_origin_credentials`
+        // exists to prevent.
+        let mut auth = request.auth.clone();
         // Set once any redirect hop crosses origin: it taints the whole chain
         // so the final CORS gate applies even if the last hop lands back on the
         // initiator's origin.
@@ -555,6 +685,11 @@ impl FetchEngine {
                 &url,
                 &body,
                 &headers,
+                // Dropped the moment a redirect crosses origin, exactly as the
+                // credential-bearing script headers above are: credentials
+                // answered to one origin's challenge must not follow a redirect
+                // to another.
+                auth.as_ref(),
                 request.mode,
                 referrer_source.as_ref(),
                 origin.as_deref(),
@@ -597,6 +732,7 @@ impl FetchEngine {
                 // `Proxy-Authorization` when the origin changes).
                 if next.origin() != url.origin() {
                     strip_cross_origin_credentials(&mut headers);
+                    auth = None;
                     if request.mode == RequestMode::Cors {
                         origin_opaque = true;
                     }
@@ -743,6 +879,7 @@ impl FetchEngine {
         url: &Url,
         body: &[u8],
         user_headers: &[(String, String)],
+        auth: Option<&(String, String)>,
         mode: RequestMode,
         referrer_source: Option<&Url>,
         origin: Option<&str>,
@@ -772,6 +909,16 @@ impl FetchEngine {
                 continue;
             }
             headers.append(name, value);
+        }
+        // The user agent's own credentials, applied **after** the loop and
+        // outside both filters. `Authorization` and every `Proxy-*` name are
+        // forbidden *request* headers — a rule about what script may set, not
+        // about what the client may send — so a challenge the driver asked us
+        // to answer would otherwise be stripped and the server would
+        // re-challenge forever (ADR-0032 D8).
+        if let Some((name, value)) = auth {
+            let (name, value) = validate_header(name, value)?;
+            headers.insert(name, value);
         }
         headers.insert(
             ACCEPT_ENCODING,
@@ -1298,6 +1445,215 @@ fn cors_visible_headers(headers: &HeaderMap, creds: Credentials) -> Vec<(String,
         .collect()
 }
 
+/// What a `Content-Disposition` header says to do with a response.
+///
+/// The first parser of this header in the tree — the only prior occurrence was
+/// the multipart *writer*, which produces the header rather than reading it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContentDisposition {
+    /// `true` iff the disposition type is `attachment`.
+    pub attachment: bool,
+    /// The `filename` (or `filename*`) parameter, if any, with path separators
+    /// already stripped.
+    pub filename: Option<String>,
+}
+
+/// Parses a `Content-Disposition` value (RFC 6266), enough for downloads.
+///
+/// Deliberately narrow: `filename*` is honoured only for the `UTF-8` charset,
+/// which is the only one anything in the wild emits, and an unrecognised
+/// charset falls back to the plain `filename` rather than guessing.
+///
+/// **The filename is attacker-controlled.** Every path separator — `/`, `\`
+/// and the NUL a C-side path API would truncate at — is stripped here, at the
+/// parse, so no caller has to remember to. A name that is empty, `.` or `..`
+/// after stripping is reported as absent.
+#[must_use]
+pub fn parse_content_disposition(value: &str) -> ContentDisposition {
+    let mut parts = split_header_parameters(value).into_iter();
+    let attachment = parts
+        .next()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"));
+
+    let mut plain = None;
+    let mut extended = None;
+    for part in parts {
+        let Some((name, raw)) = part.split_once('=') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let raw = raw.trim();
+        if name == "filename" {
+            plain = Some(unquote_header_value(raw));
+        } else if name == "filename*" {
+            // `charset'language'percent-encoded-value`.
+            let mut fields = raw.splitn(3, '\'');
+            let charset = fields.next().unwrap_or_default();
+            let _language = fields.next();
+            if let Some(encoded) = fields.next()
+                && charset.eq_ignore_ascii_case("utf-8")
+                && let Ok(decoded) = percent_decode_utf8(encoded)
+            {
+                extended = Some(decoded);
+            }
+        }
+    }
+    ContentDisposition {
+        attachment,
+        // RFC 6266: `filename*` wins where both are present.
+        filename: extended.or(plain).and_then(|name| sanitize_filename(&name)),
+    }
+}
+
+/// Splits a header value on `;`, **ignoring separators inside a quoted-string**.
+///
+/// A naive `split(';')` cuts `filename="a;b.txt"` in half and leaves the name as
+/// `"a` — quote and all, since the closing one is in the discarded piece. RFC
+/// 9110's quoted-string is exactly the construct that makes a plain split wrong.
+fn split_header_parameters(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (at, c) in value.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                parts.push(&value[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&value[start..]);
+    parts
+}
+
+/// Unwraps a quoted-string, resolving its backslash escapes.
+fn unquote_header_value(raw: &str) -> String {
+    let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else {
+        return raw.to_owned();
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Strips every path separator from an attacker-supplied filename, and refuses
+/// the names that would still traverse.
+#[must_use]
+pub fn sanitize_filename(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | '\0'))
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return None;
+    }
+    Some(cleaned.to_owned())
+}
+
+fn percent_decode_utf8(input: &str) -> Result<String, ()> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).map_err(|_| ())?;
+            let byte = u8::from_str_radix(hex, 16).map_err(|_| ())?;
+            out.push(byte);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| ())
+}
+
+/// Parses a `WWW-Authenticate` / `Proxy-Authenticate` header into a challenge a
+/// driver can answer (ADR-0032 D8).
+///
+/// **Basic only.** Digest, NTLM and Negotiate answer `None`, so the 401 goes
+/// through to the page untouched rather than prompting a driver for credentials
+/// this stack could not then compute — P6's rule applied to a header.
+#[must_use]
+pub fn parse_auth_challenge(
+    headers: &[(String, String)],
+    status: u16,
+    url: &str,
+) -> Option<AuthChallenge> {
+    let (source, header) = match status {
+        401 => (AuthSource::Server, "www-authenticate"),
+        407 => (AuthSource::Proxy, "proxy-authenticate"),
+        _ => return None,
+    };
+    // A server may offer several schemes, one per header or comma-separated;
+    // take the first `Basic` on offer and ignore the rest.
+    let value = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(header))
+        .map(|(_, value)| value.as_str())
+        .find(|value| {
+            value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .any(|token| token.eq_ignore_ascii_case("Basic"))
+        })?;
+    let origin = Url::parse(url)
+        .map(|u| u.origin().ascii_serialization())
+        .unwrap_or_default();
+    Some(AuthChallenge {
+        source,
+        origin,
+        scheme: String::from("Basic"),
+        realm: auth_realm(value).unwrap_or_default(),
+    })
+}
+
+/// The `realm` parameter of an auth challenge, quoted or bare.
+fn auth_realm(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let at = lower.find("realm=")?;
+    let rest = value.get(at + "realm=".len()..)?.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        // Backslash escapes inside a quoted-string, per RFC 9110.
+        let mut out = String::new();
+        let mut chars = quoted.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => out.push(chars.next()?),
+                other => out.push(other),
+            }
+        }
+        return Some(out);
+    }
+    Some(
+        rest.split(|c: char| c == ',' || c.is_whitespace())
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+/// The `Authorization` value for HTTP Basic credentials.
+#[must_use]
+pub fn basic_auth_header(username: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        data::encode_base64(format!("{username}:{password}").as_bytes())
+    )
+}
+
 /// The `charset` parameter of a `Content-Type`, if it carries one.
 ///
 /// Shared with `XMLHttpRequest`, whose "final charset" prefers the charset of
@@ -1524,6 +1880,64 @@ mod tests {
             &hn("accept"),
             &hv(&"a".repeat(200))
         ));
+    }
+
+    #[test]
+    fn content_disposition_names_the_file_it_actually_named() {
+        let parsed = parse_content_disposition("attachment; filename=\"report.csv\"");
+        assert!(parsed.attachment);
+        assert_eq!(parsed.filename.as_deref(), Some("report.csv"));
+
+        // A `;` inside the quoted-string is part of the name, not a separator.
+        // A plain `split(';')` cuts this in half and yields `"a`.
+        let parsed = parse_content_disposition("attachment; filename=\"a;b.txt\"");
+        assert_eq!(parsed.filename.as_deref(), Some("a;b.txt"));
+
+        // Backslash escapes inside the quoted-string.
+        let parsed = parse_content_disposition(r#"attachment; filename="a\"b.txt""#);
+        assert_eq!(parsed.filename.as_deref(), Some("a\"b.txt"));
+
+        // `filename*` wins over `filename`, and is percent-decoded as UTF-8.
+        let parsed = parse_content_disposition(
+            "attachment; filename=\"fallback.txt\"; filename*=UTF-8''na%C3%AFve.txt",
+        );
+        assert_eq!(parsed.filename.as_deref(), Some("naïve.txt"));
+
+        // An unknown charset falls back rather than guessing.
+        let parsed = parse_content_disposition(
+            "attachment; filename=\"fallback.txt\"; filename*=Shift_JIS''x.txt",
+        );
+        assert_eq!(parsed.filename.as_deref(), Some("fallback.txt"));
+
+        // `inline` is not a download, whatever it names.
+        assert!(!parse_content_disposition("inline; filename=\"a.txt\"").attachment);
+    }
+
+    #[test]
+    fn a_download_filename_cannot_carry_a_path() {
+        // Attacker-controlled, and stripped at the parse so no caller has to
+        // remember to.
+        for hostile in [
+            "attachment; filename=\"../../etc/passwd\"",
+            "attachment; filename=\"..\\\\..\\\\windows\\\\system32\"",
+            "attachment; filename*=UTF-8''%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        ] {
+            let name = parse_content_disposition(hostile).filename.unwrap();
+            assert!(
+                !name.contains('/') && !name.contains('\\'),
+                "`{name}` kept a separator"
+            );
+        }
+        // Names that are nothing but traversal are reported as absent, so the
+        // caller falls back to the URL rather than writing `..`.
+        assert_eq!(
+            parse_content_disposition("attachment; filename=\"..\"").filename,
+            None
+        );
+        assert_eq!(
+            parse_content_disposition("attachment; filename=\"/\"").filename,
+            None
+        );
     }
 
     #[test]

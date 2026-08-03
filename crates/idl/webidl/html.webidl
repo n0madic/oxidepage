@@ -327,6 +327,10 @@ interface HTMLFormElement : HTMLElement {
 };
 
 interface HTMLInputElement : HTMLElement {
+  // The files an embedder selected into a `type=file` input (ADR-0032 D11).
+  // Read-only in practice as well as in IDL: there is no `DataTransfer`, so
+  // only `DOM.setFileInputFiles` and the file chooser can write it.
+  readonly attribute FileList? files;
   [CEReactions] attribute DOMString type;
   [CEReactions] attribute DOMString name;
   [CEReactions] attribute DOMString placeholder;

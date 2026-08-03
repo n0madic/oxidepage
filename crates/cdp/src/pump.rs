@@ -16,8 +16,8 @@ use std::sync::atomic::Ordering;
 
 use oxidepage_engine::PageEvent;
 use oxidepage_engine::page_api::{
-    ConsoleLevel, ConsoleMessage, NavigationEvent, NavigationEventKind, ScriptError,
-    ScriptErrorKind, StackFrame, render_preview_top,
+    ConsoleLevel, ConsoleMessage, DownloadState, NavigationEvent, NavigationEventKind,
+    NetworkEvent, ScriptError, ScriptErrorKind, StackFrame, render_preview_top,
 };
 use serde_json::json;
 
@@ -39,9 +39,14 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
     // (real iframes), and minting a second opaque id for a one-to-one mapping
     // would be two things to keep in sync for no gain.
     let frame_id = target_id;
+    // The loader of the load *in flight*, not of the committed document: every
+    // event of a navigation belongs to the document it is producing, and
+    // `Page.lifecycleEvent { name: "init" }` in particular is the only thing
+    // that moves Puppeteer's `frame._loaderId` (ADR-0032 D6a). After the commit
+    // the two are the same value.
     let loader_id = connection
         .registry
-        .loader_id(target_id)
+        .loading_loader_id(target_id)
         .unwrap_or_else(|| String::from("0"));
     let url = connection
         .registry
@@ -92,13 +97,34 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
                 ));
             }
             PageEvent::Error(error) => script_error(connection, session, error),
+            // A pause belongs to `Fetch`, not `Network`, and is gated on
+            // `Fetch.enable` alone: a driver may intercept without ever having
+            // sent `Network.enable`, and Puppeteer does exactly that.
+            PageEvent::Network(network)
+                if session.flags.fetch.load(Ordering::Relaxed)
+                    && matches!(
+                        network,
+                        NetworkEvent::Paused { .. } | NetworkEvent::AuthRequired { .. }
+                    ) =>
+            {
+                fetch_event(connection, session, target_id, network);
+            }
             PageEvent::Network(network) if session.flags.network.load(Ordering::Relaxed) => {
                 // Built once per session rather than once per target: the
                 // envelope carries the `sessionId`, so two sessions watching one
                 // page each need their own copy.
-                let mut event = crate::domains::network::network_event(target_id, network);
-                event.session_id = Some(session.id.clone());
-                connection.emit(event);
+                let document_loader = connection
+                    .registry
+                    .document_loader(target_id, network.request_id());
+                if let Some(mut event) = crate::domains::network::network_event(
+                    target_id,
+                    network,
+                    &loader_id,
+                    document_loader.as_deref(),
+                ) {
+                    event.session_id = Some(session.id.clone());
+                    connection.emit(event);
+                }
             }
             // Only to the sessions that installed *this* name. Broadcasting to
             // every session on the target fires a driver's callback once per
@@ -112,6 +138,64 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
                         "name": name,
                         "payload": payload,
                         "executionContextId": session.page.execution_context_id().unwrap_or(1),
+                    }),
+                ));
+            }
+            // `Page.fileChooserOpened` (ADR-0032 D12).
+            //
+            // `backendNodeId` is **not** optional in practice, whatever the
+            // protocol says: Puppeteer's `#onFileChooser` immediately calls
+            // `adoptBackendNode(event.backendNodeId)`, so an event without one
+            // leaves `page.waitForFileChooser()` hanging until its own timeout.
+            // The page mints it when the chooser opens, because the handle
+            // table lives there.
+            PageEvent::FileChooser(chooser) if session.flags.page.load(Ordering::Relaxed) => {
+                let mut params = json!({
+                    "frameId": frame_id,
+                    "mode": if chooser.multiple { "selectMultiple" } else { "selectSingle" },
+                });
+                if let Some(handle) = chooser.backend_node_id
+                    && let Ok(id) = i64::try_from(handle)
+                {
+                    params["backendNodeId"] = json!(id);
+                }
+                connection.emit(Event::session(
+                    &session.id,
+                    "Page.fileChooserOpened",
+                    params,
+                ));
+            }
+            // `Page.downloadWillBegin` / `downloadProgress` (ADR-0032 D13).
+            // Chrome deprecated these in favour of the `Browser` domain's pair
+            // and still emits them; Puppeteer's `page.waitForEvent` listens on
+            // the `Page` ones, so those are what ship.
+            PageEvent::Download(download) if session.flags.page.load(Ordering::Relaxed) => {
+                if download.state == DownloadState::InProgress {
+                    connection.emit(Event::session(
+                        &session.id,
+                        "Page.downloadWillBegin",
+                        json!({
+                            "frameId": frame_id,
+                            "guid": download.guid,
+                            "url": download.url,
+                            "suggestedFilename": download.suggested_filename,
+                        }),
+                    ));
+                }
+                connection.emit(Event::session(
+                    &session.id,
+                    "Page.downloadProgress",
+                    json!({
+                        "guid": download.guid,
+                        // No resume and no streaming: a download is written
+                        // whole or not at all, so the two counts are equal for a
+                        // completed one and the total is known up front.
+                        "totalBytes": download.total_bytes,
+                        "receivedBytes": match download.state {
+                            DownloadState::Completed => download.total_bytes,
+                            _ => 0,
+                        },
+                        "state": download.state.as_str(),
                     }),
                 ));
             }
@@ -130,6 +214,60 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
             _ => {}
         }
     }
+}
+
+/// Turns a pause into the `Fetch` event for it.
+///
+/// The `requestId` is **exactly** what `Network.requestWillBeSent` carried for
+/// this request — including the document's substituted loader id (ADR-0032
+/// D6a). Puppeteer pairs `requestPaused.networkId` against its stored
+/// `requestWillBeSent`, and drops the pairing outright if the two disagree.
+fn fetch_event(
+    connection: &Arc<Connection>,
+    session: &Arc<SessionState>,
+    target_id: &str,
+    network: &NetworkEvent,
+) {
+    let document_loader = connection
+        .registry
+        .document_loader(target_id, network.request_id());
+    let request_id = match document_loader {
+        Some(loader) => loader,
+        None => crate::domains::network::request_id(target_id, network.request_id()),
+    };
+    // The frame id is the target id, as everywhere else in this module.
+    let event = match network {
+        NetworkEvent::Paused {
+            url,
+            method,
+            headers,
+            resource_type,
+            ..
+        } => crate::domains::fetch::request_paused(
+            &session.id,
+            &request_id,
+            target_id,
+            url,
+            method,
+            headers,
+            *resource_type,
+        ),
+        NetworkEvent::AuthRequired {
+            url,
+            challenge,
+            resource_type,
+            ..
+        } => crate::domains::fetch::auth_required(
+            &session.id,
+            &request_id,
+            target_id,
+            url,
+            challenge,
+            *resource_type,
+        ),
+        _ => return,
+    };
+    connection.emit(event);
 }
 
 /// `Runtime.consoleAPICalled`.

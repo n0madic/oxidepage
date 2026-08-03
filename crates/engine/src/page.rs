@@ -15,10 +15,11 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use oxidepage_page::{
     BoxQuads, CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult,
-    KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput, NavigationHistory, NodeDescription,
-    NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions, PageRecord, PaintOptions,
-    PdfOptions, Point, PropertyDescriptor, Rect, RemoteError, RemoteObject, ScreenshotOptions,
-    SharedLocalStorage, SharedNetConfig, Viewport, WaitUntil, WheelInput, WindowOp,
+    InterceptControl, KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput, NavigationHistory,
+    NodeDescription, NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions,
+    PageRecord, PaintOptions, PdfOptions, Point, PropertyDescriptor, Rect, RemoteError,
+    RemoteObject, ScreenshotOptions, SharedLocalStorage, SharedNetConfig, Viewport, WaitUntil,
+    WheelInput, WindowOp,
 };
 
 use crate::context::{BrowserContext, PageSettings};
@@ -30,8 +31,18 @@ use crate::options::NewPageOptions;
 /// The page thread's half of the dialog rendezvous.
 struct DialogChannel {
     answers: Receiver<DialogResponse>,
-    /// Hands the page's own "a dialog is open" flag back to the handle.
-    publish_flag: Sender<Arc<AtomicBool>>,
+}
+
+/// What the page thread hands back to its handle once the page exists.
+///
+/// Both of these are made *by* `Page::new`, on the page thread, and both are
+/// needed *by* the handle, on the driver's — so they travel back over a
+/// one-slot channel the launcher drains before it returns.
+struct PageControls {
+    /// The page's own "a dialog is open" flag.
+    dialog_flag: Arc<AtomicBool>,
+    /// The driver's handle on request interception (ADR-0032 D2).
+    intercept: InterceptControl,
 }
 
 /// A type-erased unit of work, before it is tagged control or ordinary.
@@ -122,6 +133,11 @@ pub(crate) struct PageInner {
     /// distinguish "no dialog is open" (refuse immediately) from "the page is
     /// about to start waiting" (block briefly, do not drop the answer).
     dialog_pending: Arc<AtomicBool>,
+    /// The driver's handle on this page's request interception (ADR-0032 D2).
+    ///
+    /// `None` only if the page thread died between construction and publishing
+    /// its controls, which every other path already treats as a dead page.
+    intercept: Option<InterceptControl>,
     /// How this page answers dialogs.
     ///
     /// Only [`DialogPolicy::Ask`] ever reads the answer channel. Without this,
@@ -670,6 +686,29 @@ impl PageHandle {
         })
     }
 
+    /// `DOM.setFileInputFiles`: selects `paths` into an `<input type=file>`
+    /// (ADR-0032 D11), firing trusted `input` and `change`.
+    pub fn set_file_input_files(
+        &self,
+        node: NodeRef,
+        paths: Vec<String>,
+    ) -> EngineResult<Result<Result<(), String>, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            Ok(page
+                .set_file_input_files(id, &paths)
+                .map_err(|error| error.to_string()))
+        })
+    }
+
+    /// `Page.setInterceptFileChooserDialog` (ADR-0032 D12).
+    ///
+    /// An ordinary job, not a control one: it writes page state, and the bar
+    /// for `control` is `Cell`s and channels only.
+    pub fn set_intercept_file_chooser(&self, intercept: bool) -> EngineResult<()> {
+        self.with(move |page| page.set_intercept_file_chooser(intercept))
+    }
+
     /// The document's scroll position, viewport size and content extent.
     pub fn layout_metrics(&self) -> EngineResult<LayoutMetrics> {
         self.with(Page::layout_metrics)
@@ -711,6 +750,40 @@ impl PageHandle {
     #[must_use]
     pub fn awaits_dialog_answer(&self) -> bool {
         matches!(self.0.dialog_policy, DialogPolicy::Ask { .. })
+    }
+
+    /// The driver's handle on this page's request interception (ADR-0032 D2).
+    ///
+    /// Deliberately **not** a `PageHandle::with` round trip. A `Page.navigate`
+    /// occupies its session's command lane for the whole load, and the document
+    /// fetch it is blocked on is exactly the request a driver wants to pause —
+    /// so a `continueRequest` that had to queue behind that navigation would
+    /// deadlock against the command that would release it.
+    ///
+    /// `None` only for a page whose thread died before it could publish, which
+    /// every other path already treats as a dead page.
+    #[must_use]
+    pub fn intercept(&self) -> Option<InterceptControl> {
+        self.0.intercept.clone()
+    }
+
+    /// Whether this page has an event sink — the precondition for interception
+    /// (ADR-0032). A page created through `engine` always has one; this exists
+    /// so the protocol layer can state the requirement rather than assume it.
+    pub fn has_event_sink(&self) -> EngineResult<bool> {
+        self.with(Page::has_event_sink)
+    }
+
+    /// Releases every request this page holds paused, unmodified (ADR-0032 D7).
+    ///
+    /// Called when the interceptor goes away — a socket closing, a session
+    /// detaching, a target being destroyed. `Continue` rather than `Fail`,
+    /// which is what Chrome does and the safe answer: failing would break a
+    /// page whose driver merely crashed.
+    pub fn release_paused_requests(&self) {
+        if let Some(intercept) = &self.0.intercept {
+            intercept.release_all();
+        }
     }
 
     /// Whether a dialog is open on this page right now.
@@ -839,7 +912,7 @@ pub(crate) fn spawn_page(
     // Filled in by the page thread once its `Page` exists: the flag belongs to
     // the page (it is *the page* that is parked), and it must be raised before
     // the announcement a driver answers on.
-    let (flag_tx, flag_rx) = crossbeam_channel::bounded::<Arc<AtomicBool>>(1);
+    let (flag_tx, flag_rx) = crossbeam_channel::bounded::<PageControls>(1);
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
 
     let options_dialog_policy = options.resolved_dialog_policy();
@@ -863,10 +936,8 @@ pub(crate) fn spawn_page(
                     context,
                     cmd_rx,
                     event_tx,
-                    DialogChannel {
-                        answers: dialog_rx,
-                        publish_flag: flag_tx,
-                    },
+                    DialogChannel { answers: dialog_rx },
+                    flag_tx,
                     &ready_tx,
                 );
             }));
@@ -922,9 +993,12 @@ pub(crate) fn spawn_page(
         }
     }
 
-    let dialog_pending = flag_rx
-        .try_recv()
-        .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
+    let controls = flag_rx.try_recv().ok();
+    let dialog_pending = controls.as_ref().map_or_else(
+        || Arc::new(AtomicBool::new(false)),
+        |c| Arc::clone(&c.dialog_flag),
+    );
+    let intercept = controls.map(|c| c.intercept);
 
     Ok(PageHandle(Arc::new(PageInner {
         id,
@@ -933,6 +1007,7 @@ pub(crate) fn spawn_page(
         event_tx: handle_events,
         dialog_tx,
         dialog_pending,
+        intercept,
         dialog_policy: options_dialog_policy,
         closed,
         exited,
@@ -954,6 +1029,7 @@ fn run_page_thread(
     cmd_rx: Receiver<PageJob>,
     events: Sender<PageEvent>,
     dialogs: DialogChannel,
+    publish: Sender<PageControls>,
     ready_tx: &Sender<Result<(), String>>,
 ) {
     let dialog_policy = options.resolved_dialog_policy();
@@ -967,6 +1043,7 @@ fn run_page_thread(
         script_budget: options.script_budget,
         lazy_images: options.lazy_images.unwrap_or(false),
         whole_document_visible: options.whole_document_visible.unwrap_or(false),
+        download_path: options.download_path,
         // The policy lives on the shared pool; a per-page one would be ignored.
         policy: None,
         dialog_handler: None,
@@ -1000,8 +1077,14 @@ fn run_page_thread(
             // the page thread for it — with JavaScript on the stack, inside
             // `run_dialog` — would tax every `alert()` on a page whose driver
             // is slow to drain the bus.
-            let load_bearing = matches!(dialog_policy, DialogPolicy::Ask { .. })
-                && matches!(record, PageRecord::DialogOpening(_));
+            //
+            // A paused request is the second such record (ADR-0032 D2). The
+            // announcement is the *only* thing that tells a driver the request
+            // exists, so a dropped `Paused` holds it for the whole intercept
+            // timeout with nobody able to release it.
+            let load_bearing = (matches!(dialog_policy, DialogPolicy::Ask { .. })
+                && matches!(record, PageRecord::DialogOpening(_)))
+                || matches!(&record, PageRecord::Network(event) if event.is_load_bearing());
             let event = PageEvent::from_record(record);
             if load_bearing {
                 let _ = events.send_timeout(event, TERMINAL_EVENT_GRACE);
@@ -1050,7 +1133,10 @@ fn run_page_thread(
         move |request: &OpenWindowRequest| -> Option<OpenedWindow> { context.open_window(request) },
     )));
 
-    let _ = dialogs.publish_flag.try_send(page.dialog_open_flag());
+    let _ = publish.try_send(PageControls {
+        dialog_flag: page.dialog_open_flag(),
+        intercept: page.intercept(),
+    });
 
     if suspended {
         page.suspend();

@@ -47,14 +47,7 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "DOM.getBoxModel" => get_box_model(connection, request),
         "DOM.getContentQuads" => get_content_quads(connection, request),
         "DOM.scrollIntoViewIfNeeded" => scroll_into_view_if_needed(connection, request),
-        // `<input type=file>` exists and the capability is *scheduled* (stage 8
-        // brings `Blob`/`File`, `input.files` and the file-chooser path), so
-        // this names the reason rather than claiming the method does not exist.
-        // ADR-0031 D4.
-        "DOM.setFileInputFiles" => Err(ProtocolError::server(
-            "DOM.setFileInputFiles is not supported yet: Blob/File, input.files and the \
-             file-chooser path land with request interception",
-        )),
+        "DOM.setFileInputFiles" => set_file_input_files(connection, request),
         // There are no nested browsing contexts to own a frame, so there is
         // nothing to withhold — a driver can feature-detect this one.
         _ => Err(ProtocolError::method_not_found(&request.method)),
@@ -318,6 +311,35 @@ fn scroll_into_view_if_needed(connection: &Arc<Connection>, request: &Request) -
         .page
         .scroll_into_view_if_needed(target, rect)?
         .map_err(node_error)?;
+    Ok(json!({}))
+}
+
+/// `DOM.setFileInputFiles` (ADR-0032 D11).
+///
+/// The files are read by the **server**, from its own filesystem, which is what
+/// CDP defines: `elementHandle.uploadFile(path)` sends a path, not bytes. That
+/// is deliberate and it is why this reads through `std::fs` rather than the
+/// policy-gated `file://` loader — the driver is the operator, and the page's
+/// own `file://` reach must not widen because of it.
+fn set_file_input_files(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        files: Vec<String>,
+        #[serde(flatten)]
+        target: NodeTarget,
+    }
+
+    let session = connection.require_session(request)?;
+    let params: Params = request.parse()?;
+    let target = params.target.resolve()?;
+    session
+        .page
+        .set_file_input_files(target, params.files)?
+        .map_err(node_error)?
+        // The engine's own message names the file it could not read, or says the
+        // node is not a file input — both are what a driver needs to see.
+        .map_err(ProtocolError::server)?;
     Ok(json!({}))
 }
 

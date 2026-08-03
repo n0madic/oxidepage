@@ -23,6 +23,7 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "Page.enable" => set_enabled(connection, request, true),
         "Page.disable" => set_enabled(connection, request, false),
         "Page.setLifecycleEventsEnabled" => set_lifecycle_enabled(connection, request),
+        "Page.setInterceptFileChooserDialog" => set_intercept_file_chooser(connection, request),
         "Page.navigate" => navigate(connection, request),
         "Page.reload" => reload(connection, request),
         "Page.stopLoading" => stop_loading(connection, request),
@@ -67,6 +68,24 @@ fn set_lifecycle_enabled(connection: &Arc<Connection>, request: &Request) -> Com
         .flags
         .lifecycle
         .store(params.enabled, Ordering::Relaxed);
+    Ok(serde_json::json!({}))
+}
+
+/// `Page.setInterceptFileChooserDialog` (ADR-0032 D12).
+///
+/// Page state, not session state: the chooser is a property of the page, and
+/// two sessions watching one target must not each get a different answer to
+/// "does clicking a file input do anything". The *event* is still gated on
+/// `Page.enable` per session, as every other `Page` event is.
+fn set_intercept_file_chooser(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        enabled: bool,
+    }
+    let session = connection.require_session(request)?;
+    let params: Params = request.parse()?;
+    session.page.set_intercept_file_chooser(params.enabled)?;
     Ok(serde_json::json!({}))
 }
 

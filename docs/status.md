@@ -55,8 +55,9 @@ v1 limits.
   `URL`/`URLSearchParams`, `Headers`/`Request`/`Response`, `fetch()`,
   `XMLHttpRequest`, and `document.cookie`. XHR is conformant: the full event
   sequence over `ProgressEvent`, `xhr.upload`, `timeout`, `overrideMimeType`,
-  `responseURL`, and every `responseType` but `"blob"` (there is no `Blob`
-  type); `Set-Cookie` is filtered out of `getResponseHeader`/
+  `responseURL`, and every `responseType` including `"blob"` (ADR-0032 Phase 4
+  added the type that was missing); `Set-Cookie` is filtered out of
+  `getResponseHeader`/
   `getAllResponseHeaders`, and synchronous mode throws rather than deadlocking
   the page thread — ADR-0024. `oxidepage eval http(s)://…` loads over the
   network. Gated by the SSRF battery, cookie/referrer/cache unit tests, and
@@ -199,9 +200,10 @@ v1 limits.
   `requestIdleCallback`, Web Storage (`localStorage`/`sessionStorage`, in-memory),
   and the History API (`pushState`/`replaceState`/`popstate`). The per-page
   network budget is CLI-configurable (`--max-bytes`, `--max-requests`). No
-  `crypto.subtle`, no `Response.clone`/`blob`, no persistent storage;
-  `Blob`/`sendBeacon`/`PerformanceObserver` are omitted (tracking-only). Decisions
-  and v1 limits: ADR-0012.
+  `crypto.subtle`, no `Response.clone`, no persistent storage;
+  `sendBeacon`/`PerformanceObserver` are omitted (tracking-only). `Blob`/`File`
+  and `Response.blob()` arrived later, with ADR-0032 Phase 4. Decisions and v1
+  limits: ADR-0012.
 - **CSS transforms, containing blocks, inline SVG (v1)**: done. What a real page
   needs to *look* right, found by diffing against headless Chrome: `transform` is
   applied at paint time (rasterizer CTM + PDF `cm`; 3D flattened to 2D);
@@ -288,9 +290,13 @@ v1 limits.
   non-bubbling event pairs. ADR-0019 also recorded `form.submit()` and anchor
   activation as deliberately absent, because submitting and following an `href`
   are navigations and the engine had none; **both landed with navigation** — see
-  the navigation entry below (ADR-0022). Still **not implemented:** constraint
-  validation (`checkValidity()`, `:valid`/`:invalid`) and `input.files`.
-  Decisions and v1 limits: ADR-0019.
+  the navigation entry below (ADR-0022). `input.files` was recorded as absent
+  here too and **landed with ADR-0032** — an `<input type=file>` now carries an
+  embedder-set file list, contributes real parts to a form post, and opens an
+  interceptable chooser on activation. Still **not implemented:** constraint
+  validation (`checkValidity()`, `:valid`/`:invalid`), and there is no
+  `DataTransfer`, so page script still cannot write `input.files`.
+  Decisions and v1 limits: ADR-0019, ADR-0032.
 - **`FormData`**: done. `new FormData(form)` runs HTML's "construct the entry list"
   over the form's successful controls, and the object is a real entry list
   (`append`/`delete`/`get`/`getAll`/`has`/`set`, plus `entries`/`keys`/`values`/
@@ -298,9 +304,15 @@ v1 limits.
   share one body extractor, so a `FormData` body reaches the wire as
   `multipart/form-data` with a random boundary — and the `Content-Type` the engine
   sets names that same boundary, which is the only place it can come from. An
-  author-set `Content-Type` still wins for every other body type. Entries hold
-  **strings only** (`Blob`/`File` do not exist, so a file input contributes nothing).
-  This is load-bearing well beyond forms: jQuery 4 runs
+  author-set `Content-Type` still wins for every other body type. An entry value
+  is a string **or** a `Blob`/`File` (ADR-0032): `append`/`set` take an optional
+  filename, `get`/`getAll` hand a file entry back as a `File`, and an
+  `<input type=file>` contributes one part per selected file — with a `filename`
+  parameter and the part's own `Content-Type`, both escaped like the field name
+  because all three are attacker-influenced and all three land in a header. A
+  form with a non-empty file input is sent as `multipart/form-data` whatever its
+  `enctype` says, since the other two encodings cannot carry bytes. This is
+  load-bearing well beyond forms: jQuery 4 runs
   `data instanceof window.FormData` on *every* `$.ajax()` call, so without the global
   its entire ajax layer throws.
 - **Click activation order**: fixed. HTML's *legacy-pre-activation behavior* toggles a
@@ -541,30 +553,38 @@ v1 limits.
   would be exactly the always-installed no-op P6 forbids. `capi`/cbindgen and a
   windowed embedder remain out of scope. Decisions and v1 limits: ADR-0027.
 - **Phase 9 — Chrome DevTools Protocol (`cdp`)**: done for the automation
-  roadmap's stage 7. `oxidepage serve` exposes a loopback WebSocket endpoint
+  roadmap's stage 8. `oxidepage serve` exposes a loopback WebSocket endpoint
   that a real `puppeteer-core` connects to and drives: `Browser`, `Target`
   (flat sessions only), `Page`, `Runtime`, `DOM`, `Input`, `Log`, `Network`,
-  `Emulation`, `Security`, `Performance`, `IO`, and `Fetch.disable`. Behind it
-  are four pieces of new engine work — a remote object table living in
-  `PageState` (an `objectId` names a live `JsValue`, which is `!Send` and must
-  drop before the realm), request/response retention with a bounded body store
-  answering `Network.getResponseBody`, cookie enumeration/removal on
-  `CookieJar`, and a `backendNodeId` ↔ `NodeId` registry on `Page` that carries
-  the arena generation literally rather than packing it into a JSON number
-  (ADR-0031 D1). Commands run one OS thread per session, because
-  `PageHandle::with` blocks and is deferred during a load. The endpoint binds
-  `127.0.0.1`, requires a loopback `Host` (DNS-rebinding defence), refuses any
-  request carrying an `Origin`, serves `/json/new` on `PUT` only (`GET`/`POST`
-  are CORS-simple, so a page could otherwise open and navigate a target with an
-  `<img>` tag) and carries a 128-bit CSPRNG path token.
-  `cargo xtask puppeteer` drives it with a pinned Puppeteer over loopback
-  fixtures under the same two-sided expectation contract as WPT: **33 of 33
-  checks pass**, with an empty expectation file. **Not implemented:** `Fetch`
-  interception, isolated worlds (a world name is accepted and maps to the main
-  world), user-agent override, response timing, DOM mutation events over the
+  `Emulation`, `Security`, `Performance`, `IO` and `Fetch`. Behind it are seven
+  pieces of new engine work — a remote object table living in `PageState` (an
+  `objectId` names a live `JsValue`, which is `!Send` and must drop before the
+  realm), request/response retention with a bounded body store answering
+  `Network.getResponseBody`, cookie enumeration/removal on `CookieJar`, a
+  `backendNodeId` ↔ `NodeId` registry on `Page` that carries the arena
+  generation literally rather than packing it into a JSON number (ADR-0031 D1),
+  a **pause point in `NetService`** above both fetch shapes (so the top-level
+  document, every subresource and script-initiated `fetch`/XHR are all
+  interceptable through one funnel), the **File API** (`Blob`, `File`,
+  `FileList`, `FileReader`) with `input.files` and file-carrying `FormData`, and
+  a **download path** that writes a `Content-Disposition: attachment` response to
+  disk instead of parsing it as HTML. Commands run one OS thread per session,
+  because `PageHandle::with` blocks and is deferred during a load; the `Fetch`
+  resolution commands run on the shared priority lane, because a `Page.navigate`
+  whose own document is paused occupies its session's lane until released. The
+  endpoint binds `127.0.0.1`, requires a loopback `Host` (DNS-rebinding
+  defence), refuses any request carrying an `Origin`, serves `/json/new` on
+  `PUT` only (`GET`/`POST` are CORS-simple, so a page could otherwise open and
+  navigate a target with an `<img>` tag) and carries a 128-bit CSPRNG path
+  token. `cargo xtask puppeteer` drives it with a pinned Puppeteer over loopback
+  fixtures under the same two-sided expectation contract as WPT: **45 of 45
+  checks pass**, with an empty expectation file. **Not implemented:** isolated
+  worlds (a world name is accepted and maps to the main world), user-agent
+  override, response timing, response-stage interception
+  (`Fetch.continueResponse`), bandwidth shaping, DOM mutation events over the
   protocol, touch and drag input, and every inspector-facing domain. Decisions
-  and v1 limits: ADR-0030 (transport, remote objects) and ADR-0031 (`Input`,
-  `DOM`, `XMLSerializer`).
+  and v1 limits: ADR-0030 (transport, remote objects), ADR-0031 (`Input`, `DOM`,
+  `XMLSerializer`) and ADR-0032 (`Fetch`, file inputs, downloads).
 - Phases 8+: Phase 8 (embedding surface) is **half landed** — `engine` is real,
   per the entry above; the C ABI (`capi` + cbindgen header, a ctypes example)
   and the versioning policy are not. GPU raster (`raster-vello`) is not started;
@@ -601,3 +621,61 @@ Conformance work landing outside the phase plan:
   in the same turn) but now share that one decoder, which is what carries the
   fix to them. MIME *parameters* survive, so `charset=` reaches the text
   consumers. Decisions and v1 limits: ADR-0029.
+- **Request interception, file inputs, downloads**: done, and with it the
+  automation roadmap's stage-8 milestone — Puppeteer covers the 90% run end to
+  end (45 of 45 checks, empty expectation file). The pause point lives in
+  `NetService`, above **both** fetch shapes, so the top-level document (a
+  *blocking* fetch) is interceptable along with every subresource and every
+  script-initiated `fetch`/XHR through one funnel; `http`/`https` only, because
+  a paused `data:` URL is one a driver never continues. Decisions flow back on
+  an unbounded channel the page also owns a sender for — a receiver whose only
+  sender lived on the driver side becomes permanently ready in the event loop's
+  `Select` the moment the driver dies, turning one park into a pegged core. The
+  blocking half parks on `recv_deadline` and services **nothing else**: two of
+  its callers hold live `dom`/`style` borrows or sit inside QuickJS, so running
+  script there is a deterministic `BorrowMutError`. HTTP **Basic** auth is a
+  second pause under the same id, reusing the same map, timeout and release
+  paths. `Blob`/`File`/`FileList`/`FileReader` arrived with it, which also
+  closed XHR `responseType: "blob"`, `Response.blob()` and `Blob` request
+  bodies. Decisions and v1 limits: ADR-0032.
+
+## Deliberate limits at the Puppeteer milestone
+
+The roadmap's P6 accounting: the union of every stage's non-goals, so a user of
+`oxidepage serve` can read what will fail before hitting it. Each is a
+*documented rejection* — the protocol method answers `MethodNotFound` or a
+specific error, and the Web API is not installed, so feature detection works.
+
+**Interception and network.** Response-stage interception is absent:
+`Fetch.continueResponse`, `Fetch.getResponseBody` and
+`takeResponseBodyAsStream` are refused, and `Fetch.enable` with
+`requestStage: "Response"` is refused rather than silently downgraded to the
+request stage. `Network.getRequestPostData` is refused and `hasPostData` is
+never true — the stack retains response bodies, not request bodies. Bandwidth
+shaping (`downloadThroughput`/`uploadThroughput` other than `-1`,
+`connectionType`) is refused by name: approximating it without a token bucket
+would report a throttle that is not there. Auth is **Basic** only; Digest, NTLM
+and Negotiate are refused rather than downgraded, and there is no credential
+cache. No HAR recording, no WebSocket interception (there is no `WebSocket` in
+the engine), no service workers. Response timing phases are absent, and
+`requestWillBeSent` carries `initiator: { type: "other" }`.
+
+**Files.** No `URL.createObjectURL` and no `blob:` scheme — a new scheme would
+widen the policy gate and nothing in the 90% run needs one. No `DataTransfer`,
+so `input.files` is settable only by the embedder and `setInputFiles` on a
+non-`<input>` target fails. `FileReader` has no `readAsBinaryString` and no
+progress events beyond `loadstart`/`load`/`loadend`. `<input type=file>` has no
+default rendering, so an unstyled one lays out 0×0 and cannot be clicked *by
+coordinate* (`element.click()` and a styled input both work).
+
+**Downloads.** Written whole or not at all: the fetch that produced one was
+already read to completion in memory, so there is no resume and no
+`Browser.cancelDownload`. `deny` is the default, and a download with no
+directory is refused and recorded rather than parsed as HTML.
+
+**Protocol surface.** Isolated worlds are accepted by name and map to the main
+world. No user-agent override, no DOM mutation events over the protocol, no
+touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing
+domain (`Debugger`, `Profiler`, `HeapProfiler`, `CSS`, `Overlay`,
+`Accessibility`). There are no nested browsing contexts, so every frame API
+answers for the one frame a page has.

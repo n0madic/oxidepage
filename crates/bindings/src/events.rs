@@ -439,6 +439,9 @@ pub(crate) fn target_to_js(cx: &BindCx<'_>, key: EventTargetKey) -> Result<JsVal
                     Some(crate::state::HostData::XhrUpload(owner)) => {
                         owner.upgrade().and_then(|x| x.borrow().upload.clone())
                     }
+                    Some(crate::state::HostData::FileReader(reader)) => {
+                        reader.wrapper.borrow().clone()
+                    }
                     _ => return Err(JsThrow::Type("stale EventTarget target".into())),
                 }
             };

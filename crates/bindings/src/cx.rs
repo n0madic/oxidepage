@@ -13,6 +13,7 @@ use oxidepage_js::{HostCall, HostFn, JsObject, JsScope, JsThrow, JsValue, Proper
 use crate::collections::CollectionData;
 use crate::cssdata::{RuleData, RuleListData, SheetData, StyleDeclData};
 use crate::events::{EventData, EventTargetKey};
+use crate::filedata::{BlobData, FileInput, FileReaderData};
 use crate::netdata::{
     FormDataData, HeadersData, RequestData, ResponseData, UrlData, UrlSearchParamsData, XhrData,
     XhrRef,
@@ -199,6 +200,26 @@ pub(crate) fn unpack_node(data: u64) -> Option<NodeId> {
     let index = (data >> 32) as u32;
     let generation = std::num::NonZeroU32::new((data & 0xFFFF_FFFF) as u32)?;
     Some(NodeId::from_parts(index, generation))
+}
+
+/// The backing record for one embedder-supplied file, with its MIME type
+/// normalized. Shared by [`BindCx::new_file`] and [`BindCx::new_file_list`] so
+/// the normalization cannot be applied on one path and forgotten on the other.
+fn file_data(file: FileInput) -> Rc<BlobData> {
+    Rc::new(BlobData::shared_file(
+        file.bytes,
+        crate::filedata::normalize_type(&file.content_type),
+        file.name,
+        file.last_modified,
+    ))
+}
+
+/// Decodes a Latin-1 string (one JS code unit per byte) back into the bytes it
+/// stands for — the return half of the `blobPartBytes` bootstrap helper. A code
+/// point above U+00FF cannot occur, and is truncated rather than given a second,
+/// silently-wrong meaning.
+fn latin1_bytes(s: &str) -> Vec<u8> {
+    s.chars().map(|c| c as u32 as u8).collect()
 }
 
 impl BindCx<'_> {
@@ -650,13 +671,19 @@ impl BindCx<'_> {
         {
             return Ok(EventTargetKey::AbortSignal(key));
         }
-        // `new EventTarget()`, `XMLHttpRequest` and `xhr.upload` share one
-        // identity scheme: the slab key *is* the event-target key, and their
-        // listeners live in the shared registry rather than on the object.
+        // `new EventTarget()`, `XMLHttpRequest`, `xhr.upload` and `FileReader`
+        // share one identity scheme: the slab key *is* the event-target key,
+        // and their listeners live in the shared registry rather than on the
+        // object.
         if let Some((TAG_SLAB, key)) = self.payload(value)
             && matches!(
                 self.state.slab.borrow().get(key),
-                Some(HostData::EventTarget(_) | HostData::Xhr(_) | HostData::XhrUpload(_))
+                Some(
+                    HostData::EventTarget(_)
+                        | HostData::Xhr(_)
+                        | HostData::XhrUpload(_)
+                        | HostData::FileReader(_)
+                )
             )
         {
             return Ok(EventTargetKey::Host(key));
@@ -1117,6 +1144,145 @@ impl BindCx<'_> {
         Err(JsThrow::Type(
             "receiver is not an XMLHttpRequestEventTarget".into(),
         ))
+    }
+
+    // === File API unwraps / construction (ADR-0032 D10) ===
+
+    /// `this` as a `Blob`. A `File` **is** a `Blob`, so this accepts either —
+    /// the same accepts-both shape [`Self::this_xhr_event_target`] uses.
+    pub(crate) fn this_blob(&self, value: &JsValue) -> Result<Rc<BlobData>, JsThrow> {
+        self.slab_data(value, "Blob", |data| match data {
+            HostData::Blob(b) => Some(Rc::clone(b)),
+            _ => None,
+        })
+    }
+
+    /// A non-throwing brand check, for the places that must *recognise* a
+    /// `Blob` among other body types rather than demand one.
+    pub(crate) fn as_blob(&self, value: &JsValue) -> Option<Rc<BlobData>> {
+        self.this_blob(value).ok()
+    }
+
+    /// `this` as a `File`: the same record, with the file metadata demanded.
+    /// A plain `Blob` receiver is a `TypeError`, which is what stops
+    /// `File.prototype.name.call(blob)` from reporting a name it never had.
+    pub(crate) fn this_file(&self, value: &JsValue) -> Result<Rc<BlobData>, JsThrow> {
+        self.slab_data(value, "File", |data| match data {
+            HostData::Blob(b) if b.file.is_some() => Some(Rc::clone(b)),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn this_file_list(&self, value: &JsValue) -> Result<Rc<Vec<Rc<BlobData>>>, JsThrow> {
+        self.slab_data(value, "FileList", |data| match data {
+            HostData::FileList(l) => Some(Rc::clone(l)),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn this_file_reader(&self, value: &JsValue) -> Result<Rc<FileReaderData>, JsThrow> {
+        self.slab_data(value, "FileReader", |data| match data {
+            HostData::FileReader(r) => Some(Rc::clone(r)),
+            _ => None,
+        })
+    }
+
+    /// Wraps a `BlobData` as a `Blob` or a `File`, whichever its metadata says
+    /// it is — one entry point, so a `File` can never be handed back with the
+    /// `Blob` prototype and lose its `name`.
+    pub(crate) fn new_blob(&self, data: Rc<BlobData>) -> Result<JsValue, JsThrow> {
+        let interface = if data.file.is_some() { "File" } else { "Blob" };
+        self.new_slab_object(interface, HostData::Blob(data))
+    }
+
+    /// Wraps one embedder-supplied file as a `File`.
+    ///
+    /// Public, and taking plain data rather than a `BlobData`, because files
+    /// enter only from the embedder (ADR-0032 D11): there is no
+    /// `DataTransfer`, so nothing in page script can reach this. Going through
+    /// here rather than building a `BlobData` by hand is also what applies
+    /// [`crate::filedata::normalize_type`] — a `content_type` sniffed from a
+    /// path and passed through unnormalized would carry straight into a
+    /// `Content-Type` header.
+    pub fn new_file(&self, file: FileInput) -> Result<JsValue, JsThrow> {
+        self.new_blob(file_data(file))
+    }
+
+    /// Wraps a `FormData` file entry for the accessors.
+    ///
+    /// The entry's `filename` overrides whatever the underlying blob was
+    /// called: `append(name, blob, "a.txt")` must hand back a `File` named
+    /// `a.txt`, and a bare `Blob` entry comes back as a `File` called `blob` —
+    /// both are what the Fetch spec's entry-creation steps produce. The bytes
+    /// are shared, not copied.
+    pub(crate) fn new_form_data_file(
+        &self,
+        data: &Rc<BlobData>,
+        filename: &str,
+    ) -> Result<JsValue, JsThrow> {
+        self.new_blob(Rc::new(data.renamed(filename)))
+    }
+
+    /// Wraps embedder-supplied files as a `FileList` — the object an
+    /// `<input type=file>`'s `files` member hands back. A fresh wrapper each
+    /// call; the caller owns any `[SameObject]` caching.
+    pub fn new_file_list(&self, files: Vec<FileInput>) -> Result<JsValue, JsThrow> {
+        let files: Vec<Rc<BlobData>> = files.into_iter().map(file_data).collect();
+        self.new_indexed("FileList", HostData::FileList(Rc::new(files)))
+    }
+
+    /// `new FileReader()`. Its slab key is its event-target identity for its
+    /// whole life, exactly as an `XMLHttpRequest`'s is.
+    pub(crate) fn new_file_reader(&self) -> Result<JsValue, JsThrow> {
+        let data = Rc::new(FileReaderData::default());
+        let key = self
+            .state
+            .slab
+            .borrow_mut()
+            .insert(HostData::FileReader(Rc::clone(&data)));
+        let proto = self.interface_proto("FileReader")?;
+        let wrapper = JsValue::Object(
+            self.scope
+                .new_host_object(Some(&proto), TAG_SLAB, key)
+                .map_err(JsThrow::from)?,
+        );
+        data.slab_key.set(key);
+        *data.wrapper.borrow_mut() = Some(wrapper.clone());
+        Ok(wrapper)
+    }
+
+    /// Reads an `ArrayBuffer` or `ArrayBufferView` argument's bytes, or `None`
+    /// when the value is neither.
+    ///
+    /// `JsScope` can *create* an `ArrayBuffer` but not read one, and the IDL
+    /// codegen rejects buffer types outright, so the bytes come back through
+    /// the `blobPartBytes` bootstrap helper as a Latin-1 string — one JS code
+    /// unit per byte, which is exactly recoverable and needs no new engine
+    /// surface.
+    pub(crate) fn buffer_source_bytes(&self, value: &JsValue) -> Result<Option<Vec<u8>>, JsThrow> {
+        let helper = self.with_js(|js| js.blob_part_bytes.clone())?;
+        let encoded = self.call_helper(&helper, std::slice::from_ref(value))?;
+        let JsValue::String(s) = encoded else {
+            return Ok(None);
+        };
+        Ok(Some(latin1_bytes(&s)))
+    }
+
+    /// Normalizes a `sequence<BlobPart>` argument into a real JS array,
+    /// throwing a `TypeError` for a non-iterable (an omitted `parts` is an
+    /// empty list).
+    pub(crate) fn blob_parts(&self, value: &JsValue) -> Result<Vec<JsValue>, JsThrow> {
+        let helper = self.with_js(|js| js.blob_parts.clone())?;
+        let array = self.call_helper(&helper, std::slice::from_ref(value))?;
+        let JsValue::Object(array) = &array else {
+            return Ok(Vec::new());
+        };
+        let len = self.scope.array_length(array).map_err(JsThrow::from)?;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            out.push(self.scope.array_get(array, i).map_err(JsThrow::from)?);
+        }
+        Ok(out)
     }
 
     /// Creates the `[SameObject]` `XMLHttpRequestUpload` for an XHR.
@@ -1706,6 +1872,32 @@ impl BindCx<'_> {
 
     pub fn arg_u16(&self, call: &HostCall, i: usize) -> Result<u16, JsThrow> {
         Ok(self.to_integer(call, i, 65_536.0)? as u16)
+    }
+
+    /// WebIDL `long long`. The spec's modulo-2^64 wrap cannot be reproduced
+    /// through an ECMAScript number — a value past 2^53 has already lost the
+    /// bits that would wrap — so this truncates toward zero and *saturates*
+    /// into `i64` (Rust's float→int cast). The one member taking one,
+    /// `Blob.slice`, clamps against the blob's size immediately afterwards,
+    /// and saturation is precisely the right answer there.
+    pub fn arg_i64(&self, call: &HostCall, i: usize) -> Result<i64, JsThrow> {
+        let n = self
+            .scope
+            .coerce_number(&call.arg(i))
+            .map_err(JsThrow::from)?;
+        if !n.is_finite() {
+            return Ok(0);
+        }
+        Ok(n.trunc() as i64)
+    }
+
+    /// `optional long long` with no default: the caller must be able to tell
+    /// "omitted" from an explicit `0` (`slice(0)` is not `slice(0, 0)`).
+    pub fn arg_opt_i64(&self, call: &HostCall, i: usize) -> Result<Option<i64>, JsThrow> {
+        match call.arg(i) {
+            JsValue::Undefined => Ok(None),
+            _ => self.arg_i64(call, i).map(Some),
+        }
     }
 
     pub fn arg_u32_or(&self, call: &HostCall, i: usize, default: u32) -> Result<u32, JsThrow> {

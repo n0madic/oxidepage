@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
-use oxidepage_engine::page_api::NavigationEventKind;
+use oxidepage_engine::page_api::{NavigationEventKind, NetworkEvent, RequestId, ResourceType};
 use oxidepage_engine::{
     Browser, BrowserContext, ContextId, EngineError, NewPageOptions, PageEvent, PageHandle, PageId,
 };
@@ -70,6 +70,39 @@ struct TargetEntry {
     /// frame. Drivers use it to tell a fresh document from a same-document
     /// change, so it must be re-minted on every commit and must not be reused.
     loader_id: String,
+    /// The loader minted for the navigation now in flight (ADR-0032 D6a), and
+    /// whether a commit has adopted it yet.
+    pending_loader: Option<PendingLoad>,
+}
+
+/// The navigation in flight, and the loader id its document will have.
+///
+/// **Minted when the navigation *starts*, not when it commits**, because that
+/// is what Chrome does and what two separate Puppeteer mechanisms depend on:
+///
+/// * `Page.lifecycleEvent { name: "init" }` is the **only** event that sets
+///   `frame._loaderId`, and `LifecycleWatcher` resolves a navigation only once
+///   that value differs from the one it captured before the navigation. An
+///   `init` carrying the *outgoing* loader leaves `page.goto()` hanging until
+///   its own timeout — which is exactly what happened after a navigation that
+///   failed without committing, since the committed loader had not moved.
+/// * `isNavigationRequest` is `requestId === loaderId && type === 'Document'`,
+///   so the document request's protocol id is this same string.
+///
+/// The **committed** loader ([`TargetEntry::loader_id`]) only changes on a
+/// commit, so a navigation that fails does not retire the current document's
+/// id — a driver telling documents apart by loader must not see a phantom one.
+#[derive(Debug, Clone)]
+struct PendingLoad {
+    /// The engine's id for the document request, once it has gone out. `None`
+    /// between the navigation starting and its request being announced — and
+    /// for a commit with no request at all (`about:blank`). Kept so
+    /// `Network.getResponseBody` can map the substituted protocol id back.
+    request: Option<RequestId>,
+    loader: String,
+    /// Set once a commit has taken this loader. A later commit with no
+    /// navigation of its own must mint a fresh loader rather than re-use this.
+    adopted: bool,
 }
 
 struct Registry {
@@ -209,6 +242,16 @@ impl TargetRegistry {
         self.lock().contexts.get(id).cloned()
     }
 
+    /// Every browsing context, the default one included.
+    ///
+    /// Unlike [`TargetRegistry::context_ids`], which deliberately hides the
+    /// default context from `Target.getBrowserContexts`, a browser-level
+    /// command with no `browserContextId` means *all* of them.
+    #[must_use]
+    pub fn all_contexts(&self) -> Vec<BrowserContext> {
+        self.lock().contexts.values().cloned().collect()
+    }
+
     /// Every context id except the default one's — Chrome does not list the
     /// default context in `Target.getBrowserContexts`, and Puppeteer treats a
     /// listed id as a disposable incognito context.
@@ -308,6 +351,7 @@ impl TargetRegistry {
                     page: page.clone(),
                     context,
                     loader_id: random_hex(),
+                    pending_loader: None,
                 },
             );
             Self::publish(&mut inner, TargetSignal::Created(info));
@@ -347,20 +391,50 @@ impl TargetRegistry {
                 // A committed navigation changes what the target *is*, which
                 // is registry state rather than per-connection state — so it
                 // is folded in once, here, instead of by every connection.
-                if let PageEvent::Navigation(navigation) = &event
-                    && matches!(
-                        navigation.kind,
-                        NavigationEventKind::Committed | NavigationEventKind::SameDocument
-                    )
-                {
-                    registry.update_info(&pumped, Some(&navigation.url), None);
-                    // A cross-document commit is a *new document*, so it gets a
-                    // new loader. Minted here rather than by each connection so
-                    // every session sees the same id, and before the signal is
-                    // published so nobody reads the outgoing one.
-                    if navigation.kind == NavigationEventKind::Committed {
-                        registry.new_loader(&pumped);
+                if let PageEvent::Navigation(navigation) = &event {
+                    match navigation.kind {
+                        // A navigation *starting* mints the loader its document
+                        // will have (ADR-0032 D6a). It has to happen here,
+                        // before the signal is published, because the `init`
+                        // lifecycle event built from this very signal must
+                        // carry it — an `init` naming the outgoing loader hangs
+                        // `page.goto()` outright.
+                        NavigationEventKind::Started => {
+                            registry.begin_navigation(&pumped);
+                        }
+                        // A cross-document commit is a *new document*: it
+                        // adopts the pending loader. Folded in once, here,
+                        // rather than by every connection, so every session
+                        // sees the same id.
+                        NavigationEventKind::Committed => {
+                            registry.update_info(&pumped, Some(&navigation.url), None);
+                            registry.new_loader(&pumped);
+                        }
+                        NavigationEventKind::SameDocument => {
+                            registry.update_info(&pumped, Some(&navigation.url), None);
+                        }
+                        // A navigation that never committed — it failed, or it
+                        // turned out to be a download — must not leave its
+                        // loader pending. `loading_loader_id` would keep
+                        // reporting an id no document ever had, so every later
+                        // lifecycle event for the document that *is* current
+                        // would carry a phantom loader: exactly what D6a says a
+                        // driver telling documents apart by loader must not see.
+                        NavigationEventKind::Failed => {
+                            registry.abandon_navigation(&pumped);
+                        }
+                        _ => {}
                     }
+                }
+                // The top-level document request is the one whose protocol id
+                // *is* the loader; this records which request that is.
+                if let PageEvent::Network(NetworkEvent::Requested {
+                    id,
+                    resource_type: ResourceType::Document,
+                    ..
+                }) = &event
+                {
+                    registry.begin_document_load(&pumped, *id);
                 }
                 {
                     let mut inner = registry.lock();
@@ -420,7 +494,11 @@ impl TargetRegistry {
         self.lock().targets.get(target_id).map(|t| t.info.clone())
     }
 
-    /// The id of the document currently loaded in `target_id`.
+    /// The id of the document currently **committed** in `target_id`.
+    ///
+    /// Unchanged by a navigation that fails, which is what keeps a driver from
+    /// seeing a phantom document. For the loader a *loading* document will have,
+    /// see [`TargetRegistry::loading_loader_id`].
     #[must_use]
     pub fn loader_id(&self, target_id: &str) -> Option<String> {
         self.lock()
@@ -429,16 +507,124 @@ impl TargetRegistry {
             .map(|t| t.loader_id.clone())
     }
 
-    /// Mints a new `loaderId` for a fresh document and returns it.
+    /// The loader every event of the load in flight belongs to: the pending one
+    /// if a navigation has started and not yet committed, else the committed
+    /// one.
+    ///
+    /// This is what `Page.lifecycleEvent` must carry. `init` is the only event
+    /// that sets Puppeteer's `frame._loaderId`, and `LifecycleWatcher` resolves
+    /// a navigation only when that value has *changed* — so an `init` carrying
+    /// the outgoing loader hangs `page.goto()` outright.
+    #[must_use]
+    pub fn loading_loader_id(&self, target_id: &str) -> Option<String> {
+        let inner = self.lock();
+        let entry = inner.targets.get(target_id)?;
+        Some(match &entry.pending_loader {
+            Some(pending) if !pending.adopted => pending.loader.clone(),
+            _ => entry.loader_id.clone(),
+        })
+    }
+
+    /// Mints the loader for a navigation that is *starting*, and returns it.
+    ///
+    /// Called on `NavigationEventKind::Started`, which is what makes the `init`
+    /// lifecycle event carry the new document's loader — see [`PendingLoad`].
+    pub fn begin_navigation(&self, target_id: &str) -> Option<String> {
+        let loader = random_hex();
+        let mut inner = self.lock();
+        let entry = inner.targets.get_mut(target_id)?;
+        entry.pending_loader = Some(PendingLoad {
+            request: None,
+            loader: loader.clone(),
+            adopted: false,
+        });
+        Some(loader)
+    }
+
+    /// Commits the pending loader, or mints one for a commit that had no
+    /// navigation of its own.
     ///
     /// Called on a *cross-document* commit only. A same-document navigation
     /// keeps its loader, which is exactly the distinction a driver reads it for.
     pub fn new_loader(&self, target_id: &str) -> Option<String> {
-        let loader = random_hex();
         let mut inner = self.lock();
         let entry = inner.targets.get_mut(target_id)?;
+        let loader = match &mut entry.pending_loader {
+            Some(pending) if !pending.adopted => {
+                pending.adopted = true;
+                pending.loader.clone()
+            }
+            _ => random_hex(),
+        };
         entry.loader_id = loader.clone();
         Some(loader)
+    }
+
+    /// Drops the pending loader of a navigation that never committed.
+    ///
+    /// Only if it is still unadopted: a `Failed` that follows a *committed*
+    /// navigation (a subresource giving up, a later same-document step) must
+    /// leave the current document's loader alone.
+    pub fn abandon_navigation(&self, target_id: &str) {
+        let mut inner = self.lock();
+        let Some(entry) = inner.targets.get_mut(target_id) else {
+            return;
+        };
+        if entry
+            .pending_loader
+            .as_ref()
+            .is_some_and(|pending| !pending.adopted)
+        {
+            entry.pending_loader = None;
+        }
+    }
+
+    /// Records which request is the document request of the load in flight, so
+    /// its protocol id can be the loader (ADR-0032 D6a).
+    ///
+    /// The loader is **not** minted here — `begin_navigation` already did, at
+    /// the `Started` that preceded this. A request arriving with no pending
+    /// navigation mints one anyway rather than losing the association.
+    pub fn begin_document_load(&self, target_id: &str, request: RequestId) -> Option<String> {
+        let mut inner = self.lock();
+        let entry = inner.targets.get_mut(target_id)?;
+        match &mut entry.pending_loader {
+            Some(pending) if !pending.adopted => {
+                pending.request = Some(request);
+                Some(pending.loader.clone())
+            }
+            _ => {
+                let loader = random_hex();
+                entry.pending_loader = Some(PendingLoad {
+                    request: Some(request),
+                    loader: loader.clone(),
+                    adopted: false,
+                });
+                Some(loader)
+            }
+        }
+    }
+
+    /// The substituted protocol id for `request`, iff it is the document
+    /// request of the load now in flight (or the one that produced the current
+    /// document).
+    #[must_use]
+    pub fn document_loader(&self, target_id: &str, request: RequestId) -> Option<String> {
+        let inner = self.lock();
+        let pending = inner.targets.get(target_id)?.pending_loader.as_ref()?;
+        (pending.request == Some(request)).then(|| pending.loader.clone())
+    }
+
+    /// The inverse of [`TargetRegistry::document_loader`]: the engine request a
+    /// substituted protocol id names, so `Network.getResponseBody` can answer
+    /// for the document a driver just navigated to.
+    #[must_use]
+    pub fn request_for_loader(&self, target_id: &str, loader: &str) -> Option<RequestId> {
+        let inner = self.lock();
+        let pending = inner.targets.get(target_id)?.pending_loader.as_ref()?;
+        (pending.loader == loader)
+            .then_some(pending.request)
+            .flatten()
     }
 
     #[must_use]

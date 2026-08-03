@@ -7,6 +7,7 @@ use std::rc::Rc;
 use oxidepage_js::{HostCall, JsThrow, JsValue};
 
 use crate::cx::BindCx;
+use crate::filedata::{BlobData, normalize_type};
 use crate::netdata::{HeadersData, ResponseData};
 use crate::state::HostData;
 
@@ -140,6 +141,24 @@ pub(crate) fn array_buffer(cx: &BindCx<'_>, this: Resp) -> Result<JsValue, JsThr
     }
     let buffer = cx.bytes_to_array_buffer(&this.body)?;
     cx.resolved_promise(buffer)
+}
+
+/// `blob()`: the body as a `Blob` whose `type` is the response's own
+/// `Content-Type`, per Fetch's "package data" — the header, not a guess, which
+/// is what makes `URL.createObjectURL`-free consumers (an `<img>` fed through
+/// `FileReader`) see the right MIME type.
+pub(crate) fn blob(cx: &BindCx<'_>, this: Resp) -> Result<JsValue, JsThrow> {
+    if let Err(err) = take_body(cx, &this) {
+        return cx.rejected_promise(err);
+    }
+    let content_type = this
+        .headers
+        .borrow()
+        .get("content-type")
+        .unwrap_or_default();
+    let data = BlobData::new(this.body.clone(), normalize_type(&content_type));
+    let blob = cx.new_blob(Rc::new(data))?;
+    cx.resolved_promise(blob)
 }
 
 /// The global `JSON.parse` function.

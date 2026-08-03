@@ -9,21 +9,25 @@
 // this file.
 
 // The `FormData` entry list. Constructing one from a `<form>` runs HTML's
-// "construct the entry list" over the form's successful controls.
+// "construct the entry list" over the form's successful controls, and an
+// `<input type=file>` contributes one entry per selected file (ADR-0032 D11).
 //
-// Values are `DOMString` only: `Blob`/`File` do not exist in this engine, so
-// there is nothing a file entry could hold. Pair iteration (`entries`/`keys`/
-// `values`/`forEach`/`@@iterator`) is installed on the prototype from
-// `bootstrap.js`, sharing `URLSearchParams`' helper.
+// `append`/`set`/`get`/`getAll` take and return `any`, not `USVString`: an
+// entry value is a string *or* a `Blob`/`File`, which WebIDL spells as a union
+// the codegen has no representation for. The `imp` unmarshals — a `Blob`
+// argument becomes a file entry, anything else is stringified — which is
+// exactly what the union would have done. Pair iteration
+// (`entries`/`keys`/`values`/`forEach`/`@@iterator`) is installed on the
+// prototype from `bootstrap.js`, sharing `URLSearchParams`' helper.
 interface FormData {
   constructor(optional any form);
 
-  undefined append(USVString name, USVString value);
+  undefined append(USVString name, any value, optional USVString filename);
   undefined delete(USVString name);
-  USVString? get(USVString name);
-  sequence<USVString> getAll(USVString name);
+  any get(USVString name);
+  sequence<any> getAll(USVString name);
   boolean has(USVString name);
-  undefined set(USVString name, USVString value);
+  undefined set(USVString name, any value, optional USVString filename);
 };
 
 interface Headers {
@@ -75,4 +79,5 @@ interface Response {
   any text();
   any json();
   any arrayBuffer();
+  any blob();
 };

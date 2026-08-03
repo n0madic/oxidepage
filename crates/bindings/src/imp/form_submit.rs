@@ -179,8 +179,37 @@ fn plan_submission(cx: &BindCx<'_>, form: NodeId, submitter: Option<NodeId>) -> 
 
 /// Turns the entry list into the navigation it produces: a GET rewrites the
 /// action URL's query, a POST carries a body.
-fn encode(cx: &BindCx<'_>, plan: &Plan, entries: Vec<(String, String)>) -> PendingNavigation {
+fn encode(
+    cx: &BindCx<'_>,
+    plan: &Plan,
+    entries: Vec<(String, crate::netdata::FormDataValue)>,
+) -> PendingNavigation {
+    // A form with a non-empty file input is sent as `multipart/form-data`
+    // whatever its `enctype` says: urlencoded and `text/plain` cannot carry
+    // bytes, so honouring the author's enctype would send the *filenames* and
+    // nothing else — which is what this engine did before file entries existed.
+    //
+    // A deliberate deviation from HTML, which says to send just the names; it
+    // is announced with a warning rather than done quietly, because a silent
+    // upload that drops the file is the worse failure by far (ADR-0032's
+    // deliberate limits record it).
+    let data = crate::netdata::FormDataData::new(entries);
+    let enctype = if data.has_file() && plan.post {
+        if plan.enctype != MULTIPART {
+            cx.warn(&format!(
+                "form submission: enctype `{}` cannot carry a file, so \
+                 multipart/form-data was used instead",
+                plan.enctype
+            ));
+        }
+        MULTIPART
+    } else {
+        plan.enctype
+    };
     if !plan.post {
+        // Only the two byte-less encodings need the flattened pairs; multipart
+        // reads the entry list itself, files and all.
+        let entries = data.pairs();
         // "Mutate action URL": the query is *replaced*, and the fragment of the
         // action URL is dropped.
         let mut url = plan.action.clone();
@@ -200,10 +229,9 @@ fn encode(cx: &BindCx<'_>, plan: &Plan, entries: Vec<(String, String)>) -> Pendi
         };
     }
 
-    let (bytes, content_type) = match plan.enctype {
+    let (bytes, content_type) = match enctype {
         MULTIPART => {
             let boundary = multipart_boundary(cx);
-            let data = crate::netdata::FormDataData::new(entries);
             (
                 data.to_multipart(&boundary),
                 format!("{MULTIPART}; boundary={boundary}"),
@@ -214,7 +242,7 @@ fn encode(cx: &BindCx<'_>, plan: &Plan, entries: Vec<(String, String)>) -> Pendi
         // else is exactly the "fake" P6 forbids.
         TEXT_PLAIN => {
             let mut out = String::new();
-            for (name, value) in &entries {
+            for (name, value) in &data.pairs() {
                 out.push_str(&name.replace(['\r', '\n'], " "));
                 out.push('=');
                 out.push_str(&value.replace(['\r', '\n'], " "));
@@ -222,7 +250,10 @@ fn encode(cx: &BindCx<'_>, plan: &Plan, entries: Vec<(String, String)>) -> Pendi
             }
             (out.into_bytes(), TEXT_PLAIN.to_owned())
         }
-        _ => (urlencoded(&entries).into_bytes(), URLENCODED.to_owned()),
+        _ => (
+            urlencoded(&data.pairs()).into_bytes(),
+            URLENCODED.to_owned(),
+        ),
     };
     PendingNavigation::Load {
         url: plan.action.to_string(),

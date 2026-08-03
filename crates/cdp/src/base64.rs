@@ -3,8 +3,13 @@
 //! `Page.captureScreenshot` and `Page.printToPDF` hand back their payload as a
 //! base64 string, and `Network.getResponseBody` does for a binary body. That is
 //! the whole requirement: standard alphabet, `=` padding, no line wrapping, no
-//! URL-safe variant, and no decoder — nothing in the implemented surface takes
-//! base64 *in*.
+//! URL-safe variant.
+//!
+//! The decoder arrived with request interception (ADR-0032):
+//! `Fetch.fulfillRequest` and `Fetch.continueRequest` take a base64 body *in*.
+//! It is strict — whitespace, a URL-safe character or a bad length answers
+//! `None` — because the input is an untrusted frame and a lenient decoder would
+//! turn a driver's typo into a silently truncated stub response.
 //!
 //! Twenty lines of table lookup rather than a `base64` entry in
 //! `[workspace.dependencies]`, on the same reasoning as
@@ -40,6 +45,52 @@ pub fn encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Decodes standard, padded base64. Strict: any character outside the alphabet
+/// (including whitespace), or a length that is not a multiple of four, is
+/// `None` rather than a best-effort prefix.
+#[must_use]
+pub fn decode(input: &str) -> Option<Vec<u8>> {
+    let bytes = input.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        // Padding is only legal in the final group, and only as the last one or
+        // two characters.
+        let padding = chunk.iter().rev().take_while(|b| **b == b'=').count();
+        if padding > 2
+            || (padding > 0 && !std::ptr::eq(chunk.as_ptr(), bytes[bytes.len() - 4..].as_ptr()))
+        {
+            return None;
+        }
+        let mut acc = 0u32;
+        for (index, byte) in chunk.iter().enumerate() {
+            let value = if index >= 4 - padding {
+                0
+            } else {
+                u32::from(value_of(*byte)?)
+            };
+            acc = (acc << 6) | value;
+        }
+        for shift in [16, 8, 0].iter().take(3 - padding) {
+            out.push(((acc >> shift) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn value_of(byte: u8) -> Option<u8> {
+    Some(match byte {
+        b'A'..=b'Z' => byte - b'A',
+        b'a'..=b'z' => byte - b'a' + 26,
+        b'0'..=b'9' => byte - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,6 +104,47 @@ mod tests {
         assert_eq!(encode(b"foob"), "Zm9vYg==");
         assert_eq!(encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn decodes_the_rfc_4648_vectors() {
+        for (bytes, text) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(decode(text).as_deref(), Some(bytes), "decoding {text:?}");
+        }
+    }
+
+    #[test]
+    fn decode_round_trips_every_byte_value() {
+        let all: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(decode(&encode(&all)), Some(all));
+    }
+
+    #[test]
+    fn a_malformed_body_is_refused_rather_than_truncated() {
+        // The input is an untrusted frame — `Fetch.fulfillRequest`'s body. A
+        // lenient decoder would turn a driver's typo into a silently short stub
+        // response, which is a far worse failure than an error.
+        for bad in [
+            "Zg=",       // not a multiple of four
+            "Zm9vYmFyX", // ditto, with a trailing partial group
+            "Zm 9v",     // whitespace is not skipped
+            "Zm9v\n",    // nor is a trailing newline
+            "Zg===",     // over-padded
+            "====",      // padding only
+            "Zg==Zg==",  // padding in a non-final group
+            "Z-_v",      // URL-safe alphabet is a different encoding
+            "Zm9v!!!!",  // outside the alphabet entirely
+        ] {
+            assert!(decode(bad).is_none(), "{bad:?} was accepted");
+        }
     }
 
     #[test]

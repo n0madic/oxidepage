@@ -30,7 +30,7 @@ pub mod tree;
 
 pub use custom_element::{CustomElementReaction, CustomElementState, is_valid_custom_element_name};
 pub use event::{AddEventListenerOptions, Event, EventPhase, ListenerCallback, ListenerId};
-pub use form::{ClickActivation, FormState, SelectionDirection, input_type};
+pub use form::{ClickActivation, FormState, SelectedFile, SelectionDirection, input_type};
 pub use node::{
     DocumentData, ElementData, Node, NodeData, NodeFlags, NodeKind, node_name, qualified_name,
 };

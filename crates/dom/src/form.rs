@@ -20,6 +20,8 @@
 //! invalidation machinery works the moment the bits are populated: every mutator
 //! here snapshots the element first, then re-derives, then hints a restyle.
 
+use std::rc::Rc;
+
 use html5ever::{local_name, ns};
 use oxidepage_base::NodeId;
 use style_dom::ElementState;
@@ -57,6 +59,31 @@ pub struct FormState {
     /// focus arrived**. Recomputing that from the current value is impossible;
     /// it has to be snapshotted at focus time.
     pub(crate) value_at_focus: Option<String>,
+    /// The **selected files** of an `<input type=file>` (ADR-0032 D11).
+    ///
+    /// Plain data, and a `dom` type on purpose: `dom` cannot see `bindings`,
+    /// and files only ever enter from the *embedder* —
+    /// `DOM.setFileInputFiles` and the file chooser. There is no
+    /// `DataTransfer`, so page script can never write this, which is what
+    /// makes `input.files` read-only in practice. `bindings` wraps each entry
+    /// into a `File` on read.
+    pub(crate) files: Vec<SelectedFile>,
+}
+
+/// One file an embedder selected into an `<input type=file>`.
+#[derive(Debug, Clone)]
+pub struct SelectedFile {
+    pub name: String,
+    /// `Rc`, not `Vec`: `input.files` mints a fresh `FileList` on **every**
+    /// property read (there is no `[SameObject]` cache, because an embedder can
+    /// replace the selection at any time), and building the entry list for a
+    /// form post reads them again. With an owned `Vec` a page that touched
+    /// `input.files[0]` twice copied a 200 MB upload twice.
+    pub bytes: Rc<Vec<u8>>,
+    /// The MIME type, guessed from the extension when the embedder gave none.
+    pub content_type: String,
+    /// Unix milliseconds, for `File.lastModified`.
+    pub last_modified: i64,
 }
 
 /// `HTMLInputElement.selectionDirection`.
@@ -270,6 +297,65 @@ impl DomTree {
         el.form_state_mut().value = Some(value);
         // `:placeholder-shown` and (later) validity depend on the value.
         self.update_element_state(id);
+    }
+
+    /// The files selected into an `<input type=file>`.
+    #[must_use]
+    pub fn selected_files(&self, id: NodeId) -> &[SelectedFile] {
+        self.get(id)
+            .and_then(|n| n.as_element())
+            .and_then(ElementData::form_state)
+            .map_or(&[], |state| state.files.as_slice())
+    }
+
+    /// Replaces the files selected into an `<input type=file>`.
+    ///
+    /// The one mutator, so the single invalidation code path is preserved:
+    /// `:valid`/`:invalid` for a `required` file input turn on whether the list
+    /// is empty, and `update_element_state` is what tells stylo. A caller that
+    /// wrote `FormState::files` directly would leave the selector state stale.
+    ///
+    /// Non-`<input type=file>` elements are ignored rather than given a file
+    /// list they could not have: an embedder command naming the wrong element
+    /// is refused above this, and silently storing files on a `<div>` would
+    /// make that refusal untestable.
+    pub fn set_selected_files(&mut self, id: NodeId, files: Vec<SelectedFile>) -> bool {
+        if !self.is_file_input(id) {
+            return false;
+        }
+        let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) else {
+            return false;
+        };
+        el.form_state_mut().files = files;
+        self.update_element_state(id);
+        true
+    }
+
+    /// Whether `id` is an `<input type=file>`.
+    #[must_use]
+    pub fn is_file_input(&self, id: NodeId) -> bool {
+        self.get(id)
+            .and_then(|n| n.as_element())
+            .is_some_and(|el| el.is_html(&local_name!("input")) && crate::input_type(el) == "file")
+    }
+
+    /// Drops any selected files an element is no longer entitled to.
+    ///
+    /// Called when `type` changes: HTML clears the selected files when an
+    /// `<input>` stops being a file input, and keeping them would let
+    /// `type="file"` → `type="text"` → `type="file"` resurrect a list the page
+    /// was never allowed to build.
+    pub(crate) fn clear_files_if_not_a_file_input(&mut self, id: NodeId) {
+        if self.is_file_input(id) {
+            return;
+        }
+        if let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut())
+            && let Some(state) = el.form.as_deref_mut()
+            && !state.files.is_empty()
+        {
+            state.files.clear();
+            self.update_element_state(id);
+        }
     }
 
     /// Whether the element is a text entry control — one that has a caret, a

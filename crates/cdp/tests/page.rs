@@ -169,6 +169,89 @@ fn a_cross_document_navigation_mints_a_new_loader() {
     assert_eq!(first["frameId"], second["frameId"], "the frame is the same");
 }
 
+/// The `init` lifecycle event must carry the loader of the document being
+/// *loaded*, and a navigation that fails must not spend the next one's id.
+///
+/// `Page.lifecycleEvent { name: "init" }` is the only event that moves
+/// Puppeteer's `frame._loaderId`, and `LifecycleWatcher` resolves a navigation
+/// only once that value has changed. Emitting the *outgoing* loader made
+/// `page.goto()` hang for the full 30 s after any navigation that had failed
+/// without committing — because the committed loader had not moved either.
+#[test]
+fn each_navigation_reports_a_fresh_loader_on_init() {
+    let fixtures = Fixtures::start(vec![("/a", &doc("A", "")), ("/b", &doc("B", ""))]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.setLifecycleEventsEnabled",
+        json!({ "enabled": true }),
+    );
+
+    let init_loader = |client: &mut common::Client| loop {
+        let event = client.await_event("Page.lifecycleEvent");
+        if event["params"]["name"] == "init" {
+            return event["params"]["loaderId"].as_str().unwrap().to_owned();
+        }
+    };
+
+    // The target's opening `about:blank` navigation can land either side of the
+    // command that enabled lifecycle events, so start from a known-empty
+    // baseline rather than counting from the top of the stream.
+    client.forget_events(std::time::Duration::from_millis(300));
+    let before =
+        client.call_on(&session, "Page.getFrameTree", json!({}))["frameTree"]["frame"]["loaderId"]
+            .as_str()
+            .expect("a loader")
+            .to_owned();
+
+    // A navigation that genuinely fails — nothing is listening on port 1, so it
+    // never commits. (A 404 would *commit*, which is the opposite of the case
+    // under test.)
+    let failed = client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": "http://127.0.0.1:1/unreachable" }),
+    );
+    assert!(
+        failed.get("errorText").is_some(),
+        "the fixture URL must actually fail: {failed}"
+    );
+    let failed_init = init_loader(&mut client);
+
+    // The *committed* loader has not moved: a navigation that never produced a
+    // document must not retire the one that is still on screen.
+    let after_failure =
+        client.call_on(&session, "Page.getFrameTree", json!({}))["frameTree"]["frame"]["loaderId"]
+            .as_str()
+            .expect("a loader")
+            .to_owned();
+    assert_eq!(
+        before, after_failure,
+        "a failed navigation must not commit a loader"
+    );
+
+    let ok = client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+    let ok_init = init_loader(&mut client);
+
+    assert_ne!(
+        failed_init, ok_init,
+        "a navigation after a failed one must still announce a fresh loader"
+    );
+    assert_eq!(
+        ok_init, ok["loaderId"],
+        "the loader `init` announced is the one the commit adopted"
+    );
+    assert_ne!(
+        before, ok["loaderId"],
+        "and the committed loader moved once a document really arrived"
+    );
+}
+
 #[test]
 fn get_frame_tree_reports_the_current_document() {
     let fixtures = Fixtures::start(vec![("/a", &doc("A", ""))]);
@@ -514,4 +597,161 @@ fn answering_a_dialog_that_is_not_showing_says_so() {
             .contains("No dialog is showing"),
         "unhelpful message: {error}"
     );
+}
+
+// === downloads (ADR-0032 D13) ===
+
+#[test]
+fn set_download_behavior_allow_needs_a_path() {
+    // With nowhere to write, `allow` and `deny` behave identically — so
+    // accepting it would tell a driver downloads were on when nothing could be
+    // written.
+    let harness = Harness::start();
+    let (mut client, _session, _target) = harness.attached();
+    let refused = client.try_call(
+        "Browser.setDownloadBehavior",
+        json!({ "behavior": "allow" }),
+    );
+    assert!(
+        refused.is_err(),
+        "allow with no downloadPath must be refused"
+    );
+}
+
+#[test]
+fn a_traversing_download_path_is_refused() {
+    // The path comes off an untrusted frame. `../../etc` names a real
+    // directory, and "it resolved fine" is not the question.
+    let harness = Harness::start();
+    let (mut client, _session, _target) = harness.attached();
+    let refused = client.try_call(
+        "Browser.setDownloadBehavior",
+        json!({ "behavior": "allow", "downloadPath": "../../../tmp/escaped" }),
+    );
+    assert!(
+        refused.is_err(),
+        "a traversing downloadPath must be refused"
+    );
+}
+
+#[test]
+fn a_download_path_set_before_a_target_exists_reaches_it() {
+    // A driver commonly sends `Browser.setDownloadBehavior` before it creates a
+    // page. Applying it only to the pages that happen to exist would make that
+    // call a silent no-op, so the setting lives on the browsing context.
+    let directory =
+        std::env::temp_dir().join(format!("oxidepage-cdp-early-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let harness = Harness::start();
+    let mut early = harness.client();
+    early.call(
+        "Browser.setDownloadBehavior",
+        json!({ "behavior": "allow", "downloadPath": directory.to_string_lossy() }),
+    );
+
+    // Created *after* the command.
+    let (mut client, session, _target) = harness.attached();
+    let fixtures = Fixtures::start(vec![("/index.html", "<title>doc</title>")]);
+    client.call_on(&session, "Network.enable", json!({}));
+    client.call_on(&session, "Fetch.enable", json!({}));
+    let navigate = client.dispatch(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/late.csv") }),
+    );
+    let paused = client.await_event("Fetch.requestPaused");
+    client.call_on(
+        &session,
+        "Fetch.fulfillRequest",
+        json!({
+            "requestId": paused["params"]["requestId"],
+            "responseCode": 200,
+            "responseHeaders": [
+                { "name": "content-disposition", "value": "attachment; filename=\"late.csv\"" },
+            ],
+            "body": oxidepage_cdp::base64::encode(b"late"),
+        }),
+    );
+    let _ = client.collect(navigate);
+
+    let done = client.await_event("Page.downloadProgress");
+    assert_eq!(done["params"]["state"], "inProgress");
+    let done = client.await_event("Page.downloadProgress");
+    assert_eq!(
+        done["params"]["state"], "completed",
+        "the early setting reached a page created after it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.join("late.csv")).expect("the download"),
+        "late"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn an_attachment_downloads_instead_of_committing() {
+    let directory = std::env::temp_dir().join(format!("oxidepage-cdp-dl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let fixtures = Fixtures::start(vec![("/index.html", "<title>doc</title>")]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call(
+        "Browser.setDownloadBehavior",
+        json!({ "behavior": "allow", "downloadPath": directory.to_string_lossy() }),
+    );
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/index.html") }),
+    );
+
+    // Stubbed rather than served: the fixture server sends no
+    // `Content-Disposition`, and `Fetch.fulfillRequest` is the shortest way to
+    // produce one.
+    client.call_on(&session, "Network.enable", json!({}));
+    client.call_on(&session, "Fetch.enable", json!({}));
+    let navigate = client.dispatch(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/report.csv") }),
+    );
+    let paused = client.await_event("Fetch.requestPaused");
+    let request_id = paused["params"]["requestId"].as_str().unwrap().to_owned();
+    client.call_on(
+        &session,
+        "Fetch.fulfillRequest",
+        json!({
+            "requestId": request_id,
+            "responseCode": 200,
+            "responseHeaders": [
+                { "name": "content-type", "value": "text/csv" },
+                { "name": "content-disposition", "value": "attachment; filename=\"report.csv\"" },
+            ],
+            "body": oxidepage_cdp::base64::encode(b"a,b\n1,2\n"),
+        }),
+    );
+    let _ = client.collect(navigate);
+
+    let begin = client.await_event("Page.downloadWillBegin");
+    assert_eq!(begin["params"]["suggestedFilename"], "report.csv");
+    let progress = client.await_event("Page.downloadProgress");
+    assert_eq!(progress["params"]["guid"], begin["params"]["guid"]);
+    assert_eq!(progress["params"]["state"], "inProgress");
+    let done = client.await_event("Page.downloadProgress");
+    assert_eq!(done["params"]["state"], "completed");
+
+    // The document did not move: a download is a navigation that never commits.
+    let title = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.title", "returnByValue": true }),
+    );
+    assert_eq!(title["result"]["value"], "doc");
+    assert_eq!(
+        std::fs::read_to_string(directory.join("report.csv")).expect("the download"),
+        "a,b\n1,2\n"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
 }

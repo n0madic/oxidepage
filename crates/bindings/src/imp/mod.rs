@@ -9,6 +9,7 @@
 pub(crate) mod abort_controller;
 pub(crate) mod abort_signal;
 pub(crate) mod attr;
+pub(crate) mod blob;
 pub(crate) mod body;
 pub(crate) mod character_data;
 pub(crate) mod child_node;
@@ -33,6 +34,9 @@ pub(crate) mod dom_token_list;
 pub(crate) mod element;
 pub(crate) mod event;
 pub(crate) mod event_target;
+pub(crate) mod file;
+pub(crate) mod file_list;
+pub(crate) mod file_reader;
 pub(crate) mod focus_event;
 pub(crate) mod font_face_set;
 pub(crate) mod form_data;

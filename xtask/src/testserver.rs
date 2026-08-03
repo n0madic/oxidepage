@@ -6,6 +6,15 @@
 //!
 //! Raw HTTP/1.1 with `Connection: close` per request — enough for the runner,
 //! and it needs no hyper server dependency.
+//!
+//! # Behavioural routes
+//!
+//! Static files alone cannot express what the Puppeteer suite needs to test as
+//! of ADR-0032: an upload target has to *read a request body*, a download needs
+//! a `Content-Disposition` header, and `page.authenticate` needs a route that
+//! answers 401 until credentials arrive. Those three live in [`behavioural`],
+//! under reserved `/-/` paths so they can never collide with a vendored WPT
+//! file.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -79,24 +88,197 @@ async fn serve(mut sock: tokio::net::TcpStream, root: &std::path::Path, report_h
             return;
         }
     }
-    let head = String::from_utf8_lossy(&buf);
-    let raw_path = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("/");
-    // Strip a query string (WPT variants) before resolving to a file.
-    let path = raw_path.split('?').next().unwrap_or("/");
+    // The head is complete; split the bytes of the body that came with it.
+    let head_len = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(buf.len(), |at| at + 4);
+    let head = String::from_utf8_lossy(&buf[..head_len]).into_owned();
+    let mut body_bytes = buf[head_len..].to_vec();
 
-    let (status, content_type, body) = respond(path, root, report_hook);
-    let mut out = format!("HTTP/1.1 {status}\r\n");
-    out.push_str(&format!("Content-Type: {content_type}\r\n"));
-    out.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    let mut request_line = head.lines().next().unwrap_or_default().split_whitespace();
+    let method = request_line.next().unwrap_or("GET").to_owned();
+    let raw_path = request_line.next().unwrap_or("/");
+    // Strip a query string (WPT variants) before resolving to a file.
+    let path = raw_path.split('?').next().unwrap_or("/").to_owned();
+
+    // Only a behavioural route ever needs the body, and reading one for every
+    // WPT file would stall on a client that sent no `Content-Length`.
+    if path.starts_with(BEHAVIOURAL_PREFIX)
+        && let Some(declared) = header_value(&head, "content-length").and_then(|v| v.parse().ok())
+    {
+        read_body(&mut sock, &mut body_bytes, declared).await;
+    }
+
+    let response = if path.starts_with(BEHAVIOURAL_PREFIX) {
+        behavioural(&method, &path, &head, &body_bytes)
+    } else {
+        let (status, content_type, body) = respond(&path, root, report_hook);
+        Response {
+            status: status.to_owned(),
+            headers: vec![(String::from("Content-Type"), content_type.to_owned())],
+            body,
+        }
+    };
+
+    let mut out = format!("HTTP/1.1 {}\r\n", response.status);
+    for (name, value) in &response.headers {
+        out.push_str(&format!("{name}: {value}\r\n"));
+    }
+    out.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
     out.push_str("Connection: close\r\n\r\n");
     let mut bytes = out.into_bytes();
-    bytes.extend_from_slice(&body);
+    bytes.extend_from_slice(&response.body);
     let _ = sock.write_all(&bytes).await;
     let _ = sock.flush().await;
+}
+
+/// One response, with whatever headers the route needs.
+///
+/// The old `(status, content_type, body)` triple could not express a
+/// `Content-Disposition` or a `WWW-Authenticate`, which is exactly what the
+/// download and auth routes are for.
+struct Response {
+    status: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+/// Every behavioural route lives under this prefix, so none can shadow a
+/// vendored WPT file.
+const BEHAVIOURAL_PREFIX: &str = "/-/";
+
+/// Largest request body accepted, so a bad `Content-Length` cannot make the
+/// runner allocate without bound.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+fn header_value(head: &str, name: &str) -> Option<String> {
+    let prefix = format!("{}:", name.to_ascii_lowercase());
+    head.lines()
+        .find(|line| line.to_ascii_lowercase().starts_with(&prefix))
+        .map(|line| line[name.len() + 1..].trim().to_owned())
+}
+
+/// Reads the rest of a declared body into `body`.
+async fn read_body(sock: &mut tokio::net::TcpStream, body: &mut Vec<u8>, declared: usize) {
+    let declared = declared.min(MAX_BODY_BYTES);
+    let mut tmp = [0u8; 8192];
+    while body.len() < declared {
+        let Ok(read) = sock.read(&mut tmp).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        body.extend_from_slice(&tmp[..read]);
+    }
+}
+
+/// The routes that need behavior rather than a file (ADR-0032).
+///
+/// Modelled on `crates/cdp/tests/common/mod.rs`'s `/slow-<ms>`: the shortest
+/// thing that expresses the property, and nothing configurable.
+fn behavioural(method: &str, path: &str, head: &str, body: &[u8]) -> Response {
+    let json = |status: &str, value: String| Response {
+        status: status.to_owned(),
+        headers: vec![(
+            String::from("Content-Type"),
+            String::from("application/json"),
+        )],
+        body: value.into_bytes(),
+    };
+    match path {
+        // Echoes what an upload actually carried, so a test can assert the
+        // multipart body rather than merely that a request happened.
+        "/-/upload" => {
+            let text = String::from_utf8_lossy(body);
+            let content_type = header_value(head, "content-type").unwrap_or_default();
+            // The filenames and the file bodies, extracted from the multipart
+            // parts, so the check does not have to parse multipart in JS.
+            let filenames: Vec<String> = text
+                .split("filename=\"")
+                .skip(1)
+                .filter_map(|rest| rest.split('"').next().map(ToOwned::to_owned))
+                .collect();
+            json(
+                "200 OK",
+                format!(
+                    r#"{{"method":{},"contentType":{},"filenames":{},"body":{}}}"#,
+                    json_string(method),
+                    json_string(&content_type),
+                    serde_json_array(&filenames),
+                    json_string(&text),
+                ),
+            )
+        }
+        // A download: the navigation must not commit.
+        "/-/attachment" => Response {
+            status: String::from("200 OK"),
+            headers: vec![
+                (String::from("Content-Type"), String::from("text/csv")),
+                (
+                    String::from("Content-Disposition"),
+                    String::from("attachment; filename=\"report.csv\""),
+                ),
+            ],
+            body: b"a,b\n1,2\n".to_vec(),
+        },
+        // 401 until an `Authorization` header arrives, then 200 naming it.
+        "/-/auth" => match header_value(head, "authorization") {
+            Some(credentials) => json(
+                "200 OK",
+                format!(r#"{{"seen":{}}}"#, json_string(&credentials)),
+            ),
+            None => Response {
+                status: String::from("401 Unauthorized"),
+                headers: vec![
+                    (String::from("Content-Type"), String::from("text/html")),
+                    (
+                        String::from("WWW-Authenticate"),
+                        String::from("Basic realm=\"automation\""),
+                    ),
+                ],
+                body: b"<title>401</title>".to_vec(),
+            },
+        },
+        // A plain document, for interception checks that need something real to
+        // continue to.
+        "/-/hello" => Response {
+            status: String::from("200 OK"),
+            headers: vec![(String::from("Content-Type"), String::from("text/html"))],
+            body: b"<title>hello</title><p id=p>from the server</p>".to_vec(),
+        },
+        _ => Response {
+            status: String::from("404 Not Found"),
+            headers: vec![(String::from("Content-Type"), String::from("text/plain"))],
+            body: b"no such behavioural route".to_vec(),
+        },
+    }
+}
+
+/// A JSON string literal. Hand-rolled because `xtask` has no `serde_json` and
+/// the payload is a handful of fields.
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn serde_json_array(values: &[String]) -> String {
+    let items: Vec<String> = values.iter().map(|v| json_string(v)).collect();
+    format!("[{}]", items.join(","))
 }
 
 fn respond(

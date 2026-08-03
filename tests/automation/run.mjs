@@ -11,6 +11,9 @@
 // time, and the whole point here is to drive OxidePage.
 
 import puppeteer from 'puppeteer-core';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
@@ -22,6 +25,11 @@ if (!endpoint || !base) {
   console.error('usage: run.mjs --endpoint <ws://…> --base <http://…>');
   process.exit(2);
 }
+
+// A per-run download directory. `Browser.setDownloadBehavior` resolves and
+// creates it too, but making it here keeps the check's own `readFile` honest
+// about which directory it is asserting on.
+const downloadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oxidepage-automation-'));
 
 /** Every check that has been run, in order. */
 const results = [];
@@ -83,8 +91,19 @@ try {
 
   await check('page.goto', async () => {
     const response = await page.goto(`${base}/index.html`);
-    assert(response === null || response.ok?.() !== false, 'navigation did not succeed');
+    // Not `response === null ||`: the document request's protocol id *is* the
+    // frame's loaderId (ADR-0032 D6a), which is what makes Puppeteer's
+    // `isNavigationRequest` true and lets `goto` capture a response at all.
+    assert(response !== null, 'page.goto resolved to null: the navigation request was not captured');
+    assert(response.ok(), `navigation did not succeed: ${response.status()}`);
+    assertEqual(response.request().resourceType(), 'document', 'navigation resourceType');
     assertEqual(page.url(), `${base}/index.html`, 'page.url()');
+  });
+
+  await check('response.text of the navigation', async () => {
+    const response = await page.goto(`${base}/index.html`);
+    // Reads back through `Network.getResponseBody` with the substituted id.
+    assert((await response.text()).includes('Fixture'), 'navigation body did not come back');
   });
 
   await check('page.title', async () => {
@@ -302,6 +321,206 @@ try {
     const extra = await browser.newPage();
     await extra.close();
     assert(extra.isClosed(), 'page did not report itself closed');
+  });
+
+  // === ADR-0032: request interception, file inputs, downloads ===
+
+  await check('setRequestInterception continue', async () => {
+    const intercepted = await browser.newPage();
+    try {
+      await intercepted.setRequestInterception(true);
+      const seen = [];
+      intercepted.on('request', (request) => {
+        seen.push(request.resourceType());
+        request.continue();
+      });
+      const response = await intercepted.goto(`${base}/-/hello`);
+      assert(response !== null, 'a continued navigation must still resolve to a response');
+      assertEqual(await intercepted.$eval('#p', (el) => el.textContent), 'from the server', 'body');
+      assert(seen.includes('document'), `the document itself must pause: ${seen}`);
+    } finally {
+      await intercepted.close();
+    }
+  });
+
+  await check('setRequestInterception respond', async () => {
+    const intercepted = await browser.newPage();
+    try {
+      await intercepted.setRequestInterception(true);
+      intercepted.on('request', (request) => {
+        request.respond({
+          status: 200,
+          contentType: 'text/html',
+          body: '<title>stubbed</title><p id=p>from the driver</p>',
+        });
+      });
+      await intercepted.goto(`${base}/-/hello`);
+      assertEqual(await intercepted.title(), 'stubbed', 'title');
+      assertEqual(await intercepted.$eval('#p', (el) => el.textContent), 'from the driver', 'body');
+    } finally {
+      await intercepted.close();
+    }
+  });
+
+  await check('setRequestInterception abort', async () => {
+    const intercepted = await browser.newPage();
+    try {
+      await intercepted.goto(`${base}/index.html`);
+      await intercepted.setRequestInterception(true);
+      intercepted.on('request', (request) => {
+        // Only the second navigation is blocked, so the page must stay put.
+        if (request.url().endsWith('/-/hello')) request.abort('blockedbyclient');
+        else request.continue();
+      });
+      let failed = false;
+      try {
+        await intercepted.goto(`${base}/-/hello`);
+      } catch {
+        failed = true;
+      }
+      assert(failed, 'an aborted navigation must reject');
+      assertEqual(intercepted.url(), `${base}/index.html`, 'the page must not have moved');
+    } finally {
+      await intercepted.close();
+    }
+  });
+
+  await check('setRequestInterception URL override', async () => {
+    const intercepted = await browser.newPage();
+    try {
+      await intercepted.setRequestInterception(true);
+      intercepted.on('request', (request) => {
+        if (request.url().endsWith('/-/redirected')) request.continue({ url: `${base}/-/hello` });
+        else request.continue();
+      });
+      await intercepted.goto(`${base}/-/redirected`);
+      assertEqual(await intercepted.title(), 'hello', 'the override reached the wire');
+    } finally {
+      await intercepted.close();
+    }
+  });
+
+  await check('page.authenticate', async () => {
+    const authed = await browser.newPage();
+    try {
+      await authed.authenticate({ username: 'alice', password: 'secret' });
+      const response = await authed.goto(`${base}/-/auth`);
+      assertEqual(response.status(), 200, 'the challenge was answered');
+      // `alice:secret`, base64.
+      const body = JSON.parse(await response.text());
+      assertEqual(body.seen, 'Basic YWxpY2U6c2VjcmV0', 'the credentials that reached the server');
+    } finally {
+      await authed.close();
+    }
+  });
+
+  await check('emulateNetworkConditions offline', async () => {
+    const offline = await browser.newPage();
+    try {
+      await offline.setOfflineMode(true);
+      let failed = false;
+      try {
+        await offline.goto(`${base}/-/hello`);
+      } catch {
+        failed = true;
+      }
+      assert(failed, 'an offline navigation must fail');
+      await offline.setOfflineMode(false);
+      const response = await offline.goto(`${base}/-/hello`);
+      assert(response.ok(), 'and coming back online must restore it');
+    } finally {
+      await offline.close();
+    }
+  });
+
+  await check('elementHandle.uploadFile', async () => {
+    await page.goto(`${base}/upload.html`);
+    const input = await page.$('#file');
+    await input.uploadFile(new URL('./fixtures/index.html', import.meta.url).pathname);
+
+    const summary = await page.evaluate(() => window.fileSummary());
+    assertEqual(summary.length, 1, 'files.length');
+    assertEqual(summary.names[0], 'index.html', 'the selected name');
+    assert(summary.sizes[0] > 0, 'the file has bytes');
+    assert(summary.isFile && summary.isBlob, 'a File must also be a Blob');
+
+    // Trusted `input` then `change`, in that order — what every upload widget
+    // listens for.
+    const events = await page.evaluate(() => JSON.stringify(window.events));
+    assertEqual(events, '[["input",true],["change",true]]', 'the selection events');
+  });
+
+  await check('a file input forces a multipart post', async () => {
+    await page.goto(`${base}/upload.html`);
+    const input = await page.$('#file');
+    await input.uploadFile(new URL('./fixtures/index.html', import.meta.url).pathname);
+    await Promise.all([
+      page.waitForNavigation(),
+      page.click('#submit'),
+    ]);
+    const echoed = JSON.parse(await page.evaluate(() => document.body.textContent));
+    assertEqual(echoed.method, 'POST', 'method');
+    // The form declares no enctype: a non-empty file input forces multipart.
+    assert(echoed.contentType.startsWith('multipart/form-data;'), `enctype: ${echoed.contentType}`);
+    assertEqual(echoed.filenames.join(','), 'index.html', 'the file part names its filename');
+    assert(echoed.body.includes('name="field"'), 'the ordinary field survived');
+    assert(echoed.body.includes('OxidePage automation fixture'), 'the bytes were sent');
+  });
+
+  await check('page.waitForFileChooser', async () => {
+    await page.goto(`${base}/upload.html`);
+    const [chooser] = await Promise.all([
+      page.waitForFileChooser(),
+      page.click('#multi'),
+    ]);
+    assert(chooser.isMultiple(), 'the chooser must report the multiple attribute');
+    await chooser.accept([new URL('./fixtures/other.html', import.meta.url).pathname]);
+    const names = await page.evaluate(() =>
+      [...document.getElementById('multi').files].map((f) => f.name).join(','));
+    assertEqual(names, 'other.html', 'the accepted selection');
+  });
+
+  await check('a download does not commit a document', async () => {
+    const downloads = await browser.newPage();
+    try {
+      await downloads.goto(`${base}/index.html`);
+      const client = await downloads.createCDPSession();
+      await client.send('Browser.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: downloadDir,
+      });
+      const began = new Promise((resolve) => {
+        client.on('Page.downloadWillBegin', resolve);
+      });
+      await client.send('Page.enable');
+      // The navigation answers rather than committing; the document stays.
+      await downloads.goto(`${base}/-/attachment`).catch(() => {});
+      const event = await within(10_000, 'Page.downloadWillBegin', began);
+      assertEqual(event.suggestedFilename, 'report.csv', 'suggestedFilename');
+      assertEqual(downloads.url(), `${base}/index.html`, 'the document must not have moved');
+      assertEqual(
+        await fs.readFile(path.join(downloadDir, 'report.csv'), 'utf8'),
+        'a,b\n1,2\n',
+        'the download landed on disk',
+      );
+    } finally {
+      await downloads.close();
+    }
+  });
+
+  await check('Blob and FileReader', async () => {
+    await page.goto(`${base}/index.html`);
+    const result = await page.evaluate(async () => {
+      const blob = new Blob(['hello ', 'world'], { type: 'Text/Plain' });
+      const sliced = blob.slice(6);
+      const read = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.readAsText(sliced);
+      });
+      return JSON.stringify([blob.size, blob.type, sliced.size, read, await blob.text()]);
+    });
+    assertEqual(result, '[11,"text/plain",5,"world","hello world"]', 'Blob + FileReader');
   });
 } finally {
   // `disconnect`, not `close`: the endpoint is owned by the runner, which stops

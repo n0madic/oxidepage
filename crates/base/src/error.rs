@@ -46,6 +46,9 @@ pub enum DomExceptionKind {
     InvalidAccessError,
     /// The quota has been exceeded (e.g. a `localStorage` write past 5 MiB).
     QuotaExceededError,
+    /// The input could not be read (the File API's read-failure reason, which
+    /// is what `FileReader.error` reports).
+    NotReadableError,
 }
 
 impl DomExceptionKind {
@@ -68,6 +71,7 @@ impl DomExceptionKind {
             Self::SecurityError => "SecurityError",
             Self::InvalidAccessError => "InvalidAccessError",
             Self::QuotaExceededError => "QuotaExceededError",
+            Self::NotReadableError => "NotReadableError",
         }
     }
 }

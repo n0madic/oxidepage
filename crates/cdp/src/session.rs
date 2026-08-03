@@ -75,8 +75,32 @@ const PRIORITY_LANE: &str = "\u{1}priority";
 /// `Browser.close` joins every page thread and so can block too. It stays,
 /// because nothing queued behind it has anywhere to go: the browser and this
 /// server are both ending.
+/// `Fetch`'s resolution commands belong here for the dialog's exact reason
+/// (ADR-0032 D4): a `Page.navigate` occupies its session's lane for the whole
+/// load, and the document fetch it is blocked on is precisely the request a
+/// driver pauses — so a `continueRequest` queued behind that navigation would
+/// deadlock against the command that would release it. `Fetch.disable` joins
+/// them because it releases *every* paused request.
+///
+/// They clear the "cannot block itself" half of the bar because the decision
+/// channel is unbounded: each one takes a mutex, removes an id from a set, and
+/// sends without waiting for a receiver.
+///
+/// **`Fetch.enable` is deliberately not here.** It only writes shared config,
+/// and the driver's own lane already orders it before the `Page.navigate` that
+/// follows — putting it on the shared lane would let it overtake commands of
+/// its own session that must precede it.
 fn is_priority(method: &str) -> bool {
-    matches!(method, "Page.handleJavaScriptDialog" | "Browser.close")
+    matches!(
+        method,
+        "Page.handleJavaScriptDialog"
+            | "Browser.close"
+            | "Fetch.continueRequest"
+            | "Fetch.fulfillRequest"
+            | "Fetch.failRequest"
+            | "Fetch.continueWithAuth"
+            | "Fetch.disable"
+    )
 }
 
 /// Which domains a session has enabled.
@@ -97,6 +121,12 @@ pub struct DomainFlags {
     /// (ADR-0031 D2) — the honest signal that every node id issued so far is
     /// dead. There is no pushed node tree, so nothing else hangs off it.
     pub dom: AtomicBool,
+    /// `Fetch.enable`. Gates `Fetch.requestPaused`/`authRequired` (ADR-0032).
+    ///
+    /// The interception *state* is shared browser-side on the page, not here:
+    /// two sessions both intercepting resolve against one paused set, and the
+    /// first decision wins. This flag only decides who is told.
+    pub fetch: AtomicBool,
 }
 
 /// One attachment of a connection to a target.
@@ -192,6 +222,12 @@ pub struct Connection {
     /// position. Per connection, because a handle is only meaningful to the
     /// socket it was minted on.
     streams: Mutex<HashMap<String, Stream>>,
+}
+
+/// Lets every request `session` holds paused proceed, unmodified.
+fn release_interception(session: &Arc<SessionState>) {
+    session.flags.fetch.store(false, Ordering::Relaxed);
+    session.page.release_paused_requests();
 }
 
 type Lane = Box<dyn FnOnce() + Send + 'static>;
@@ -461,6 +497,13 @@ impl Connection {
     /// Detaches one session and announces it.
     pub fn detach(&self, session_id: &str) -> Option<Arc<SessionState>> {
         let state = self.lock_sessions().remove(session_id)?;
+        // The interceptor is going away, so nothing will ever answer the
+        // requests it holds. Released unmodified, not failed — what Chrome
+        // does, and the safe answer for a driver that merely detached
+        // (ADR-0032 D7).
+        if state.flags.fetch.load(Ordering::Relaxed) {
+            release_interception(&state);
+        }
         // The lane is retired with the session: its thread exits once the
         // sender drops, after finishing whatever command is in flight.
         self.lock_lanes().remove(session_id);
@@ -480,6 +523,19 @@ impl Connection {
             }),
         ));
         Some(state)
+    }
+
+    /// Releases every request the connection's sessions hold paused.
+    ///
+    /// The socket closing is one of the four explicit release paths (ADR-0032
+    /// D7): the page owns a sender, so the decision channel never disconnects
+    /// and there is no automatic signal to hang this off.
+    pub fn release_all_interception(&self) {
+        for session in self.lock_sessions().values() {
+            if session.flags.fetch.load(Ordering::Relaxed) {
+                release_interception(session);
+            }
+        }
     }
 
     #[must_use]

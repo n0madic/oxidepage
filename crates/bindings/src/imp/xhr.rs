@@ -8,9 +8,11 @@
 //!
 //! The state machine models the spec's flags explicitly (send() flag, upload
 //! complete flag, response object cache) — see [`crate::netdata::XhrData`] and
-//! ADR-0024, which also records the four deliberate absences: no `Blob`, no
-//! synchronous mode, a single-shot `progress` event (the net layer buffers the
-//! whole body), and a page-side rather than per-request `timeout`.
+//! ADR-0024, which also records the deliberate absences: no synchronous mode, a
+//! single-shot `progress` event (the net layer buffers the whole body), and a
+//! page-side rather than per-request `timeout`. The fourth, `responseType =
+//! "blob"`, is no longer one: ADR-0032 Phase 4 brought the `Blob` interface it
+//! was waiting on.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,12 +20,13 @@ use std::rc::Rc;
 use oxidepage_base::{DomExceptionKind, NodeId};
 use oxidepage_js::{HostCall, HostFn, JsThrow, JsValue};
 use oxidepage_net::{
-    Credentials, NetRequest, RequestMode, charset_from_content_type, decode_with_charset,
-    is_forbidden_request_header,
+    Credentials, NetRequest, RequestMode, ResourceType, charset_from_content_type,
+    decode_with_charset, is_forbidden_request_header,
 };
 
 use crate::cx::BindCx;
 use crate::events::{EventData, EventTargetKey};
+use crate::filedata::{BlobData, normalize_type};
 use crate::netdata::{PendingNet, XhrData, XhrRef, is_valid_header_name, is_valid_header_value};
 use crate::state::HostData;
 
@@ -33,12 +36,12 @@ pub(crate) const HEADERS_RECEIVED: u16 = 2;
 pub(crate) const LOADING: u16 = 3;
 pub(crate) const DONE: u16 = 4;
 
-/// The `responseType` enumeration. `"blob"` is deliberately absent: the engine
-/// has no `Blob` type at all (`Response` omits `blob()` for the same reason),
-/// and an enumerated attribute ignores a value outside its set — so assigning
-/// it leaves the previous value rather than installing a mode that could only
-/// ever return null (P6, ADR-0024).
-const RESPONSE_TYPES: &[&str] = &["", "arraybuffer", "document", "json", "text"];
+/// The `responseType` enumeration, complete as of ADR-0032 Phase 4 — `"blob"`
+/// was the one absence, and it was absent because the engine had no `Blob`
+/// type at all (ADR-0024, P6: an enumerated attribute ignores a value outside
+/// its set, so assigning an unsupported one left the previous value rather
+/// than installing a mode that could only ever return null).
+const RESPONSE_TYPES: &[&str] = &["", "arraybuffer", "blob", "document", "json", "text"];
 
 /// Methods `open()` must reject outright (Fetch's "forbidden method").
 const FORBIDDEN_METHODS: &[&str] = &["CONNECT", "TRACE", "TRACK"];
@@ -324,6 +327,10 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
         referrer: Some(doc_url),
         initiator_origin,
         bypass_cache: false,
+        resource_type: ResourceType::Xhr,
+        // Script never sets this: `Authorization` is a forbidden request header
+        // and `open(url, user, password)`'s credentials are not implemented.
+        auth: None,
     };
     let id = cx.state.hooks.start_fetch(request);
     {
@@ -455,8 +462,8 @@ pub(crate) fn set_response_type(
             "XMLHttpRequest.responseType: the response is already being delivered",
         ));
     }
-    // An enumerated attribute ignores a value outside its set — including
-    // `"blob"`, which this engine has no type for.
+    // An enumerated attribute ignores a value outside its set, leaving the
+    // previous value in place rather than throwing.
     if RESPONSE_TYPES.contains(&value.as_str()) {
         this.borrow_mut().response_type = value;
     }
@@ -498,6 +505,7 @@ pub(crate) fn response(cx: &BindCx<'_>, this: XhrRef) -> Result<JsValue, JsThrow
     }
     let computed = match kind.as_str() {
         "arraybuffer" => Some(array_buffer_response(cx, &this)?),
+        "blob" => Some(blob_response(cx, &this)?),
         "json" => json_response(cx, &this)?,
         "document" => document_response(cx, &this)?,
         // Unreachable: `set_response_type` refuses anything else.
@@ -581,6 +589,20 @@ fn final_mime(x: &XhrData) -> String {
 
 fn array_buffer_response(cx: &BindCx<'_>, this: &XhrRef) -> Result<JsValue, JsThrow> {
     cx.bytes_to_array_buffer(&this.borrow().response_body)
+}
+
+/// The blob response: the body bytes with the **final** MIME type, so an
+/// `overrideMimeType()` call is reflected in `xhr.response.type` exactly as it
+/// is in `responseText`'s decoding.
+fn blob_response(cx: &BindCx<'_>, this: &XhrRef) -> Result<JsValue, JsThrow> {
+    let (mime, bytes) = {
+        let x = this.borrow();
+        (final_mime(&x), x.response_body.clone())
+    };
+    cx.new_blob(std::rc::Rc::new(BlobData::new(
+        bytes,
+        normalize_type(&mime),
+    )))
 }
 
 /// The JSON response. Per the spec this is a **UTF-8** decode of the bytes, not

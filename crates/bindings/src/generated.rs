@@ -1969,12 +1969,120 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.define_method(&proto_response, "text", 0, gen_response_text)?;
     cx.define_method(&proto_response, "json", 0, gen_response_json)?;
     cx.define_method(&proto_response, "arrayBuffer", 0, gen_response_array_buffer)?;
+    cx.define_method(&proto_response, "blob", 0, gen_response_blob)?;
     cx.finish_interface(
         "Response",
         &proto_response,
         CtorSpec::Native {
             length: 0,
             construct: gen_response_constructor,
+        },
+    )?;
+
+    let proto_blob = cx.begin_interface("Blob", None)?;
+    cx.define_getter(&proto_blob, "size", gen_blob_get_size)?;
+    cx.define_getter(&proto_blob, "type", gen_blob_get_type)?;
+    cx.define_method(&proto_blob, "slice", 0, gen_blob_slice)?;
+    cx.define_method(&proto_blob, "text", 0, gen_blob_text)?;
+    cx.define_method(&proto_blob, "arrayBuffer", 0, gen_blob_array_buffer)?;
+    cx.finish_interface(
+        "Blob",
+        &proto_blob,
+        CtorSpec::Native {
+            length: 0,
+            construct: gen_blob_constructor,
+        },
+    )?;
+
+    let proto_file = cx.begin_interface("File", Some("Blob"))?;
+    cx.define_getter(&proto_file, "name", gen_file_get_name)?;
+    cx.define_getter(&proto_file, "lastModified", gen_file_get_last_modified)?;
+    cx.finish_interface(
+        "File",
+        &proto_file,
+        CtorSpec::Native {
+            length: 2,
+            construct: gen_file_constructor,
+        },
+    )?;
+
+    let proto_file_list = cx.begin_interface("FileList", None)?;
+    cx.define_getter(&proto_file_list, "length", gen_file_list_get_length)?;
+    cx.define_method(&proto_file_list, "item", 1, gen_file_list_item)?;
+    cx.finish_interface("FileList", &proto_file_list, CtorSpec::Illegal)?;
+
+    let proto_file_reader = cx.begin_interface("FileReader", Some("EventTarget"))?;
+    cx.define_constant(&proto_file_reader, "EMPTY", 0f64)?;
+    cx.define_constant(&proto_file_reader, "LOADING", 1f64)?;
+    cx.define_constant(&proto_file_reader, "DONE", 2f64)?;
+    cx.define_method(
+        &proto_file_reader,
+        "readAsText",
+        1,
+        gen_file_reader_read_as_text,
+    )?;
+    cx.define_method(
+        &proto_file_reader,
+        "readAsDataURL",
+        1,
+        gen_file_reader_read_as_data_url,
+    )?;
+    cx.define_method(
+        &proto_file_reader,
+        "readAsArrayBuffer",
+        1,
+        gen_file_reader_read_as_array_buffer,
+    )?;
+    cx.define_method(&proto_file_reader, "abort", 0, gen_file_reader_abort)?;
+    cx.define_getter(
+        &proto_file_reader,
+        "readyState",
+        gen_file_reader_get_ready_state,
+    )?;
+    cx.define_getter(&proto_file_reader, "result", gen_file_reader_get_result)?;
+    cx.define_getter(&proto_file_reader, "error", gen_file_reader_get_error)?;
+    cx.define_accessor(
+        &proto_file_reader,
+        "onloadstart",
+        gen_file_reader_get_onloadstart,
+        gen_file_reader_set_onloadstart,
+    )?;
+    cx.define_accessor(
+        &proto_file_reader,
+        "onprogress",
+        gen_file_reader_get_onprogress,
+        gen_file_reader_set_onprogress,
+    )?;
+    cx.define_accessor(
+        &proto_file_reader,
+        "onload",
+        gen_file_reader_get_onload,
+        gen_file_reader_set_onload,
+    )?;
+    cx.define_accessor(
+        &proto_file_reader,
+        "onabort",
+        gen_file_reader_get_onabort,
+        gen_file_reader_set_onabort,
+    )?;
+    cx.define_accessor(
+        &proto_file_reader,
+        "onerror",
+        gen_file_reader_get_onerror,
+        gen_file_reader_set_onerror,
+    )?;
+    cx.define_accessor(
+        &proto_file_reader,
+        "onloadend",
+        gen_file_reader_get_onloadend,
+        gen_file_reader_set_onloadend,
+    )?;
+    cx.finish_interface(
+        "FileReader",
+        &proto_file_reader,
+        CtorSpec::Native {
+            length: 0,
+            construct: gen_file_reader_constructor,
         },
     )?;
 
@@ -4041,6 +4149,11 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
 
     let proto_html_input_element = cx.begin_interface("HTMLInputElement", Some("HTMLElement"))?;
+    cx.define_getter(
+        &proto_html_input_element,
+        "files",
+        gen_html_input_element_get_files,
+    )?;
     cx.define_accessor_ce(
         &proto_html_input_element,
         "type",
@@ -8877,8 +8990,9 @@ fn gen_dom_token_list_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 fn gen_form_data_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
     let a0 = cx.arg_dom_string(call, 0)?;
-    let a1 = cx.arg_dom_string(call, 1)?;
-    imp::form_data::append(cx, this, a0, a1)?;
+    let a1 = call.arg(1);
+    let a2 = cx.arg_opt_dom_string(call, 2)?;
+    imp::form_data::append(cx, this, a0, a1, a2)?;
     Ok(JsValue::Undefined)
 }
 
@@ -8892,10 +9006,7 @@ fn gen_form_data_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 fn gen_form_data_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
     let a0 = cx.arg_dom_string(call, 0)?;
-    Ok(match imp::form_data::get(cx, this, a0)? {
-        Some(s) => JsValue::String(s),
-        None => JsValue::Null,
-    })
+    imp::form_data::get(cx, this, a0)
 }
 
 fn gen_form_data_get_all(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
@@ -8913,8 +9024,9 @@ fn gen_form_data_has(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
 fn gen_form_data_set(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
     let a0 = cx.arg_dom_string(call, 0)?;
-    let a1 = cx.arg_dom_string(call, 1)?;
-    imp::form_data::set(cx, this, a0, a1)?;
+    let a1 = call.arg(1);
+    let a2 = cx.arg_opt_dom_string(call, 2)?;
+    imp::form_data::set(cx, this, a0, a1, a2)?;
     Ok(JsValue::Undefined)
 }
 
@@ -9119,10 +9231,199 @@ fn gen_response_array_buffer(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
     imp::response::array_buffer(cx, this)
 }
 
+fn gen_response_blob(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_response(&call.this)?;
+    imp::response::blob(cx, this)
+}
+
 fn gen_response_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let a0 = call.arg(0);
     let a1 = call.arg(1);
     imp::response::constructor(cx, call, a0, a1)
+}
+
+fn gen_blob_get_size(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_blob(&call.this)?;
+    Ok(JsValue::Number(imp::blob::size(cx, this)?))
+}
+
+fn gen_blob_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_blob(&call.this)?;
+    Ok(JsValue::String(imp::blob::r#type(cx, this)?))
+}
+
+fn gen_blob_slice(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_blob(&call.this)?;
+    let a0 = cx.arg_opt_i64(call, 0)?;
+    let a1 = cx.arg_opt_i64(call, 1)?;
+    let a2 = cx.arg_opt_dom_string(call, 2)?;
+    imp::blob::slice(cx, this, a0, a1, a2)
+}
+
+fn gen_blob_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_blob(&call.this)?;
+    imp::blob::text(cx, this)
+}
+
+fn gen_blob_array_buffer(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_blob(&call.this)?;
+    imp::blob::array_buffer(cx, this)
+}
+
+fn gen_blob_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = call.arg(0);
+    let a1 = call.arg(1);
+    imp::blob::constructor(cx, call, a0, a1)
+}
+
+fn gen_file_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file(&call.this)?;
+    Ok(JsValue::String(imp::file::name(cx, this)?))
+}
+
+fn gen_file_get_last_modified(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file(&call.this)?;
+    Ok(JsValue::Number(imp::file::last_modified(cx, this)?))
+}
+
+fn gen_file_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = call.arg(0);
+    let a1 = cx.arg_dom_string(call, 1)?;
+    let a2 = call.arg(2);
+    imp::file::constructor(cx, call, a0, a1, a2)
+}
+
+fn gen_file_list_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_list(&call.this)?;
+    Ok(JsValue::Number(imp::file_list::length(cx, this)?))
+}
+
+fn gen_file_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_list(&call.this)?;
+    let a0 = cx.arg_u32(call, 0)?;
+    imp::file_list::item(cx, this, a0)
+}
+
+fn gen_file_reader_read_as_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    let a1 = cx.arg_opt_dom_string(call, 1)?;
+    imp::file_reader::read_as_text(cx, this, a0, a1)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_read_as_data_url(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::read_as_data_url(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_read_as_array_buffer(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::read_as_array_buffer(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_abort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::abort(cx, this)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_get_ready_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    Ok(JsValue::Number(imp::file_reader::ready_state(cx, this)?))
+}
+
+fn gen_file_reader_get_result(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::result(cx, this)
+}
+
+fn gen_file_reader_get_error(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::error(cx, this)
+}
+
+fn gen_file_reader_get_onloadstart(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::onloadstart(cx, this)
+}
+
+fn gen_file_reader_set_onloadstart(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::set_onloadstart(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_get_onprogress(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::onprogress(cx, this)
+}
+
+fn gen_file_reader_set_onprogress(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::set_onprogress(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_get_onload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::onload(cx, this)
+}
+
+fn gen_file_reader_set_onload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::set_onload(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_get_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::onabort(cx, this)
+}
+
+fn gen_file_reader_set_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::set_onabort(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_get_onerror(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::onerror(cx, this)
+}
+
+fn gen_file_reader_set_onerror(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::set_onerror(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_get_onloadend(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    imp::file_reader::onloadend(cx, this)
+}
+
+fn gen_file_reader_set_onloadend(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_file_reader(&call.this)?;
+    let a0 = call.arg(0);
+    imp::file_reader::set_onloadend(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_file_reader_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    imp::file_reader::constructor(cx, call)
 }
 
 fn gen_dom_rect_read_only_get_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
@@ -12801,6 +13102,11 @@ fn gen_html_form_element_request_submit(
     let a0 = cx.arg_nullable_node(call, 0)?;
     imp::html_form_element::request_submit(cx, this, a0)?;
     Ok(JsValue::Undefined)
+}
+
+fn gen_html_input_element_get_files(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_input_element(&call.this)?;
+    imp::html_input_element::files(cx, this)
 }
 
 fn gen_html_input_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

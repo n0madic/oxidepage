@@ -346,14 +346,87 @@ fn the_refusal_register_distinguishes_absent_from_scheduled() {
         .try_call_on(&session, "DOM.getFrameOwner", json!({ "frameId": "x" }))
         .unwrap_err();
     assert_eq!(error["code"], -32601, "{error}");
+}
 
-    // `<input type=file>` exists; the capability is scheduled, so the driver
-    // gets an actionable message rather than "no such method".
+/// `DOM.setFileInputFiles` landed with ADR-0032; the refusal this replaces was
+/// the one ADR-0031 D4 recorded as *scheduled, not absent*.
+#[test]
+fn set_file_input_files_selects_and_fires_the_events() {
+    let directory = std::env::temp_dir().join(format!("oxidepage-upload-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("hello.txt");
+    std::fs::write(&path, b"hello upload").unwrap();
+
+    let fixtures = Fixtures::start(vec![(
+        "/upload.html",
+        "<input id=f type=file>\
+         <script>\
+           window.seen = [];\
+           document.getElementById('f').addEventListener('input', e => \
+             window.seen.push(['input', e.isTrusted]));\
+           document.getElementById('f').addEventListener('change', e => \
+             window.seen.push(['change', e.isTrusted]));\
+         </script>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(&session, "DOM.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/upload.html") }),
+    );
+
+    let document = client.call_on(&session, "DOM.getDocument", json!({ "depth": -1 }));
+    let input = find_by_name(&document["root"], "INPUT").expect("the input");
+    let node_id = input["nodeId"].as_i64().expect("nodeId");
+
+    client.call_on(
+        &session,
+        "DOM.setFileInputFiles",
+        json!({ "files": [path.to_string_lossy()], "nodeId": node_id }),
+    );
+
+    let files = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "JSON.stringify([\
+                 document.getElementById('f').files.length,\
+                 document.getElementById('f').files[0].name,\
+                 document.getElementById('f').files[0].size,\
+                 window.seen])",
+            "returnByValue": true,
+        }),
+    );
+    assert_eq!(
+        files["result"]["value"], r#"[1,"hello.txt",12,[["input",true],["change",true]]]"#,
+        "the selection and its two *trusted* events"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn set_file_input_files_refuses_a_node_that_is_not_a_file_input() {
+    let fixtures = Fixtures::start(vec![("/plain.html", "<p id=p>text</p>")]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(&session, "DOM.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/plain.html") }),
+    );
+    let document = client.call_on(&session, "DOM.getDocument", json!({ "depth": -1 }));
+    let paragraph = find_by_name(&document["root"], "P").expect("the paragraph");
+
+    // ADR-0031's limit holds: with no `DataTransfer` there is nothing to set on
+    // a non-input target, and saying so beats silently doing nothing.
     let error = client
         .try_call_on(
             &session,
             "DOM.setFileInputFiles",
-            json!({ "files": [], "nodeId": 1 }),
+            json!({ "files": [], "nodeId": paragraph["nodeId"] }),
         )
         .unwrap_err();
     assert_eq!(error["code"], -32000, "{error}");
@@ -361,9 +434,49 @@ fn the_refusal_register_distinguishes_absent_from_scheduled() {
         error["message"]
             .as_str()
             .unwrap()
-            .contains("not supported yet"),
+            .contains("<input type=file>"),
         "{error}"
     );
+}
+
+#[test]
+fn a_file_chooser_is_announced_only_when_intercepted() {
+    let fixtures = Fixtures::start(vec![("/chooser.html", "<input id=f type=file multiple>")]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/chooser.html") }),
+    );
+
+    // Off by default: clicking records nothing, which is the honest headless
+    // answer (ADR-0032 D12).
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.getElementById('f').click()" }),
+    );
+    let quiet = client.drain_events(std::time::Duration::from_millis(300));
+    assert!(
+        !quiet
+            .iter()
+            .any(|e| e["method"] == "Page.fileChooserOpened"),
+        "no chooser without interception: {quiet:?}"
+    );
+
+    client.call_on(
+        &session,
+        "Page.setInterceptFileChooserDialog",
+        json!({ "enabled": true }),
+    );
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.getElementById('f').click()" }),
+    );
+    let chooser = client.await_event("Page.fileChooserOpened");
+    assert_eq!(chooser["params"]["mode"], "selectMultiple");
 }
 
 /// The first node in `root`'s subtree whose `nodeName` matches.

@@ -27,6 +27,7 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "Network.setExtraHTTPHeaders" => set_extra_headers(connection, request),
         "Network.setUserAgentOverride" => set_user_agent(connection, request),
         "Network.setCacheDisabled" => set_cache_disabled(connection, request),
+        "Network.emulateNetworkConditions" => emulate_conditions(connection, request),
         "Network.getResponseBody" => get_response_body(connection, request),
         "Network.getAllCookies" => get_all_cookies(connection, request),
         "Network.getCookies" => get_cookies(connection, request),
@@ -52,7 +53,24 @@ pub fn request_id(target_id: &str, id: RequestId) -> String {
 }
 
 /// Parses back what [`request_id`] produced, checking it names *this* target.
-fn parse_request_id(target_id: &str, encoded: &str) -> Result<RequestId, ProtocolError> {
+///
+/// The document request is the one exception: its protocol id is the frame's
+/// `loaderId` (ADR-0032 D6a), which carries no target prefix and no generation.
+/// So a driver's `response.buffer()` after `page.goto()` arrives here with a
+/// bare hex string, and the registry is what maps it back.
+pub(crate) fn parse_request_id(
+    connection: &Arc<Connection>,
+    target_id: &str,
+    encoded: &str,
+) -> Result<RequestId, ProtocolError> {
+    if let Some(id) = connection.registry.request_for_loader(target_id, encoded) {
+        return Ok(id);
+    }
+    parse_encoded_request_id(target_id, encoded)
+}
+
+/// The `"{targetId}.{index}v{generation}"` half of [`parse_request_id`].
+fn parse_encoded_request_id(target_id: &str, encoded: &str) -> Result<RequestId, ProtocolError> {
     let unknown = || {
         ProtocolError::server(format!(
             "No resource with given identifier found: {encoded}"
@@ -72,20 +90,40 @@ fn parse_request_id(target_id: &str, encoded: &str) -> Result<RequestId, Protoco
 // === events ===
 
 /// Turns one network milestone into the protocol event for it.
-pub fn network_event(target_id: &str, event: &NetworkEvent) -> crate::message::Event {
-    let id = request_id(target_id, event.request_id());
-    match event {
+///
+/// `document_loader` is `Some` iff this event belongs to the top-level document
+/// request, in which case it is *both* the request's protocol id and the
+/// `loaderId` — the equality Puppeteer's `isNavigationRequest` tests, and the
+/// whole reason `page.goto()` can resolve to a response (ADR-0032 D6a).
+/// `loader_id` is the frame's current loader, for every other request.
+/// `None` for a pause: it is a `Fetch` event, built by `pump::fetch_event`, and
+/// answering `Network.requestWillBeSent` again for it would double-count the
+/// request in a driver's bookkeeping.
+pub fn network_event(
+    target_id: &str,
+    event: &NetworkEvent,
+    loader_id: &str,
+    document_loader: Option<&str>,
+) -> Option<crate::message::Event> {
+    let id = match document_loader {
+        Some(loader) => loader.to_owned(),
+        None => request_id(target_id, event.request_id()),
+    };
+    let loader_id = document_loader.unwrap_or(loader_id);
+    let event = match event {
         NetworkEvent::Requested {
             url,
             method,
             headers,
+            resource_type,
             timestamp,
             ..
         } => crate::message::Event::browser(
             "Network.requestWillBeSent",
             json!({
                 "requestId": id,
-                "loaderId": "",
+                "loaderId": loader_id,
+                "type": resource_type.as_str(),
                 "documentURL": url,
                 "request": {
                     "url": url,
@@ -106,15 +144,16 @@ pub fn network_event(target_id: &str, event: &NetworkEvent) -> crate::message::E
             headers,
             final_url,
             mime_type,
+            resource_type,
             timestamp,
             ..
         } => crate::message::Event::browser(
             "Network.responseReceived",
             json!({
                 "requestId": id,
-                "loaderId": "",
+                "loaderId": loader_id,
                 "timestamp": seconds(*timestamp),
-                "type": "Other",
+                "type": resource_type.as_str(),
                 "response": {
                     "url": final_url,
                     "status": status,
@@ -147,18 +186,23 @@ pub fn network_event(target_id: &str, event: &NetworkEvent) -> crate::message::E
             }),
         ),
         NetworkEvent::Failed {
-            error, timestamp, ..
+            error,
+            resource_type,
+            timestamp,
+            ..
         } => crate::message::Event::browser(
             "Network.loadingFailed",
             json!({
                 "requestId": id,
                 "timestamp": seconds(*timestamp),
-                "type": "Other",
+                "type": resource_type.as_str(),
                 "errorText": error,
                 "canceled": false,
             }),
         ),
-    }
+        NetworkEvent::Paused { .. } | NetworkEvent::AuthRequired { .. } => return None,
+    };
+    Some(event)
 }
 
 fn seconds(epoch_ms: f64) -> f64 {
@@ -167,7 +211,7 @@ fn seconds(epoch_ms: f64) -> f64 {
 
 /// CDP models headers as an object, not a list. Duplicates are joined with a
 /// newline, which is Chrome's own encoding for repeated headers.
-fn header_map(headers: &[(String, String)]) -> Value {
+pub(crate) fn header_map(headers: &[(String, String)]) -> Value {
     let mut map = serde_json::Map::new();
     for (name, value) in headers {
         match map.get_mut(name) {
@@ -184,6 +228,73 @@ fn header_map(headers: &[(String, String)]) -> Value {
 }
 
 // === commands ===
+
+/// `Network.emulateNetworkConditions` — the two members that are real
+/// (ADR-0032 D9).
+///
+/// `offline` fails every request with `net::ERR_INTERNET_DISCONNECTED`, and
+/// `latency` sleeps outside the request's own timeout budget. Bandwidth is
+/// **refused by name**: approximating a throughput without a token bucket is
+/// the silent half-truth P6 forbids, and a driver whose test depends on a slow
+/// link would be told it got one.
+fn emulate_conditions(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        offline: bool,
+        #[serde(default)]
+        latency: f64,
+        #[serde(default = "unlimited")]
+        download_throughput: f64,
+        #[serde(default = "unlimited")]
+        upload_throughput: f64,
+        connection_type: Option<String>,
+    }
+    fn unlimited() -> f64 {
+        -1.0
+    }
+
+    let session = connection.require_session(request)?;
+    let params: Params = request.parse()?;
+
+    // Chrome spells "no limit" as a negative number, and Puppeteer sends
+    // exactly that when a caller only wants `offline` — so a negative value
+    // asks for nothing and is accepted.
+    for (name, value) in [
+        ("downloadThroughput", params.download_throughput),
+        ("uploadThroughput", params.upload_throughput),
+    ] {
+        if value >= 0.0 {
+            return Err(ProtocolError::server(format!(
+                "Network.emulateNetworkConditions: {name} is not supported — bandwidth \
+                 shaping needs a token bucket the net stack does not have, and \
+                 approximating it would report a throttle that is not there (ADR-0032 D9). \
+                 Pass -1 for no limit."
+            )));
+        }
+    }
+    if let Some(kind) = &params.connection_type
+        && kind != "none"
+    {
+        return Err(ProtocolError::server(format!(
+            "Network.emulateNetworkConditions: connectionType `{kind}` is not supported — \
+             there is no `navigator.connection` to report it on (ADR-0032 D9)"
+        )));
+    }
+    if params.latency < 0.0 || !params.latency.is_finite() {
+        return Err(ProtocolError::invalid_params(
+            "Network.emulateNetworkConditions: latency must be a non-negative number of ms",
+        ));
+    }
+
+    let control = session.page.intercept().ok_or_else(|| {
+        ProtocolError::server("the target has no network control (its page thread is gone)")
+    })?;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let latency = std::time::Duration::from_millis(params.latency as u64);
+    control.set_conditions(params.offline, latency);
+    Ok(json!({}))
+}
 
 fn set_extra_headers(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     #[derive(Deserialize)]
@@ -239,7 +350,7 @@ fn get_response_body(connection: &Arc<Connection>, request: &Request) -> Command
     }
     let session = connection.require_session(request)?;
     let params: Params = request.parse()?;
-    let id = parse_request_id(&session.target_id, &params.request_id)?;
+    let id = parse_request_id(connection, &session.target_id, &params.request_id)?;
 
     let Some((bytes, text)) = session.page.response_body(id)? else {
         return Err(ProtocolError::server(
@@ -541,7 +652,7 @@ mod tests {
     fn a_request_id_round_trips() {
         let original = id(42, 7);
         let encoded = request_id("t1", original);
-        assert_eq!(parse_request_id("t1", &encoded).unwrap(), original);
+        assert_eq!(parse_encoded_request_id("t1", &encoded).unwrap(), original);
     }
 
     #[test]
@@ -549,13 +660,16 @@ mod tests {
         let encoded = request_id("t1", id(3, 1));
         // Silently reading t2's request 3 instead would hand a driver another
         // page's response body.
-        assert!(parse_request_id("t2", &encoded).is_err());
+        assert!(parse_encoded_request_id("t2", &encoded).is_err());
     }
 
     #[test]
     fn a_malformed_request_id_is_refused() {
         for bad in ["", "t1", "t1.", "t1.x v1", "t1.3", "t1.3v", "t1.3v0"] {
-            assert!(parse_request_id("t1", bad).is_err(), "{bad:?} was accepted");
+            assert!(
+                parse_encoded_request_id("t1", bad).is_err(),
+                "{bad:?} was accepted"
+            );
         }
     }
 

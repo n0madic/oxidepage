@@ -117,6 +117,7 @@ fn get(port: u16, path: &str) -> NetRequest {
         referrer: None,
         initiator_origin: Some(origin),
         bypass_cache: false,
+        ..NetRequest::default()
     }
 }
 
@@ -179,6 +180,7 @@ async fn no_cors_request_drops_authorization_header() {
         referrer: None,
         initiator_origin: Some(origin),
         bypass_cache: false,
+        ..NetRequest::default()
     };
     let out = engine_with(loopback_policy()).fetch(req).await.unwrap();
     assert_eq!(
@@ -247,6 +249,7 @@ async fn cross_origin_redirect_strips_authorization() {
         referrer: None,
         initiator_origin: Some(origin_a.clone()),
         bypass_cache: false,
+        ..NetRequest::default()
     };
     let out = engine_with(loopback_policy()).fetch(req).await.unwrap();
     assert_eq!(
@@ -463,6 +466,7 @@ async fn cross_origin_no_cors_response_is_blanked() {
         initiator_origin: Some("http://example.com".to_owned()),
         referrer: None,
         bypass_cache: false,
+        ..NetRequest::default()
     };
     let out = engine_with(loopback_policy()).fetch(req).await.unwrap();
     assert_eq!(out.head.response_type, ResponseType::Opaque);
@@ -563,6 +567,7 @@ async fn cors_taint_applies_after_cross_origin_redirect() {
         referrer: None,
         initiator_origin: Some(origin_a.clone()),
         bypass_cache: false,
+        ..NetRequest::default()
     };
     // The chain crossed origin at B, so the final (same-origin) hop is still
     // CORS-gated; A/end sends no ACAO → the whole response is blocked instead
@@ -627,6 +632,7 @@ async fn file_url_loads_through_engine() {
         referrer: None,
         initiator_origin: None,
         bypass_cache: false,
+        ..NetRequest::default()
     };
     let out = engine_with(policy).fetch(req).await.unwrap();
     assert_eq!(out.head.status, 200);
@@ -656,6 +662,7 @@ async fn data_url_is_fetched_without_a_scheme_allowlist_entry() {
         referrer: None,
         initiator_origin: Some("https://example.com".to_owned()),
         bypass_cache: false,
+        ..NetRequest::default()
     };
     let out = engine_with(policy).fetch(req).await.unwrap();
 
@@ -686,6 +693,7 @@ async fn malformed_data_url_is_an_error() {
         referrer: None,
         initiator_origin: None,
         bypass_cache: false,
+        ..NetRequest::default()
     };
     let err = engine_with(ResourcePolicy::default())
         .fetch(req)

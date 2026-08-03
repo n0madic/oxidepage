@@ -1,0 +1,45 @@
+<!doctype html>
+<title>upload fixture</title>
+<!--
+  The file-input surface ADR-0032 Phase 5 added: `input.files`, the `input`/
+  `change` pair a selection fires, and a real multipart form post. The form
+  declares no `enctype` on purpose — a non-empty file input must force
+  `multipart/form-data` by itself.
+-->
+<!--
+  The file inputs are sized explicitly: this engine renders no file-picker
+  widget, so an unstyled `<input type=file>` lays out 0x0 and `page.click`
+  cannot find a point on it. Sizing them here keeps the chooser check on the
+  real trusted-click path (`Input.dispatchMouseEvent` + hit test) rather than
+  routing around it with a scripted `el.click()`.
+-->
+<style>
+  input[type=file] { display: block; width: 200px; height: 24px; }
+</style>
+<form id="form" action="/-/upload" method="post">
+  <input name="field" value="plain">
+  <input id="file" name="doc" type="file">
+  <button id="submit" type="submit">send</button>
+</form>
+<input id="multi" type="file" multiple>
+<p id="log"></p>
+<script>
+  window.events = [];
+  for (const name of ['input', 'change']) {
+    document.getElementById('file').addEventListener(name, (e) => {
+      window.events.push([name, e.isTrusted]);
+    });
+  }
+  window.fileSummary = () => {
+    const files = document.getElementById('file').files;
+    return {
+      length: files.length,
+      // Spread, not indexing: an indexed-getter interface missing from
+      // `install_value_iterators` makes this throw (ADR-0031 D6's lesson).
+      names: [...files].map((f) => f.name),
+      sizes: [...files].map((f) => f.size),
+      isFile: files.length > 0 && files[0] instanceof File,
+      isBlob: files.length > 0 && files[0] instanceof Blob,
+    };
+  };
+</script>

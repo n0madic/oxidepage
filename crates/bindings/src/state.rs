@@ -23,6 +23,7 @@ use crate::cssdata::{RuleData, RuleListData, SheetData, StyleDeclData};
 use crate::customreg::CustomElementRegistry;
 use crate::dialog::{DialogRequest, DialogResponse};
 use crate::events::{EventData, ListenerRegistry};
+use crate::filedata::{BlobData, FileReaderData};
 use crate::netdata::{
     FormDataData, HeadersData, PendingNet, RequestData, ResponseData, UrlData, UrlSearchParamsData,
     XhrData,
@@ -78,6 +79,17 @@ pub trait HostHooks {
     fn get_cookie(&self, document_url: &str) -> String;
     /// `document.cookie` setter: stores one cookie from script.
     fn set_cookie(&self, document_url: &str, cookie: &str);
+
+    /// An `<input type=file>` was activated (ADR-0032 D12).
+    ///
+    /// **Does not park the page**, unlike a modal dialog: a chooser has no
+    /// return value the activation needs, so the click completes and the files
+    /// arrive later through the embedder. The default does nothing, which is
+    /// the honest headless answer — a page with no driver watching gets no
+    /// chooser, exactly as a real browser with no user gets no selection.
+    fn open_file_chooser(&self, input: NodeId, multiple: bool) {
+        let _ = (input, multiple);
+    }
 
     /// HTML's "window open steps": open a new browsing context.
     ///
@@ -160,6 +172,14 @@ pub(crate) enum HostData {
     /// owns it. The back-reference is **weak** — see
     /// [`crate::cx::BindCx::new_xhr_upload`].
     XhrUpload(std::rc::Weak<RefCell<XhrData>>),
+    /// A `Blob` **or** a `File`: one backing record for both, distinguished by
+    /// [`BlobData::file`] (ADR-0032 D10). `slice` shares the buffer, so the
+    /// `Rc<Vec<u8>>` inside is what several of these commonly point at.
+    Blob(Rc<BlobData>),
+    /// An `<input type=file>`'s `files` (fixed snapshot; `item()` mints fresh
+    /// `File` wrappers over the same `BlobData`s).
+    FileList(Rc<Vec<Rc<BlobData>>>),
+    FileReader(Rc<FileReaderData>),
     StyleDecl(Rc<StyleDeclData>),
     StyleSheet(Rc<SheetData>),
     /// `document.styleSheets`: the document node whose author sheets it lists.
@@ -627,6 +647,13 @@ pub(crate) struct JsRefs {
     pub install_params_iterable: JsValue,
     /// Pristine `Object.freeze` wrapper used for WebIDL FrozenArray values.
     pub freeze: JsValue,
+    /// `(parts) => Array` — normalizes `new Blob(parts)`'s
+    /// `sequence<BlobPart>` argument, which the codegen cannot express.
+    pub blob_parts: JsValue,
+    /// `(part) => string | null` — an `ArrayBuffer`/`ArrayBufferView` part's
+    /// bytes as a Latin-1 string. `JsScope` can create an `ArrayBuffer` but
+    /// not read one.
+    pub blob_part_bytes: JsValue,
     /// `(target) => Proxy` wrapping a `CSSStyleDeclaration` host object with
     /// camelCase/dashed property access and indexed (`style[0]`) access.
     pub style_proxy: JsValue,

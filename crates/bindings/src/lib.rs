@@ -16,6 +16,7 @@ mod customreg;
 pub mod cx;
 pub mod dialog;
 pub mod events;
+mod filedata;
 mod generated;
 mod handlers;
 pub mod imp;
@@ -31,18 +32,20 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use oxidepage_js::{HostCall, JsError, JsObject, JsRealm, JsScope, JsThrow, JsValue, PropertyDef};
-use oxidepage_net::{Credentials, NetEvent, NetRequest, RequestMode, ResponseType};
+use oxidepage_net::{Credentials, NetEvent, NetRequest, RequestMode, ResourceType, ResponseType};
 use oxidepage_style::Viewport;
 
 pub use console::{ConsoleLevel, ConsoleMessage, ScriptError, ScriptErrorKind};
 pub use cx::BindCx;
 pub use dialog::{DialogEvent, DialogHandler, DialogKind, DialogRequest, DialogResponse};
 pub use events::{EventTargetKey, Modifiers, dispatch_event, fire_pop_state, fire_simple_event};
+pub use filedata::FileInput;
 pub use imp::input_synth::{
     KeyEventKind, KeyInput, MouseEventKind, MouseInput, WheelInput,
     dispatch_key as imp_dispatch_key, dispatch_mouse as imp_dispatch_mouse,
     dispatch_wheel as imp_dispatch_wheel, insert_text as imp_insert_text,
 };
+pub use imp::interaction::fire_trusted_event;
 pub use imp::keys::key_for_code;
 pub use preview::{
     PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, ValuePreview,
@@ -200,6 +203,8 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), J
         record_pairs: get("recordPairs")?,
         install_params_iterable: get("installParamsIterable")?,
         freeze: get("freeze")?,
+        blob_parts: get("blobParts")?,
+        blob_part_bytes: get("blobPartBytes")?,
         style_proxy: get("styleProxy")?,
         dataset_proxy: get("datasetProxy")?,
         delete_property: get("deleteProperty")?,
@@ -478,6 +483,7 @@ fn install_value_iterators(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "NamedNodeMap",
         "HTMLCollection",
         "DOMRectList",
+        "FileList",
         "CSSStyleDeclaration",
         "StyleSheetList",
         "CSSRuleList",
@@ -1130,6 +1136,9 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
         referrer: Some(doc_url),
         initiator_origin: initiator,
         bypass_cache: false,
+        resource_type: ResourceType::Fetch,
+        // The user agent's own credentials only; script has no way to set this.
+        auth: None,
     };
     let (promise, resolve, reject) = cx.make_promise()?;
     // An already-aborted signal rejects synchronously; the request never
@@ -2595,6 +2604,10 @@ pub fn deliver_net_event(cx: &BindCx<'_>, event: NetEvent) {
                 None => {}
             }
         }
+        // Never routed here: `Page::dispatch_net_event` hands this back to the
+        // net service, which re-parks the request (ADR-0032 D8). The arm exists
+        // because the compiler demands it, and it is the honest no-op.
+        NetEvent::AuthRequired { .. } => {}
     }
     microtask_checkpoint(cx);
 }

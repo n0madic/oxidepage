@@ -418,6 +418,17 @@ impl Client {
         None
     }
 
+    /// Reads for `settle`, then throws away everything buffered.
+    ///
+    /// For a test that asserts on the *next* event of a kind: a target's opening
+    /// `about:blank` navigation can land either side of the command that enables
+    /// the domain, so a test counting events from the start of the stream is
+    /// deciding a race. This gives it a known-empty baseline instead.
+    pub fn forget_events(&mut self, settle: Duration) {
+        let _ = self.drain_events(settle);
+        self.events.clear();
+    }
+
     /// Whether an event has arrived *already* — for asserting an event does
     /// **not** fire, without paying the full timeout.
     pub fn drain_events(&mut self, settle: Duration) -> Vec<Value> {

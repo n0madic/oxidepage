@@ -9,6 +9,8 @@ use oxidepage_js::{JsThrow, JsValue};
 use oxidepage_net::ResponseType;
 use url::Url;
 
+use crate::filedata::BlobData;
+
 /// Whether `b` is an RFC 7230 token character (the set allowed in a header
 /// field name).
 fn is_token_byte(b: u8) -> bool {
@@ -142,24 +144,72 @@ impl std::ops::Deref for UrlData {
     }
 }
 
+/// One `FormData` entry value: a string, or a file (ADR-0032 D11).
+///
+/// `Clone` is cheap for both: a file entry clones an `Rc` and a filename, never
+/// the bytes.
+#[derive(Clone)]
+pub(crate) enum FormDataValue {
+    Text(String),
+    /// A `Blob` or `File` entry. The bytes are shared with the object the entry
+    /// came from — `BlobData` is a view, so appending a 100 MB file to a form
+    /// copies nothing.
+    File {
+        data: Rc<BlobData>,
+        /// The `filename` parameter. A bare `Blob` has no name, and the Fetch
+        /// spec's entry-creation steps give it the literal `"blob"`.
+        filename: String,
+    },
+}
+
+impl FormDataValue {
+    /// The entry as the *string* accessors see it.
+    ///
+    /// `get()` on a file entry returns the `File` object, not this — but the
+    /// urlencoded and `text/plain` serializers, which cannot carry bytes, use
+    /// the filename, which is what a browser sends for a file in those
+    /// encodings.
+    pub fn as_text(&self) -> String {
+        match self {
+            FormDataValue::Text(text) => text.clone(),
+            FormDataValue::File { filename, .. } => filename.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_file(&self) -> bool {
+        matches!(self, FormDataValue::File { .. })
+    }
+}
+
 /// A `FormData` entry list (the "entry list" of the XHR spec).
 ///
-/// Values are strings only: `File`/`Blob` do not exist in this engine, so
-/// `append(name, blob)` cannot happen — there is nothing to construct a Blob
-/// with. Entry order is preserved, which is what both serializations rely on.
+/// Entry order is preserved, which is what every serialization relies on.
 pub(crate) struct FormDataData {
-    pub list: RefCell<Vec<(String, String)>>,
+    pub list: RefCell<Vec<(String, FormDataValue)>>,
 }
 
 impl FormDataData {
-    pub fn new(list: Vec<(String, String)>) -> Self {
+    pub fn new(list: Vec<(String, FormDataValue)>) -> Self {
         Self {
             list: RefCell::new(list),
         }
     }
 
+    /// Every entry as a name/string pair — for the two serializations that
+    /// cannot carry bytes, and for the pair iterator.
     pub fn pairs(&self) -> Vec<(String, String)> {
-        self.list.borrow().clone()
+        self.list
+            .borrow()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.as_text()))
+            .collect()
+    }
+
+    /// Whether any entry is a file, which is what forces a form to
+    /// `multipart/form-data`.
+    pub fn has_file(&self) -> bool {
+        self.list.borrow().iter().any(|(_, value)| value.is_file())
     }
 
     /// Serializes as `multipart/form-data` with the given boundary — the wire
@@ -168,13 +218,38 @@ impl FormDataData {
     /// name the boundary, which only this code knows).
     pub fn to_multipart(&self, boundary: &str) -> Vec<u8> {
         let mut out = Vec::new();
-        for (name, value) in self.pairs() {
+        for (name, value) in self.list.borrow().iter() {
             out.extend_from_slice(b"--");
             out.extend_from_slice(boundary.as_bytes());
             out.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"");
-            out.extend_from_slice(escape_multipart_name(&name).as_bytes());
-            out.extend_from_slice(b"\"\r\n\r\n");
-            out.extend_from_slice(value.as_bytes());
+            out.extend_from_slice(escape_multipart_name(name).as_bytes());
+            out.push(b'"');
+            match value {
+                FormDataValue::Text(text) => {
+                    out.extend_from_slice(b"\r\n\r\n");
+                    out.extend_from_slice(text.as_bytes());
+                }
+                FormDataValue::File { data, filename } => {
+                    // The filename is escaped with the *same* rule as the field
+                    // name, and for the same reason: it is attacker-influenced
+                    // — it comes from a `Content-Disposition` a server sent, or
+                    // from a name page script chose — and a raw CR/LF in it
+                    // forges a header just as effectively.
+                    out.extend_from_slice(b"; filename=\"");
+                    out.extend_from_slice(escape_multipart_name(filename).as_bytes());
+                    out.extend_from_slice(b"\"\r\nContent-Type: ");
+                    // Per the Fetch multipart serializer, an entry with no type
+                    // is sent as `application/octet-stream`.
+                    let content_type = if data.type_.is_empty() {
+                        "application/octet-stream"
+                    } else {
+                        &data.type_
+                    };
+                    out.extend_from_slice(escape_multipart_name(content_type).as_bytes());
+                    out.extend_from_slice(b"\r\n\r\n");
+                    out.extend_from_slice(data.view());
+                }
+            }
             out.extend_from_slice(b"\r\n");
         }
         out.extend_from_slice(b"--");
@@ -184,9 +259,13 @@ impl FormDataData {
     }
 }
 
-/// Per the Fetch spec's multipart serializer: a name may not carry a raw CR, LF
-/// or `"` into the `Content-Disposition` header, so those three are escaped
-/// rather than allowed to forge a header or terminate the field name early.
+/// Per the Fetch spec's multipart serializer: a value may not carry a raw CR,
+/// LF or `"` into the `Content-Disposition` header, so those three are escaped
+/// rather than allowed to forge a header or terminate the field early.
+///
+/// Applied to the **filename and the content type** as well as the field name
+/// (ADR-0032 D11): all three are attacker-influenced and all three land in a
+/// header.
 fn escape_multipart_name(name: &str) -> String {
     name.replace('\r', "%0D")
         .replace('\n', "%0A")

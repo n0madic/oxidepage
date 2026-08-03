@@ -77,7 +77,8 @@ fn usage() {
          \x20      oxidepage dump-layout <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
          \x20      oxidepage dump-display-list <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [-o <file>] [--quiet]\n\
          \x20      oxidepage render <file.html | http(s)://URL> -o <out.{{png,jpg,pdf,html}}> [--format png|jpeg|pdf|html] [--viewport WxH] [--dpr N] [--full-page] [--clip X,Y,W,H] [--quality N] [--paper <name|WxH>] [--margin <px|t,r,b,l>] [--scale N] [--landscape] [--single-page] [--no-fit-to-width] [--no-print-background] [--settle-ms <ms>] [--quiet]\n\
-         \x20      oxidepage serve [--port N] [--viewport WxH] [--allow-private]\n\n\
+         \x20      oxidepage serve [--port N] [--viewport WxH] [--allow-private]\n\
+         \x20                      [--download-path DIR]\n\n\
          eval: loads a local HTML file or fetches a document over the network\n\
          (SSRF- and policy-checked), runs its scripts and the event loop until\n\
          it settles, then evaluates `expression` (default: `document.title`)\n\
@@ -131,7 +132,9 @@ fn usage() {
          \x20 --lazy-images     fetch <img> only near the viewport (default: on\n\
          \x20                   for a viewport screenshot, off everywhere else)\n\
          \x20 --no-lazy-images  fetch every <img> eagerly\n\
-         \x20 --allow-private   permit loopback/private hosts (local dev; off by default)"
+         \x20 --allow-private   permit loopback/private hosts (local dev; off by default)\n\
+         \x20 --download-path   write `Content-Disposition: attachment` responses here\n\
+         \x20                   (without it, a download is refused rather than parsed)"
     );
 }
 
@@ -626,6 +629,7 @@ fn serve_command(args: &[String]) -> ExitCode {
     let mut port: u16 = 0;
     let mut allow_private = false;
     let mut viewport = None;
+    let mut download_path: Option<std::path::PathBuf> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -644,6 +648,25 @@ fn serve_command(args: &[String]) -> ExitCode {
                 viewport = Some(value);
             }
             "--allow-private" => allow_private = true,
+            "--download-path" => {
+                let Some(value) = iter.next() else {
+                    eprintln!("oxidepage serve: --download-path requires a directory");
+                    return ExitCode::from(2);
+                };
+                // Resolved and created up front, so a bad path is a startup
+                // error rather than a download that silently fails an hour in.
+                if let Err(e) = std::fs::create_dir_all(value) {
+                    eprintln!("oxidepage serve: cannot use `{value}` for downloads: {e}");
+                    return ExitCode::from(2);
+                }
+                match std::path::Path::new(value).canonicalize() {
+                    Ok(path) => download_path = Some(path),
+                    Err(e) => {
+                        eprintln!("oxidepage serve: cannot resolve `{value}`: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other => {
                 eprintln!("oxidepage serve: unexpected argument `{other}`");
                 return ExitCode::from(2);
@@ -673,6 +696,10 @@ fn serve_command(args: &[String]) -> ExitCode {
             dialog_policy: oxidepage_engine::DialogPolicy::Ask {
                 timeout: oxidepage_engine::DEFAULT_DIALOG_TIMEOUT,
             },
+            // No directory *is* deny: an attachment navigation is refused and
+            // recorded rather than parsed as HTML (ADR-0032 D13). A driver can
+            // still turn it on per target with `Browser.setDownloadBehavior`.
+            download_path,
             ..ContextOptions::default()
         },
         ..BrowserOptions::default()

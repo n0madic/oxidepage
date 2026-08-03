@@ -59,7 +59,7 @@ stub).
 | 5 | `engine`: Browser, contexts, multi-page, async commands — **landed** | anything protocol-shaped | ADR-0027 | 4–5 w |
 | 6 | CDP transport + Target/Page/Runtime/Network/Log — **landed** | Puppeteer basic green | ADR-0030 | 5–7 w |
 | 7 | `Input` + `DOM` domains — **landed** | Puppeteer interaction green | ADR-0031 | 2–3 w |
-| 8 | `Fetch` interception, file inputs, downloads | Puppeteer feature-complete (90%) | yes | 4–5 w |
+| 8 | `Fetch` interception, file inputs, downloads — **landed** | Puppeteer feature-complete (90%) | ADR-0032 | 4–5 w |
 | 9 | Isolated worlds | the gate to Playwright | **yes** | 4–6 w |
 | 10 | Frame plumbing + Playwright compat surface | **Playwright green** | yes | 5–7 w |
 | 11 | Nested browsing contexts (real iframes) | sites that hide content in iframes | yes | 10+ w |
@@ -594,9 +594,51 @@ The original scope follows, for the record.
 
 ---
 
-## Stage 8 — Request interception, file inputs, downloads
+## Stage 8 — Request interception, file inputs, downloads — **landed (ADR-0032)**
 
-**Milestone: Puppeteer covers the 90% run end to end.**
+**Milestone: Puppeteer covers the 90% run end to end.** Met: `cargo xtask
+puppeteer` is **45/45** with an empty expectation file, and twelve new checks
+were added on the way — interception (continue, respond, abort, URL override),
+`page.authenticate`, offline emulation, `uploadFile`, `waitForFileChooser`, a
+multipart upload asserted on the wire, a download, `Blob`/`FileReader`, and
+`response.text()` of the navigation itself.
+
+**What landed beyond the plan, and what the plan got wrong.**
+
+- **`page.goto()` was returning `null`, and the plan only half-diagnosed why.**
+  The plan identified `loaderId` (D6a) but placed the mint at the document
+  *request*. `Page.lifecycleEvent { name: "init" }` is the **only** event that
+  moves Puppeteer's `frame._loaderId`, and `LifecycleWatcher` resolves a
+  navigation only once that value has *changed* — so `init` had to carry the new
+  loader too, which means minting at `NavigationEventKind::Started`. With the
+  request-time mint, a `goto` after any navigation that failed without
+  committing hung for the full 30 s, because the committed loader had not moved
+  either. Found by the offline check, which is the only one that produces a
+  failed navigation followed by a successful one.
+- **`Page.fileChooserOpened` must carry a `backendNodeId`.** The ADR first
+  recorded it as unread; Puppeteer's `#onFileChooser` calls
+  `adoptBackendNode(event.backendNodeId)` immediately and hangs without one.
+  That forced the chooser announcement to become a *task source* rather than an
+  emit from the click's own stack, because the handle table lives on `Page` and
+  the activation runs through the bindings hooks.
+- **`Browser.setDownloadBehavior` is context state, not target state.** The plan
+  implied per-target application; a driver routinely sends it *before* creating
+  a page, and applying it only to the pages that exist made that call a silent
+  no-op — the very failure the previous refusal existed to prevent.
+- **`<input type=file>` has no default rendering**, so an unstyled one lays out
+  0×0 and `page.click` reports "not clickable". Recorded as a limit rather than
+  fixed: a picker widget is a layout concern, and inventing a size for a control
+  that does not exist is the fake P6 forbids.
+- **`xtask`'s test server grew behavioural routes.** It served static files and
+  never read a request body, so it could not express an upload target, an
+  attachment or a 401 challenge. Three routes under a reserved `/-/` prefix now
+  do.
+- **The `Content-Disposition` parser is the first in the tree** — the only prior
+  occurrence was the multipart *writer*. Path separators are stripped at the
+  parse rather than at each call site, and the joined download path is
+  re-checked against the directory before a byte is written.
+
+The original scope follows, for the record.
 
 - `Fetch`: `enable` with patterns, `requestPaused`, `continueRequest`,
   `fulfillRequest`, `failRequest`, `authRequired`/`continueWithAuth`.

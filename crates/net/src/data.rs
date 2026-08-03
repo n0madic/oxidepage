@@ -144,6 +144,33 @@ fn forgiving_base64(input: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Standard base64, with padding.
+///
+/// The counterpart of [`forgiving_base64`], here rather than in a dependency
+/// because the one caller is HTTP Basic auth (ADR-0032 D8) and it needs exactly
+/// this: no line wrapping, no URL-safe alphabet, padding included.
+#[must_use]
+pub fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).copied().map_or(0, u32::from);
+        let b2 = chunk.get(2).copied().map_or(0, u32::from);
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        for shift in [18, 12, 6, 0] {
+            out.push(char::from(ALPHABET[((triple >> shift) & 0x3f) as usize]));
+        }
+        // Replace the characters that encode bytes the chunk did not have.
+        let padding = 3 - chunk.len();
+        out.truncate(out.len() - padding);
+        for _ in 0..padding {
+            out.push('=');
+        }
+    }
+    out
+}
+
 fn base64_value(b: u8) -> Option<u8> {
     Some(match b {
         b'A'..=b'Z' => b - b'A',

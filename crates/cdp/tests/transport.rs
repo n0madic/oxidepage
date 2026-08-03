@@ -189,25 +189,30 @@ fn browser_get_version_reports_the_real_engine() {
 }
 
 #[test]
-fn downloads_are_refused_rather_than_silently_accepted() {
+fn download_behavior_is_accepted_before_any_target_exists() {
     let harness = Harness::start();
     let mut client = harness.client();
 
-    // Deny is the only behavior there is machinery for, and it is the default.
+    // Deny is the default, and it is a real behavior now: an attachment is
+    // refused and recorded rather than parsed as HTML (ADR-0032 D13).
+    // Accepted with **no target attached**, deliberately: a driver routinely
+    // sets the behavior before it creates a page, and the setting is remembered
+    // on the browsing context so it reaches the pages made afterwards.
     client.call("Browser.setDownloadBehavior", json!({ "behavior": "deny" }));
     client.call(
         "Browser.setDownloadBehavior",
         json!({ "behavior": "default" }),
     );
 
-    // Accepting `allow` would let a test believe a download happened.
+    // `allow` with nowhere to write is still refused: it would behave exactly
+    // like `deny` while telling the driver downloads were on.
     let error = client
         .try_call(
             "Browser.setDownloadBehavior",
             json!({ "behavior": "allow" }),
         )
-        .expect_err("downloads are not implemented");
-    assert_eq!(error["code"], -32000);
+        .expect_err("allow with no downloadPath must be refused");
+    assert_eq!(error["code"], -32602, "{error}");
 }
 
 #[test]

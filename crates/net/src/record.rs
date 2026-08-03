@@ -24,6 +24,9 @@ use std::collections::{HashMap, VecDeque};
 use bytes::Bytes;
 use oxidepage_base::RequestId;
 
+use crate::fetch::ResourceType;
+use crate::intercept::AuthChallenge;
+
 /// Most response bodies retained per page.
 pub const MAX_RETAINED_BODIES: usize = 256;
 
@@ -49,6 +52,10 @@ pub enum NetworkEvent {
         url: String,
         method: String,
         headers: Vec<(String, String)>,
+        /// What the request is for. Rides *this* event, not the pause below,
+        /// because a driver reads `resourceType` off `requestWillBeSent`
+        /// (ADR-0032 D6).
+        resource_type: ResourceType,
         timestamp: f64,
     },
     /// Response headers arrived.
@@ -60,6 +67,9 @@ pub enum NetworkEvent {
         /// The URL after redirects.
         final_url: String,
         mime_type: String,
+        /// Repeated from the request, because CDP's `responseReceived` carries
+        /// it too and a driver that reads it there must not be told `Other`.
+        resource_type: ResourceType,
         timestamp: f64,
     },
     /// The body is complete.
@@ -72,18 +82,67 @@ pub enum NetworkEvent {
     Failed {
         id: RequestId,
         error: String,
+        resource_type: ResourceType,
+        timestamp: f64,
+    },
+    /// The request is held at the pause point and needs a decision (ADR-0032).
+    ///
+    /// Reported **as announced** — same url, method and headers as the
+    /// `Requested` that preceded it. A driver pairs the two by id and drops the
+    /// pairing if they disagree, which loses the request entirely.
+    Paused {
+        id: RequestId,
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        resource_type: ResourceType,
+        timestamp: f64,
+    },
+    /// The server asked for credentials and the driver said it would answer
+    /// (ADR-0032 D8). The response itself is held back until it does.
+    AuthRequired {
+        id: RequestId,
+        url: String,
+        challenge: AuthChallenge,
+        resource_type: ResourceType,
         timestamp: f64,
     },
 }
 
 impl NetworkEvent {
+    /// Whether losing this event would wedge the page rather than merely lose a
+    /// milestone.
+    ///
+    /// A dropped `Paused` leaves a request held for the whole intercept timeout
+    /// with nobody able to release it, because the announcement is the only
+    /// thing that tells a driver the request exists. The event bus must not
+    /// `try_send` these (ADR-0032 D2).
+    ///
+    /// `Requested` is here for the same reason, one step removed: a driver
+    /// **pairs** `Fetch.requestPaused` with the `Network.requestWillBeSent` it
+    /// already stored, and Puppeteer parks a pause whose partner never arrived
+    /// in `#networkRequestIdToRequestPausedEvent` to wait for it — forever, on a
+    /// request it will therefore never continue. Making only half the pair
+    /// survive a full bus is the same wedge with an extra step.
+    #[must_use]
+    pub fn is_load_bearing(&self) -> bool {
+        matches!(
+            self,
+            NetworkEvent::Requested { .. }
+                | NetworkEvent::Paused { .. }
+                | NetworkEvent::AuthRequired { .. }
+        )
+    }
+
     #[must_use]
     pub fn request_id(&self) -> RequestId {
         match self {
             NetworkEvent::Requested { id, .. }
             | NetworkEvent::Responded { id, .. }
             | NetworkEvent::Finished { id, .. }
-            | NetworkEvent::Failed { id, .. } => *id,
+            | NetworkEvent::Failed { id, .. }
+            | NetworkEvent::Paused { id, .. }
+            | NetworkEvent::AuthRequired { id, .. } => *id,
         }
     }
 }

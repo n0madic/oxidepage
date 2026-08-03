@@ -19,6 +19,22 @@ use crate::events::{EventData, EventTargetKey, dispatch_event};
 use crate::state::PendingNavigation;
 use crate::window_open::OpenWindowRequest;
 
+/// [`fire`], reachable from outside this crate — for an embedder command that
+/// owes a page an event.
+///
+/// The `input`/`change` pair `DOM.setFileInputFiles` fires (ADR-0032 D11) sits
+/// on the same trust boundary ADR-0023 drew for synthetic input: an event the
+/// *driver* caused is trusted, one page script caused is not.
+pub fn fire_trusted_event(
+    cx: &BindCx<'_>,
+    node: NodeId,
+    event_type: &str,
+    bubbles: bool,
+    cancelable: bool,
+) -> Result<bool, JsThrow> {
+    fire(cx, node, event_type, bubbles, cancelable)
+}
+
 /// Dispatches one trusted event at `node` and reports whether it went
 /// un-cancelled (i.e. whether the default action should still run).
 fn fire(
@@ -45,6 +61,8 @@ enum Activation {
     Submit { form: NodeId },
     /// `<button type=reset>`, `<input type=reset>`.
     Reset { form: NodeId },
+    /// `<input type=file>`: show a file chooser (ADR-0032 D12).
+    FileChooser,
     /// `<label>`. `control` is `None` when the label has no labeled control, or
     /// when the click started on interactive content inside it — in both cases
     /// the behavior is to do **nothing**.
@@ -133,6 +151,7 @@ fn activation_kind(
             "checkbox" | "radio" => Some(Activation::Checkable),
             "submit" => dom.form_owner(id).map(|form| Activation::Submit { form }),
             "reset" => dom.form_owner(id).map(|form| Activation::Reset { form }),
+            "file" => Some(Activation::FileChooser),
             _ => None,
         },
         "label" => Some(Activation::Label {
@@ -334,6 +353,25 @@ fn run_activation(
             }
         }
         Activation::Hyperlink => follow_hyperlink(cx, node),
+        // Unlike a modal dialog, this does **not** park the page: a chooser has
+        // no return value the activation needs, so the click completes and the
+        // driver answers later with `DOM.setFileInputFiles` (ADR-0032 D12).
+        // With no interception installed the hook records the event and does
+        // nothing, which is the honest headless answer — the shape ADR-0025
+        // chose for `alert`.
+        Activation::FileChooser => {
+            let multiple = cx
+                .state
+                .dom
+                .borrow()
+                .node(node)
+                .as_element()
+                .is_some_and(|el| {
+                    el.attr(&oxidepage_dom::node::attr_name("multiple".into()))
+                        .is_some()
+                });
+            cx.state.hooks.open_file_chooser(node, multiple);
+        }
         Activation::Submit { form } => {
             crate::imp::form_submit::submit(cx, form, Some(node), /* fire_event */ true)?;
         }
@@ -371,10 +409,13 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
         };
         (attr("download").is_some(), attr("target"))
     };
-    if download {
-        cx.warn("link activation: `download` is not implemented; the navigation was skipped");
-        return;
-    }
+    // `<a download>` is a navigation like any other, and the *response* decides
+    // whether it becomes a download: `commit_document` reads
+    // `Content-Disposition` and refuses to commit an attachment (ADR-0032 D13).
+    // The attribute is deliberately not treated as an override — a server that
+    // sends `Content-Disposition: inline` means it, and a page that could force
+    // a write by adding an attribute would be deciding the operator's policy.
+    let _ = download;
     // `reflect_url` resolves the `href` attribute against the base URL and
     // yields `""` when it is absent or will not parse — the spec's "if url is
     // failure, then return".

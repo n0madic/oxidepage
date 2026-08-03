@@ -31,6 +31,7 @@ fn get(url: &str) -> NetRequest {
         referrer: None,
         initiator_origin: None,
         bypass_cache: false,
+        ..NetRequest::default()
     }
 }
 

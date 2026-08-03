@@ -53,6 +53,14 @@ pub(crate) struct ContextInner {
     local_storage: SharedLocalStorage,
     pages: Mutex<Vec<PageHandle>>,
     next_page: AtomicU64,
+    /// Where this context's pages write a `Content-Disposition: attachment`
+    /// response (ADR-0032 D13).
+    ///
+    /// Mutable, unlike the rest of `options`, because
+    /// `Browser.setDownloadBehavior` is a *runtime* command and a driver
+    /// routinely sends it before it has created a page. Storing it here is what
+    /// makes it apply to the pages created afterwards, rather than to nothing.
+    download_path: Mutex<Option<std::path::PathBuf>>,
     /// Set by [`BrowserContext::close`] before it takes the page list.
     ///
     /// Without it, a `window.open` in flight during the close pushes its new
@@ -83,6 +91,7 @@ impl BrowserContext {
         page_settings: PageSettings,
         options: ContextOptions,
     ) -> Self {
+        let options_download_path = options.download_path.clone();
         Self(Arc::new(ContextInner {
             id,
             net_pool,
@@ -95,6 +104,7 @@ impl BrowserContext {
             local_storage: SharedLocalStorage::default(),
             pages: Mutex::new(Vec::new()),
             next_page: AtomicU64::new(1),
+            download_path: Mutex::new(options_download_path),
             closed: AtomicBool::new(false),
         }))
     }
@@ -196,7 +206,17 @@ impl BrowserContext {
         // Context in the high half, page counter in the low half, so a page id
         // names its context and no two contexts can mint the same one.
         let id = PageId((inner.id.0 << 32) | inner.next_page.fetch_add(1, Ordering::Relaxed));
-        let options = inner.options.merge(options);
+        let mut options = inner.options.merge(options);
+        // The *live* download path wins over the one the context was built
+        // with: a driver's `Browser.setDownloadBehavior` before this page
+        // existed has to reach it.
+        options.download_path = options.download_path.or_else(|| {
+            inner
+                .download_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        });
         let net = SharedNetConfig {
             pool: Arc::clone(&inner.net_pool),
             cookies: Arc::clone(&inner.cookies),
@@ -243,6 +263,30 @@ impl BrowserContext {
         pages.push(handle.clone());
         drop(pages);
         Ok(handle)
+    }
+
+    /// `Browser.setDownloadBehavior` for this context (ADR-0032 D13).
+    ///
+    /// Applied to the pages that exist **and** remembered for the ones that do
+    /// not yet: a driver routinely sets the behavior before it creates a page,
+    /// and applying it only to the current list would make that call a no-op it
+    /// had every reason to believe worked.
+    pub fn set_download_path(&self, path: Option<std::path::PathBuf>) {
+        *self
+            .0
+            .download_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = path.clone();
+        let behavior = match path {
+            Some(path) => oxidepage_page::DownloadBehavior::Allow(path),
+            None => oxidepage_page::DownloadBehavior::Deny,
+        };
+        for page in self.pages() {
+            let behavior = behavior.clone();
+            // Best effort: a page whose thread has already gone is not an
+            // error here — `Browser.close` races this by design.
+            let _ = page.with(move |p| p.set_download_behavior(behavior));
+        }
     }
 
     /// Every page of this context that has not exited.

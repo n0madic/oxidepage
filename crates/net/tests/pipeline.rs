@@ -145,6 +145,7 @@ fn get(port: u16, path: &str) -> NetRequest {
         referrer: None,
         initiator_origin: Some(origin),
         bypass_cache: false,
+        ..NetRequest::default()
     }
 }
 

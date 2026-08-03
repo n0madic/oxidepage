@@ -611,6 +611,50 @@
 
     const freeze = (value) => objectFreeze(value);
 
+    // === File API argument marshalling ===
+    // The IDL codegen rejects `sequence<T>` arguments and every buffer type
+    // outright (ADR-0032 D10), so `new Blob(parts)` takes an `any` and these
+    // two helpers do the conversion the generated glue cannot.
+
+    // `sequence<BlobPart>`: WebIDL's sequence conversion, which demands an
+    // *object* with an iterator. The object check is not redundant with the
+    // iterator check — a primitive string has `Symbol.iterator`, so without it
+    // `new Blob("abc")` would quietly become three one-character parts instead
+    // of the TypeError every browser answers with.
+    const blobParts = (parts) => {
+        if (parts === undefined) return [];
+        const isObject =
+            parts !== null && (typeof parts === "object" || typeof parts === "function");
+        if (!isObject || typeof parts[Symbol.iterator] !== "function") {
+            throw new TypeError("Blob parts must be an iterable of BlobPart");
+        }
+        return arrayFrom(parts);
+    };
+
+    // An `ArrayBuffer`/`ArrayBufferView` part's bytes as a Latin-1 string (one
+    // code unit per byte), or `null` for anything else. `JsScope` can create an
+    // ArrayBuffer but not read one, and a Latin-1 string round-trips exactly —
+    // Rust maps each code point straight back to a byte.
+    //
+    // Chunked, because `apply` with a hundred thousand arguments overflows the
+    // engine's argument stack.
+    const blobPartBytes = (part) => {
+        let view;
+        if (part instanceof ArrayBuffer) {
+            view = new Uint8Array(part);
+        } else if (ArrayBuffer.isView(part)) {
+            view = new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
+        } else {
+            return null;
+        }
+        const fromCharCode = String.fromCharCode;
+        let out = "";
+        for (let i = 0; i < view.length; i += 8192) {
+            out += fromCharCode.apply(null, view.subarray(i, i + 8192));
+        }
+        return out;
+    };
+
     // Runs a custom-element constructor as an upgrade: `Reflect.construct(C,
     // [], C)` sets `new.target = C`, so the QuickJS subclass trampoline pins
     // the resulting object's prototype to `C.prototype`. The native
@@ -1464,6 +1508,7 @@
         setToStringTag, makeDomException, structuredClone,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
         freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
+        blobParts, blobPartBytes,
         ceConstruct, installLateGlobals, enqueueMicrotask, newStorageEvent,
         setStorageKeys,
         objectPrototype: Object.prototype,

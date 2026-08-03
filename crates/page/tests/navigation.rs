@@ -200,6 +200,14 @@ fn route(path: &str) -> Vec<u8> {
              <input name='a' value='1'><textarea name='t'>hi</textarea>\
              <button id='btn' type='submit'>go</button></form>",
         ),
+        // A file input, so a real upload can be asserted end to end. The page
+        // has no way to select files itself (there is no `DataTransfer`), so
+        // the test drives `Page::set_file_input_files` — the embedder path.
+        "/form-file.html" => html(
+            "<!doctype html><form id='f' action='/submitted' method='post'>\
+             <input name='a' value='1'><input id='up' name='doc' type='file'>\
+             <button id='btn' type='submit'>go</button></form>",
+        ),
         "/form-multipart.html" => html(
             "<!doctype html><form id='f' action='/submitted' method='post' \
                                  enctype='multipart/form-data'>\
@@ -996,4 +1004,93 @@ fn location_and_history_are_real_interfaces() {
             "{expr}"
         );
     }
+}
+
+/// A file input turns a form post into `multipart/form-data` whatever the
+/// author's `enctype` says, and the file lands as a real part (ADR-0032 D11).
+///
+/// The failure this replaces was silent: a file input contributed *nothing*, so
+/// a form that looked like it uploaded posted every other field and no file.
+#[test]
+fn a_file_input_forces_multipart_and_sends_the_bytes() {
+    let directory = std::env::temp_dir().join(format!(
+        "oxidepage-form-upload-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("notes.txt");
+    std::fs::write(&path, b"line one\nline two\n").unwrap();
+
+    let server = spawn_server();
+    let page = loopback_page();
+    page.navigate(&server.url("/form-file.html"), WaitUntil::Load)
+        .unwrap();
+
+    let root = page.dom().document();
+    let input = page
+        .query_selector(root, "#up")
+        .expect("query")
+        .expect("the file input");
+    page.set_file_input_files(input, &[path.to_string_lossy().into_owned()])
+        .expect("selection");
+
+    let at = server.mark();
+    eval_and_settle(&page, "document.getElementById('btn').click();");
+
+    let seen = server.since(at);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    // The form declares no `enctype`, so it would default to urlencoded — which
+    // cannot carry bytes. A non-empty file input forces multipart.
+    assert!(
+        seen[0].content_type.starts_with("multipart/form-data;"),
+        "a file input must force multipart, got `{}`",
+        seen[0].content_type
+    );
+    let body = &seen[0].body;
+    assert!(
+        body.contains("Content-Disposition: form-data; name=\"a\"\r\n\r\n1"),
+        "the ordinary field is still there: {body}"
+    );
+    assert!(
+        body.contains("Content-Disposition: form-data; name=\"doc\"; filename=\"notes.txt\""),
+        "the file part names its filename: {body}"
+    );
+    assert!(
+        body.contains("Content-Type: text/plain"),
+        "the file part carries its own content type: {body}"
+    );
+    assert!(
+        body.contains("line one\nline two"),
+        "the bytes were sent: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// An **empty** file input still contributes one empty part, per HTML — which
+/// is what lets a server tell "no file chosen" from "field absent".
+#[test]
+fn an_empty_file_input_contributes_an_empty_part() {
+    let server = spawn_server();
+    let page = loopback_page();
+    page.navigate(&server.url("/form-file.html"), WaitUntil::Load)
+        .unwrap();
+
+    let at = server.mark();
+    eval_and_settle(&page, "document.getElementById('btn').click();");
+
+    let seen = server.since(at);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(
+        seen[0].content_type.starts_with("multipart/form-data;"),
+        "an empty file input still forces multipart: `{}`",
+        seen[0].content_type
+    );
+    assert!(
+        seen[0]
+            .body
+            .contains("Content-Disposition: form-data; name=\"doc\"; filename=\"\""),
+        "the empty part is present: {}",
+        seen[0].body
+    );
 }

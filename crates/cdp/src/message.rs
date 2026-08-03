@@ -54,6 +54,21 @@ impl Request {
         })
     }
 
+    /// Like [`Request::parse`], but a wholly absent `params` deserializes as
+    /// the type's default.
+    ///
+    /// For commands whose every member is optional (`Fetch.enable`): serde
+    /// cannot default a struct from `null`, and Puppeteer does send
+    /// `Fetch.enable` with no params at all.
+    pub fn parse_or_default<T: serde::de::DeserializeOwned + Default>(
+        &self,
+    ) -> Result<T, ProtocolError> {
+        match self.params.as_ref() {
+            None | Some(serde_json::Value::Null) => Ok(T::default()),
+            _ => self.parse(),
+        }
+    }
+
     /// The domain half of `Domain.method`.
     #[must_use]
     pub fn domain(&self) -> &str {

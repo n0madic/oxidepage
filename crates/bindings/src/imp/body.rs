@@ -24,6 +24,17 @@ pub(crate) fn extract(cx: &BindCx<'_>, value: &JsValue) -> Result<Option<Body>, 
         return Ok(None);
     }
 
+    // A `Blob`/`File` contributes its bytes, and its `type` becomes the default
+    // `Content-Type` — but only when it has one. An empty `type` must leave the
+    // header *absent* rather than send `Content-Type: `, which is why this
+    // branch is the one body type whose `content_type` can be `None`.
+    if let Some(blob) = cx.as_blob(value) {
+        return Ok(Some(Body {
+            bytes: blob.view().to_vec(),
+            content_type: (!blob.type_.is_empty()).then(|| blob.type_.clone()),
+        }));
+    }
+
     if let Some(form) = cx.as_form_data(value) {
         let boundary = multipart_boundary()?;
         return Ok(Some(Body {

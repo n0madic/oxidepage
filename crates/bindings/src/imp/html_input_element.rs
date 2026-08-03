@@ -5,9 +5,10 @@
 //! `defaultValue`/`defaultChecked` are the reflecting halves of the first two.
 
 use oxidepage_base::NodeId;
-use oxidepage_js::JsThrow;
+use oxidepage_js::{JsThrow, JsValue};
 
 use crate::cx::BindCx;
+use crate::filedata::FileInput;
 use crate::imp::reflect::{bool_reflector, set_string, string_reflector};
 
 pub(crate) use crate::imp::form_support::{
@@ -58,6 +59,33 @@ pub(crate) fn checked(cx: &BindCx<'_>, this: NodeId) -> Result<bool, JsThrow> {
 pub(crate) fn set_checked(cx: &BindCx<'_>, this: NodeId, value: bool) -> Result<(), JsThrow> {
     cx.state.dom.borrow_mut().set_checkedness(this, value);
     Ok(())
+}
+
+/// `input.files` (ADR-0032 D11).
+///
+/// `null` for anything that is not a `type=file` input, which is what HTML
+/// says and what feature detection reads. A fresh `FileList` per call: there is
+/// no `[SameObject]` cache, because the list is rebuilt whenever the embedder
+/// sets files and a cached wrapper would keep handing back the old selection.
+pub(crate) fn files(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue, JsThrow> {
+    let files: Vec<FileInput> = {
+        let dom = cx.state.dom.borrow();
+        if !dom.is_file_input(this) {
+            return Ok(JsValue::Null);
+        }
+        dom.selected_files(this)
+            .iter()
+            .map(|file| FileInput {
+                name: file.name.clone(),
+                bytes: file.bytes.clone(),
+                content_type: file.content_type.clone(),
+                last_modified: file.last_modified,
+            })
+            .collect()
+    };
+    // Built with the `dom` borrow released: creating the wrappers re-enters the
+    // realm, and a getter that ran script under that borrow would panic.
+    cx.new_file_list(files)
 }
 
 pub(crate) fn indeterminate(cx: &BindCx<'_>, this: NodeId) -> Result<bool, JsThrow> {

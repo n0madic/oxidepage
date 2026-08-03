@@ -3146,6 +3146,12 @@ impl DomTree {
         {
             self.push_image_update(element);
         }
+        // An `<input>` that stops being `type=file` loses its selected files
+        // (ADR-0032 D11). Not gated on connectedness: a detached input whose
+        // type changes must not keep a list it could later re-expose.
+        if *attr_local == local_name!("type") {
+            self.clear_files_if_not_a_file_input(element);
+        }
         let relevant = *attr_local == local_name!("rel")
             || *attr_local == local_name!("href")
             || *attr_local == local_name!("media")

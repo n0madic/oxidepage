@@ -123,6 +123,9 @@ pub struct ContextOptions {
     pub lazy_images: bool,
     /// Let a viewport-rooted `IntersectionObserver` see the whole document.
     pub whole_document_visible: bool,
+    /// Where a `Content-Disposition: attachment` navigation writes (ADR-0032
+    /// D13). `None` is deny, and deny is the default.
+    pub download_path: Option<std::path::PathBuf>,
 }
 
 impl ContextOptions {
@@ -145,6 +148,7 @@ impl ContextOptions {
             whole_document_visible: Some(self.whole_document_visible),
             dialog_policy: Some(self.dialog_policy),
             suspended: false,
+            download_path: self.download_path.clone(),
         }
     }
 
@@ -167,6 +171,7 @@ impl ContextOptions {
                 .whole_document_visible
                 .or(defaults.whole_document_visible),
             dialog_policy: options.dialog_policy.or(defaults.dialog_policy),
+            download_path: options.download_path.clone().or(defaults.download_path),
             ..options
         }
     }
@@ -201,6 +206,10 @@ pub struct NewPageOptions {
     /// the loop but services only control work until `resume()`, so a driver
     /// can install instrumentation before anything executes.
     pub suspended: bool,
+    /// Where a `Content-Disposition: attachment` navigation writes. `None`
+    /// inherits the context's [`ContextOptions::download_path`], and no path at
+    /// all is deny (ADR-0032 D13).
+    pub download_path: Option<std::path::PathBuf>,
 }
 
 impl NewPageOptions {

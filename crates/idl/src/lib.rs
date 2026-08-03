@@ -214,6 +214,14 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         // members are the seven handler properties, which need nothing but the
         // receiver's `EventTargetKey`.
         "XMLHttpRequestEventTarget" | "XMLHttpRequestUpload" => "this_xhr_event_target",
+        // File API. One `BlobData` backs both interfaces (ADR-0032 D10), so
+        // `this_blob` accepts a `File` too and `this_file` is the same unwrap
+        // with the file-metadata half demanded — the shape
+        // `this_xhr_event_target` already uses for its two receivers.
+        "Blob" => "this_blob",
+        "File" => "this_file",
+        "FileList" => "this_file_list",
+        "FileReader" => "this_file_reader",
         "CSSStyleDeclaration" => "this_style_decl",
         "StyleSheet" | "CSSStyleSheet" => "this_style_sheet",
         "StyleSheetList" => "this_style_sheet_list",
@@ -278,6 +286,10 @@ enum ArgKind {
     U16,
     U32,
     I32,
+    /// A `long long` argument. Present for `Blob.slice`, whose offsets index a
+    /// `unsigned long long` size — narrowing them to `long` would silently
+    /// mis-slice past 2 GiB instead of failing.
+    I64,
     Double,
     Node {
         nullable: bool,
@@ -352,6 +364,7 @@ impl Universe {
                     weedle::types::IntegerType::Short(s) if s.unsigned.is_some() => ArgKind::U16,
                     weedle::types::IntegerType::Long(l) if l.unsigned.is_some() => ArgKind::U32,
                     weedle::types::IntegerType::Long(_) => ArgKind::I32,
+                    weedle::types::IntegerType::LongLong(l) if l.unsigned.is_none() => ArgKind::I64,
                     other => {
                         return err(format!("unsupported integer argument type: {other:?}"));
                     }
@@ -822,6 +835,14 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
             // `element.dataset` returns a finished `DOMStringMap` JsValue (the
             // `datasetProxy` bootstrap wrapper), not a node or host object.
             "DOMStringMap".into(),
+            // File API interfaces: slab-backed host objects whose imp
+            // functions hand back finished JsValues. `Blob` and `File` are
+            // both argument and return types (`slice()` returns a `Blob`,
+            // `FileList.item` a `File?`, `body::extract` takes either).
+            "Blob".into(),
+            "File".into(),
+            "FileList".into(),
+            "FileReader".into(),
         ],
         typedefs: HashMap::new(),
     };
@@ -1140,6 +1161,10 @@ fn emit_args(
             (ArgKind::U16, false, _) => format!("cx.arg_u16(call, {i})?"),
             (ArgKind::U32, false, _) => format!("cx.arg_u32(call, {i})?"),
             (ArgKind::I32, false, _) => format!("cx.arg_i32(call, {i})?"),
+            (ArgKind::I64, false, _) => format!("cx.arg_i64(call, {i})?"),
+            // `optional long long` with no default: a missing argument reads as
+            // `None`, which is what distinguishes `slice(0)` from `slice(0, 0)`.
+            (ArgKind::I64, true, ArgDefault::None) => format!("cx.arg_opt_i64(call, {i})?"),
             (ArgKind::U32, true, ArgDefault::U32(n)) => format!("cx.arg_u32_or(call, {i}, {n})?"),
             (ArgKind::U32, true, ArgDefault::None) => format!("cx.arg_opt_u32(call, {i})?"),
             // A negative default would not survive `ArgDefault::U32`; the only

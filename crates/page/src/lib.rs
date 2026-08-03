@@ -52,7 +52,7 @@ use oxidepage_js::{
     RealmOptions,
 };
 use oxidepage_layout::{LayoutEngine, PaintStamp};
-use oxidepage_net::{NetEvent, NetRequest, NetService, decode_charset};
+use oxidepage_net::{FetchOutcome, NetEvent, NetRequest, NetService, decode_charset};
 use oxidepage_style::{BlockingImportLoader, CssFetcher, StyleEngine};
 pub use remote::{CallArgument, EvaluateOptions, MAX_PROPERTIES, RemoteError};
 use style::selector_parser::PseudoElement;
@@ -85,8 +85,9 @@ pub use oxidepage_export_pdf::{MAX_PDF_PAGES, Margins, PaperSize, PdfOptions};
 pub use oxidepage_js::{StackFrame, parse_stack};
 pub use oxidepage_layout::{BoxQuads, disable_system_fonts};
 pub use oxidepage_net::{
-    CachePartition, CookieJar, CookieSource, CookieView, NetPool, NetworkEvent, ResourcePolicy,
-    SharedNetConfig,
+    AuthChallenge, AuthResponse, AuthSource, CachePartition, CookieJar, CookieSource, CookieView,
+    DEFAULT_INTERCEPT_TIMEOUT, FulfilledResponse, InterceptCommand, InterceptControl, NetPool,
+    NetworkEvent, RequestOverrides, RequestPattern, ResourcePolicy, ResourceType, SharedNetConfig,
 };
 pub use oxidepage_paint::{DisplayList, PaintOptions};
 pub use oxidepage_raster_skia::{RasterImage, RasterOptions};
@@ -95,6 +96,13 @@ pub use oxidepage_style::Viewport;
 /// Wall-clock cap on waiting for subresources (async scripts, etc.) before
 /// firing `load` regardless.
 const SUBRESOURCE_BUDGET: Duration = Duration::from_secs(30);
+
+/// How many ` (n)` suffixes a download filename may try before giving up.
+///
+/// An existing file is never overwritten — a page must not be able to replace
+/// an earlier download by naming it — so a collision needs an alternative, and
+/// the search needs a bound.
+const MAX_DOWNLOAD_NAME_ATTEMPTS: u32 = 100;
 
 /// HTML timer nesting level beyond which a sub-4ms timeout is clamped up to
 /// 4ms ("timer initialization steps"). This also stops a zero-delay
@@ -269,6 +277,20 @@ pub enum PageRecord {
         name: String,
         payload: String,
     },
+    /// An `<input type=file>` was activated and a driver asked to intercept
+    /// the chooser (ADR-0032 D12).
+    ///
+    /// Recorded, not answered: unlike a dialog the page is **not** parked, so
+    /// the driver replies whenever it likes with
+    /// [`Page::set_file_input_files`].
+    FileChooser(FileChooserEvent),
+    /// A `Content-Disposition: attachment` navigation (ADR-0032 D13).
+    ///
+    /// Two per download — one `InProgress`, one `Completed`/`Canceled` — and
+    /// the second carries the path. Recorded even under
+    /// [`DownloadBehavior::Deny`], as a `Canceled`: a driver that asked for a
+    /// download and got silence cannot tell a refusal from a broken link.
+    Download(DownloadEvent),
 }
 
 /// Every origin's `localStorage`, shared by the pages of one browsing context.
@@ -552,6 +574,81 @@ pub struct PageOptions {
     /// [`PageOptions::policy`] is ignored: the SSRF connector is baked into the
     /// shared pool's client, so the policy is the pool's (D8).
     pub net: Option<SharedNetConfig>,
+    /// Where a `Content-Disposition: attachment` response is written, and
+    /// whether it is written at all (ADR-0032 D13).
+    ///
+    /// `None` — the default — is **deny**: the navigation is refused and
+    /// recorded rather than parsed as HTML, which is what
+    /// `Browser.setDownloadBehavior` already says a target with no download
+    /// directory does.
+    pub download_path: Option<std::path::PathBuf>,
+}
+
+/// An `<input type=file>` asking for files.
+#[derive(Clone, Debug)]
+pub struct FileChooserEvent {
+    /// The input that was activated. A snapshot, like every other id crossing
+    /// a task boundary — re-validate it at the drain.
+    pub input: NodeId,
+    /// The **protocol handle** for that input, minted here.
+    ///
+    /// It has to be minted on the page thread, at the moment the chooser opens:
+    /// the handle table lives on the page, and the driver reads this off
+    /// `Page.fileChooserOpened` as `backendNodeId` — Puppeteer's
+    /// `#onFileChooser` immediately calls `adoptBackendNode(event.backendNodeId)`
+    /// and hangs on a missing one. `None` only if the handle table is
+    /// exhausted, which every other node-minting path also reports rather than
+    /// inventing an id for.
+    pub backend_node_id: Option<u64>,
+    /// Whether the input accepts more than one file.
+    pub multiple: bool,
+}
+
+/// What a page does with a `Content-Disposition: attachment` response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadBehavior {
+    /// Refuse the navigation. The current document stays; nothing is written.
+    Deny,
+    /// Write the bytes into this directory. The current document stays, which
+    /// is what a browser does — a download is a navigation that never commits.
+    Allow(std::path::PathBuf),
+}
+
+/// One download, as an embedder hears about it.
+#[derive(Clone, Debug)]
+pub struct DownloadEvent {
+    /// Stable for the life of the download, so a driver can pair the begin and
+    /// the completion. There is no resume, so a download has exactly two.
+    pub guid: String,
+    pub url: String,
+    /// The name derived from `Content-Disposition`, or from the URL path.
+    pub suggested_filename: String,
+    /// Where it was actually written, once it has been. `None` while it is
+    /// beginning, and for a refused one.
+    pub path: Option<String>,
+    pub total_bytes: u64,
+    /// `"inProgress"`, `"completed"` or `"canceled"` — CDP's own spelling, so
+    /// the protocol layer renames nothing.
+    pub state: DownloadState,
+}
+
+/// Where a download got to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadState {
+    InProgress,
+    Completed,
+    Canceled,
+}
+
+impl DownloadState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DownloadState::InProgress => "inProgress",
+            DownloadState::Completed => "completed",
+            DownloadState::Canceled => "canceled",
+        }
+    }
 }
 
 /// Default wall-clock budget for a single task's stay in JavaScript.
@@ -691,6 +788,15 @@ struct LoopHooks {
     raf_callbacks: RefCell<Vec<(u64, JsValue)>>,
     next_raf_id: Cell<u64>,
     raf_cancelled: RefCell<HashSet<u64>>,
+    /// `Page.setInterceptFileChooserDialog` (ADR-0032 D12). Off by default: a
+    /// page nobody is driving records no chooser.
+    intercept_file_chooser: Cell<bool>,
+    /// File-input activations waiting to be announced, as `(input, multiple)`.
+    ///
+    /// A task source rather than an immediate emit, because the announcement
+    /// has to carry a protocol handle for the input and only `Page` can mint
+    /// one.
+    pending_file_choosers: RefCell<Vec<(NodeId, bool)>>,
     /// Nesting level of the timer whose callback is currently running (0 when
     /// no timer callback is on the stack). Timers scheduled during a callback
     /// inherit `current + 1`.
@@ -755,6 +861,8 @@ impl Default for LoopHooks {
             next_timer_id: Cell::new(1),
             next_seq: Cell::new(1),
             raf_callbacks: RefCell::new(Vec::new()),
+            intercept_file_chooser: Cell::new(false),
+            pending_file_choosers: RefCell::new(Vec::new()),
             next_raf_id: Cell::new(1),
             raf_cancelled: RefCell::new(HashSet::new()),
             timer_nesting: Cell::new(0),
@@ -1164,6 +1272,23 @@ impl HostHooks for LoopHooks {
             jar.set_document_cookie(&url, cookie, std::time::SystemTime::now());
         }
     }
+
+    fn open_file_chooser(&self, input: NodeId, multiple: bool) {
+        // Only when a driver asked to see it. Without interception a headless
+        // page has no chooser, and inventing one — or blocking — would be the
+        // fake P6 forbids (ADR-0032 D12).
+        if !self.intercept_file_chooser.get() {
+            return;
+        }
+        // Queued rather than announced: the event has to carry a *protocol
+        // handle* for the input, and the handle table lives on `Page`, not
+        // here. Draining it as a task source also keeps the announcement off
+        // the stack of the click that caused it, which is what D12 means by
+        // "does not park the page".
+        self.pending_file_choosers
+            .borrow_mut()
+            .push((input, multiple));
+    }
 }
 
 /// A script deferred until after parsing, executed in document order before
@@ -1264,7 +1389,10 @@ impl CssFetcher for PageCssFetcher {
     fn fetch_css(&self, url: &url::Url) -> Result<(Vec<u8>, Option<String>, url::Url), String> {
         let out = self
             .net
-            .fetch_blocking(NetRequest::subresource(url.as_str(), self.doc_url.clone()))
+            .fetch_blocking(
+                NetRequest::subresource(url.as_str(), self.doc_url.clone())
+                    .of_type(ResourceType::Stylesheet),
+            )
             .map_err(|e| e.to_string())?;
         if out.head.status >= 400 {
             return Err(format!("@import `{url}`: HTTP {}", out.head.status));
@@ -1322,6 +1450,13 @@ pub struct Page {
     realm: QuickJsRealm,
     net: Rc<NetService>,
     net_rx: Receiver<NetEvent>,
+    /// What a `Content-Disposition: attachment` navigation does (ADR-0032 D13).
+    ///
+    /// A `RefCell` because `Browser.setDownloadBehavior` changes it at runtime;
+    /// the default is [`DownloadBehavior::Deny`].
+    download_behavior: RefCell<DownloadBehavior>,
+    /// Serial for download guids, so a driver can pair a begin with its end.
+    next_download: Cell<u64>,
     in_flight: Cell<usize>,
     pending_async: RefCell<HashMap<RequestId, AsyncScript>>,
     ordered_dynamic_ready: RefCell<BTreeMap<u64, CompletedDynamicScript>>,
@@ -1490,6 +1625,7 @@ impl Page {
             open_window_handler,
             local_storage,
             net: shared_net,
+            download_path,
         } = options;
         let viewport = viewport.unwrap_or_default();
         let screen = screen.unwrap_or_else(|| ScreenProfile::from_viewport(viewport));
@@ -1595,6 +1731,11 @@ impl Page {
             realm,
             net,
             net_rx,
+            download_behavior: RefCell::new(match download_path {
+                Some(path) => DownloadBehavior::Allow(path),
+                None => DownloadBehavior::Deny,
+            }),
+            next_download: Cell::new(1),
             in_flight: Cell::new(0),
             pending_async: RefCell::new(HashMap::new()),
             ordered_dynamic_ready: RefCell::new(BTreeMap::new()),
@@ -2375,6 +2516,17 @@ impl Page {
         };
 
         let final_url = outcome.head.final_url.clone();
+
+        // A download is a navigation that does **not** commit (ADR-0032 D13):
+        // the bytes go to disk (or nowhere) and the current document stays,
+        // which is what a browser does. Checked here rather than in `net`
+        // because it is a *navigation* rule — the same `Content-Disposition` on
+        // a subresource means nothing.
+        if let Some(download) = self.take_download(&final_url, &outcome) {
+            self.record_navigation(NavigationEventKind::Failed, url, Some(download));
+            return Ok(());
+        }
+
         self.state.set_referrer(referrer.unwrap_or_default());
         self.state
             .dom
@@ -2398,6 +2550,72 @@ impl Page {
         self.load_document(&decoded.text, wait_until)?;
         self.scroll_to_fragment(&final_url);
         Ok(())
+    }
+
+    /// Handles a response that is a download rather than a document.
+    ///
+    /// `Some(reason)` means the navigation must stop — the download was taken,
+    /// or refused. `None` means this is an ordinary document, so commit it.
+    fn take_download(&self, final_url: &str, outcome: &FetchOutcome) -> Option<String> {
+        let disposition = header_value(&outcome.head.headers, "content-disposition")
+            .map(|value| oxidepage_net::parse_content_disposition(&value))
+            .unwrap_or_default();
+        if !disposition.attachment {
+            return None;
+        }
+        let suggested = disposition
+            .filename
+            .or_else(|| filename_from_url(final_url))
+            .unwrap_or_else(|| String::from("download"));
+        let guid = format!(
+            "dl-{}",
+            self.next_download.replace(self.next_download.get() + 1)
+        );
+
+        // Announced before it is written, so a driver sees a download start
+        // even if the write then fails.
+        self.hooks.emit(PageRecord::Download(DownloadEvent {
+            guid: guid.clone(),
+            url: final_url.to_owned(),
+            suggested_filename: suggested.clone(),
+            path: None,
+            total_bytes: outcome.body.len() as u64,
+            state: DownloadState::InProgress,
+        }));
+
+        let (state, path, reason) = match &*self.download_behavior.borrow() {
+            DownloadBehavior::Deny => (
+                DownloadState::Canceled,
+                None,
+                format!(
+                    "download of `{suggested}` refused: no download directory is set for \
+                     this page (Browser.setDownloadBehavior / --download-path)"
+                ),
+            ),
+            DownloadBehavior::Allow(directory) => {
+                match write_download(directory, &suggested, &outcome.body) {
+                    Ok(written) => (
+                        DownloadState::Completed,
+                        Some(written.to_string_lossy().into_owned()),
+                        format!("download: `{suggested}` written to `{}`", written.display()),
+                    ),
+                    Err(error) => (
+                        DownloadState::Canceled,
+                        None,
+                        format!("download of `{suggested}` failed: {error}"),
+                    ),
+                }
+            }
+        };
+        self.hooks.emit(PageRecord::Download(DownloadEvent {
+            guid,
+            url: final_url.to_owned(),
+            suggested_filename: suggested,
+            path,
+            total_bytes: outcome.body.len() as u64,
+            state,
+        }));
+        Some(reason)
     }
 
     /// `history.go(delta)`. The target entry is reachable without a load iff it
@@ -2865,7 +3083,7 @@ impl Page {
         let doc_url = self.state.dom.borrow().document_url().to_owned();
         let id = self
             .net
-            .start_resource(NetRequest::subresource(&url, doc_url));
+            .start_resource(NetRequest::subresource(&url, doc_url).of_type(ResourceType::Script));
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_async.borrow_mut().insert(
             id,
@@ -2920,7 +3138,7 @@ impl Page {
         let doc_url = self.state.dom.borrow().document_url().to_owned();
         match self
             .net
-            .fetch_blocking(NetRequest::subresource(url, doc_url))
+            .fetch_blocking(NetRequest::subresource(url, doc_url).of_type(ResourceType::Script))
         {
             Ok(out) if out.head.status < 400 => {
                 let ct = header_content_type(&out.head.headers);
@@ -3197,12 +3415,22 @@ impl Page {
         // rather than receive-and-discard: the events must still be there on
         // resume, and a registered-but-undrained ready channel would spin.
         let suspended = self.suspended.get();
+        // Cloned out for the same reason `cmd_rx` is: the borrow must be
+        // released before the park. A `crossbeam` receiver clone shares the
+        // channel rather than duplicating the stream, and every clone feeds the
+        // one consumer path, `NetService::apply_decision`.
+        let decisions = self.net.decisions();
         let mut select = crossbeam_channel::Select::new();
         let net_op = (!suspended).then(|| select.recv(&self.net_rx));
         // Always registered, port or not: a `storage` write by a sibling page
         // must wake a page an embedder is driving by hand too.
         let wake_op = select.recv(&self.wake_rx);
         let cmd_op = cmd_rx.as_ref().map(|rx| select.recv(rx));
+        // A driver's decision about a paused request (ADR-0032 D3). Under the
+        // same `!suspended` gate as the net arm: resolving a pause spawns or
+        // synthesizes a response, and a frozen page must run neither. The
+        // decision stays in the channel until it resumes.
+        let decision_op = (!suspended).then(|| select.recv(&decisions));
         let op = match deadline {
             Some(deadline) => match select.select_deadline(deadline) {
                 Ok(op) => op,
@@ -3229,6 +3457,20 @@ impl Page {
             // A level trigger: the work itself is picked up by the task source
             // that owns it on the next pass.
             let _ = op.recv(&self.wake_rx);
+        } else if Some(index) == decision_op {
+            match op.recv(&decisions) {
+                Ok(command) => self.net.apply_decision(command),
+                // Unreachable: the service owns a sender for as long as the
+                // page owns the service, which is exactly what keeps a
+                // permanently-ready receiver out of this `Select`.
+                Err(_) => {
+                    debug_assert!(
+                        false,
+                        "decision channel disconnected while the page owns it"
+                    );
+                    return false;
+                }
+            }
         } else {
             let cmd_rx = cmd_rx.as_ref().expect("command op registered");
             debug_assert_eq!(Some(index), cmd_op);
@@ -3346,16 +3588,29 @@ impl Page {
     }
 
     /// The earliest moment the loop has work of its own to do: the next timer,
-    /// or the next rendering opportunity when an animation frame is pending.
+    /// the next rendering opportunity when an animation frame is pending, or the
+    /// moment a paused request gives up waiting for a decision.
+    ///
+    /// The pause deadline has to be here, not only in `drain_decisions`: an
+    /// asynchronously paused request is *nothing waiting on a clock*, so a page
+    /// whose only outstanding work is one would park until the caller's whole
+    /// budget elapsed and only then sweep. That would put the effective release
+    /// at `SUBRESOURCE_BUDGET` (30 s) rather than `DEFAULT_INTERCEPT_TIMEOUT`
+    /// (20 s) — losing the one property that constant exists for, which is
+    /// giving up *before* the driver's own command timeout (ADR-0032 D7).
     fn next_wakeup(&self) -> Option<Instant> {
         let render_at = self
             .hooks
             .has_pending_raf()
             .then(|| self.next_render_at.get());
-        [self.hooks.next_deadline(), render_at]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.hooks.next_deadline(),
+            render_at,
+            self.net.next_pause_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Whether a waiting loop must give up rather than park again.
@@ -3414,6 +3669,32 @@ impl Page {
     #[must_use]
     pub fn loop_stats(&self) -> LoopStats {
         self.stats.get()
+    }
+
+    /// Announces the file-input activations queued since the last pass
+    /// (ADR-0032 D12).
+    ///
+    /// The handle is minted **here**, not at the click: the table lives on this
+    /// type, and a driver reads the value straight back as `backendNodeId` to
+    /// adopt the element. The node id is re-validated first — it is a snapshot
+    /// taken on another turn of the loop, and a `click()` followed by a
+    /// navigation can retire it before this runs.
+    fn drain_file_choosers(&self) -> bool {
+        let queued = std::mem::take(&mut *self.hooks.pending_file_choosers.borrow_mut());
+        if queued.is_empty() {
+            return false;
+        }
+        for (input, multiple) in queued {
+            if self.state.dom.borrow().get(input).is_none() {
+                continue;
+            }
+            self.hooks.emit(PageRecord::FileChooser(FileChooserEvent {
+                input,
+                backend_node_id: self.node_handle(input).ok(),
+                multiple,
+            }));
+        }
+        true
     }
 
     /// True when the loop has nothing left to do: no timer, no pending
@@ -3552,12 +3833,19 @@ impl Page {
             progressed |= self.drain_scroll_events();
             // Payloads page script handed to an `add_binding` function.
             progressed |= self.drain_binding_events();
+            // File-input activations, announced with a protocol handle for the
+            // input (ADR-0032 D12).
+            progressed |= self.drain_file_choosers();
             // Deliver ResizeObserver/IntersectionObserver notifications. Driven
             // here (not in `update_the_rendering`, which only runs with a
             // pending rAF, nor in every microtask checkpoint) so the initial
             // delivery lands before `settle()` returns and RO-mutation chains
             // converge across loop iterations (ADR-0011).
             progressed |= self.deliver_observations();
+            // A driver's decisions about paused requests, immediately before
+            // the net events they produce (ADR-0032 D3). After the suspended
+            // early-out above, because resolving a pause runs page work.
+            progressed |= self.net.drain_decisions();
             while let Ok(event) = self.net_rx.try_recv() {
                 self.dispatch_net_event(event);
                 progressed = true;
@@ -3610,7 +3898,13 @@ impl Page {
         // Retention and observation first, before routing consumes the event.
         // This is the one point every asynchronous response passes through;
         // the synchronous path records itself inside `fetch_blocking`.
-        self.net.note_event(&event);
+        if !self.net.note_event(&event) {
+            // An auth challenge the driver said it would answer: the service
+            // re-parks the request under the same id and nothing downstream
+            // ever learns the response arrived (ADR-0032 D8).
+            self.net.begin_auth_pause(event);
+            return;
+        }
         if self.pending_async.borrow().contains_key(&id) {
             self.handle_async_script_event(id, event);
             return;
@@ -3955,7 +4249,7 @@ impl Page {
         let doc_url = self.state.dom.borrow().document_url().to_owned();
         let id = self
             .net
-            .start_resource(NetRequest::subresource(url, doc_url));
+            .start_resource(NetRequest::subresource(url, doc_url).of_type(ResourceType::Image));
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_images.borrow_mut().insert(
             id,
@@ -4128,6 +4422,9 @@ impl Page {
                     self.net.finish(id);
                 }
             }
+            // Consumed by the net service before routing (ADR-0032 D8), so
+            // this is unreachable rather than merely unhandled.
+            NetEvent::AuthRequired { .. } => {}
         }
     }
 
@@ -4273,7 +4570,7 @@ impl Page {
             let doc_url = self.state.dom.borrow().document_url().to_owned();
             let id = self
                 .net
-                .start_resource(NetRequest::subresource(url, doc_url));
+                .start_resource(NetRequest::subresource(url, doc_url).of_type(ResourceType::Font));
             self.in_flight.set(self.in_flight.get() + 1);
             self.pending_fonts.borrow_mut().insert(
                 id,
@@ -4333,6 +4630,9 @@ impl Page {
                     self.settle_font_ready();
                 }
             }
+            // Consumed by the net service before routing (ADR-0032 D8), so
+            // this is unreachable rather than merely unhandled.
+            NetEvent::AuthRequired { .. } => {}
         }
     }
 
@@ -4457,6 +4757,9 @@ impl Page {
                     }
                 }
             }
+            // Consumed by the net service before routing (ADR-0032 D8), so
+            // this is unreachable rather than merely unhandled.
+            NetEvent::AuthRequired { .. } => {}
         }
     }
 
@@ -4622,9 +4925,9 @@ impl Page {
             return;
         }
 
-        let id = self
-            .net
-            .start_resource(NetRequest::subresource(&url, doc_url));
+        let id = self.net.start_resource(
+            NetRequest::subresource(&url, doc_url).of_type(ResourceType::Stylesheet),
+        );
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_stylesheets
             .set(self.pending_stylesheets.get() + 1);
@@ -4746,6 +5049,9 @@ impl Page {
                     self.fire_element_event(pending.node, "error");
                 }
             }
+            // Consumed by the net service before routing (ADR-0032 D8), so
+            // this is unreachable rather than merely unhandled.
+            NetEvent::AuthRequired { .. } => {}
         }
     }
 
@@ -4941,6 +5247,119 @@ impl Page {
     #[must_use]
     pub fn dialog_open_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.hooks.dialog_open)
+    }
+
+    /// `Page.setInterceptFileChooserDialog` (ADR-0032 D12).
+    pub fn set_intercept_file_chooser(&self, intercept: bool) {
+        self.hooks.intercept_file_chooser.set(intercept);
+    }
+
+    /// Whether an embedder is listening to this page's events.
+    ///
+    /// The precondition for request interception: `set_event_sink(None)` also
+    /// removes the net observer, so a pause could never be *announced* and
+    /// every matching request would wait out the whole timeout with nobody able
+    /// to release it. `Fetch.enable` refuses rather than accepting a switch it
+    /// knows cannot work.
+    #[must_use]
+    pub fn has_event_sink(&self) -> bool {
+        self.hooks.event_sink.borrow().is_some()
+    }
+
+    /// `DOM.setFileInputFiles`: selects `paths` into an `<input type=file>`
+    /// (ADR-0032 D11).
+    ///
+    /// Reads through `std::fs`, **not** `net::file::load_file`. That helper is
+    /// gated on `ResourcePolicy::allow_file` — off by default — and is about
+    /// *page-initiated* loads. A driver setting file inputs is the operator, so
+    /// conflating the two would either break this command on every default
+    /// policy or silently widen the page's own `file://` reach.
+    ///
+    /// The whole file is read into memory: the same is already true of every
+    /// response the net stack produces, and a form post has to buffer the body
+    /// regardless.
+    pub fn set_file_input_files(&self, input: NodeId, paths: &[String]) -> Result<(), JsError> {
+        if !self.state.dom.borrow().is_file_input(input) {
+            return Err(JsError::Engine(String::from(
+                "setFileInputFiles: the node is not an <input type=file>",
+            )));
+        }
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let path = std::path::Path::new(path);
+            let bytes = std::fs::read(path).map_err(|e| {
+                JsError::Engine(format!("setFileInputFiles: `{}`: {e}", path.display()))
+            })?;
+            let name = path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or_default()
+                .to_owned();
+            let last_modified = std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| {
+                    i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+                });
+            files.push(oxidepage_dom::SelectedFile {
+                content_type: mime_for_path(&name),
+                name,
+                bytes: std::rc::Rc::new(bytes),
+                last_modified,
+            });
+        }
+        // Through the `DomTree` primitive, so the one invalidation code path is
+        // preserved: `:valid`/`:invalid` on a `required` file input turn on
+        // whether this list is empty.
+        if !self.state.dom.borrow_mut().set_selected_files(input, files) {
+            return Err(JsError::Engine(String::from(
+                "setFileInputFiles: the node is not an <input type=file>",
+            )));
+        }
+        // Trusted `input` then `change`, in that order — what a user selecting
+        // files produces, and what every upload widget listens for.
+        // Trusted, because the *driver* caused them — the same boundary
+        // ADR-0023 drew for synthetic input. A throw from a listener is
+        // reported, not propagated: the files are already selected, and failing
+        // the command would tell the driver its selection did not happen.
+        self.with_cx(|cx| {
+            for name in ["input", "change"] {
+                if let Err(e) = oxidepage_bindings::fire_trusted_event(cx, input, name, true, false)
+                {
+                    report_throw(&self.hooks, e);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// `Browser.setDownloadBehavior` (ADR-0032 D13).
+    ///
+    /// `Deny` is the default and the honest one: with no directory to write to,
+    /// a download can only be refused, and parsing an attachment as HTML — what
+    /// the engine used to do — silently replaced the document with the bytes of
+    /// a PDF.
+    pub fn set_download_behavior(&self, behavior: DownloadBehavior) {
+        *self.download_behavior.borrow_mut() = behavior;
+    }
+
+    /// What an attachment navigation currently does.
+    #[must_use]
+    pub fn download_behavior(&self) -> DownloadBehavior {
+        self.download_behavior.borrow().clone()
+    }
+
+    /// A driver's handle on this page's request interception (ADR-0032 D2).
+    ///
+    /// `Send`, unlike everything else about a page: the config behind it is a
+    /// `Mutex` and the decisions travel on a channel, precisely so a driver
+    /// thread can turn interception on and resolve a pause without a round trip
+    /// through the command port — which would deadlock against the very
+    /// navigation whose document fetch is paused.
+    #[must_use]
+    pub fn intercept(&self) -> oxidepage_net::InterceptControl {
+        self.net.intercept()
     }
 
     /// Installs (or removes) the handler that opens sibling browsing contexts
@@ -5172,10 +5591,141 @@ fn format_from_ext(url: &str) -> Option<oxidepage_style::FontFormatHint> {
 
 /// Extracts the `Content-Type` header value from a header list.
 fn header_content_type(headers: &[(String, String)]) -> Option<String> {
+    header_value(headers, "content-type")
+}
+
+/// A header value by case-insensitive name.
+fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
     headers
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.clone())
+}
+
+/// A MIME type guessed from a filename extension.
+///
+/// Deliberately a short table rather than a dependency: the caller is an
+/// embedder command, the value lands in a multipart `Content-Type`, and
+/// `application/octet-stream` is the correct answer for anything unrecognised
+/// — the Fetch multipart serializer says so.
+fn mime_for_path(name: &str) -> String {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match extension.as_str() {
+        "txt" | "text" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "csv" => "text/csv",
+        "js" | "mjs" => "text/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        _ => "application/octet-stream",
+    };
+    mime.to_owned()
+}
+
+/// The last path segment of a URL, as a filename.
+fn filename_from_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let last = parsed.path_segments()?.next_back()?;
+    // Percent-decoded so `my%20report.pdf` lands as `my report.pdf`, and
+    // re-sanitized because decoding can reintroduce a separator.
+    let decoded = percent_decode_path(last);
+    oxidepage_net::sanitize_filename(&decoded)
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3])
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Writes a download into `directory`, without overwriting anything.
+///
+/// The filename is attacker-influenced, so this is defended twice: `net`'s
+/// [`oxidepage_net::sanitize_filename`] has already removed every path
+/// separator, and the joined path is checked to still be *inside* the directory
+/// before a byte is written. A name that is already taken gets a ` (n)` suffix
+/// rather than replacing the file — a page must not be able to overwrite an
+/// earlier download by naming it.
+fn write_download(
+    directory: &std::path::Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    // `std::fs`, deliberately, not `net::file::load_file`: that is gated on
+    // `ResourcePolicy::allow_file` and is about *page-initiated* loads. A
+    // download directory is the operator's choice, and conflating the two
+    // would either break this or silently widen the page's own `file://`
+    // reach (ADR-0032 D11's reasoning, applied the other way round).
+    std::fs::create_dir_all(directory)
+        .map_err(|e| format!("cannot create `{}`: {e}", directory.display()))?;
+    let canonical = directory
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve `{}`: {e}", directory.display()))?;
+
+    let (stem, extension) = match filename.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+        _ => (filename, String::new()),
+    };
+    for attempt in 0..MAX_DOWNLOAD_NAME_ATTEMPTS {
+        let candidate = if attempt == 0 {
+            filename.to_owned()
+        } else {
+            format!("{stem} ({attempt}){extension}")
+        };
+        let path = canonical.join(&candidate);
+        // The separator strip should make this unreachable; it is here because
+        // "should" is not a security property.
+        if path.parent() != Some(canonical.as_path()) {
+            return Err(String::from("the download filename escaped the directory"));
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(bytes)
+                    .map_err(|e| format!("cannot write `{}`: {e}", path.display()))?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("cannot create `{}`: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "`{filename}` and its first {MAX_DOWNLOAD_NAME_ATTEMPTS} alternatives are all taken"
+    ))
 }
 
 /// Extracts the `charset` parameter from a `Content-Type` value.

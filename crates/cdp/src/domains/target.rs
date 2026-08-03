@@ -201,6 +201,12 @@ fn close_target(connection: &Arc<Connection>, request: &Request) -> CommandResul
     let Some(page) = connection.registry.page(&params.target_id) else {
         return Err(ProtocolError::no_target(&params.target_id));
     };
+    // Before `close`, not after (ADR-0032 D7): a page parked on a *blocking*
+    // pause — the top-level document's — services no ordinary job and answers
+    // `close` only at its next wait point, so a close sent while the driver
+    // still holds that pause would sit out the whole intercept timeout.
+    // Releasing first lets the load finish and the close land immediately.
+    page.release_paused_requests();
     page.close();
     // The pump also removes the target when the stream ends; doing it here too
     // makes `closeTarget` synchronous from the driver's point of view, and

@@ -320,6 +320,14 @@ async fn drive(
         }
     }
 
+    // Before anything else: the driver is gone, so nothing will ever answer the
+    // requests its sessions hold paused, and the pages holding them would sit
+    // for the whole intercept timeout. The decision channel cannot signal this
+    // itself — the page owns a sender, deliberately, so that a receiver whose
+    // only sender lived here could never become permanently ready in the event
+    // loop's `Select` (ADR-0032 D2, D7).
+    connection.release_all_interception();
+
     // Order matters. Unsubscribing first disconnects the event thread's
     // receiver so it returns from `recv()`; only then can the last `Arc` on the
     // connection drop, which drops the outbound sender (ending the writer) and

@@ -1882,7 +1882,9 @@ fn xhr_response_types() {
     );
     assert_eq!(page.eval_to_string("window.plainXml").unwrap(), "null");
 
-    // The enumerated setter, `"blob"` included, and the two throwing getters.
+    // The enumerated setter and the two throwing getters. `"blob"` is a
+    // supported value as of ADR-0032 Phase 4 — it was the one member of the
+    // enumeration this engine had no type for.
     page.eval(
         "(() => {
             const name = fn => { try { fn(); return 'no-throw'; }
@@ -1891,7 +1893,7 @@ fn xhr_response_types() {
             x.responseType = 'json';
             x.responseType = 'nonsense';   // outside the enumeration: ignored
             window.afterNonsense = x.responseType;
-            x.responseType = 'blob';       // unsupported: leaves the previous value
+            x.responseType = 'blob';       // now a real type, so it takes
             window.afterBlob = x.responseType;
             window.textThrows = name(() => x.responseText);
             window.xmlThrows = name(() => x.responseXML);
@@ -1907,7 +1909,7 @@ fn xhr_response_types() {
     )
     .unwrap();
     assert_eq!(page.eval_to_string("window.afterNonsense").unwrap(), "json");
-    assert_eq!(page.eval_to_string("window.afterBlob").unwrap(), "json");
+    assert_eq!(page.eval_to_string("window.afterBlob").unwrap(), "blob");
     assert_eq!(
         page.eval_to_string("window.textThrows").unwrap(),
         "InvalidStateError"

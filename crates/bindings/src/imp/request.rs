@@ -147,12 +147,24 @@ pub(crate) fn constructor(
                     "Request with GET/HEAD method cannot have body".into(),
                 ));
             }
-            body = Some(
-                cx.scope
-                    .coerce_string(&b)
-                    .map_err(JsThrow::from)?
-                    .into_bytes(),
-            );
+            // Through the shared extractor, as `fetch()` and `xhr.send()` do.
+            // This used to `coerce_string` the value, so `new Request(url, {
+            // body: formData })` put the literal text `[object FormData]` on
+            // the wire — and the same for a `Blob`, a `URLSearchParams` and an
+            // `ArrayBuffer`. Silent, and indistinguishable from a server bug.
+            if let Some(extracted) = crate::imp::body::extract(cx, &b)? {
+                // The body's own `Content-Type` loses to one the caller set —
+                // but for `FormData` it is the only place the multipart
+                // boundary can come from, so it must not simply be dropped.
+                if let Some(content_type) = extracted.content_type
+                    && !header_pairs
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                {
+                    header_pairs.push(("content-type".to_owned(), content_type));
+                }
+                body = Some(extracted.bytes);
+            }
         }
     }
 

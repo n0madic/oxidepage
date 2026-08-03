@@ -2,7 +2,8 @@
 //! (ADR-0027 D6).
 
 use oxidepage_page::{
-    ConsoleMessage, DialogEvent, DialogRequest, NavigationEvent, PageRecord, ScriptError,
+    ConsoleMessage, DialogEvent, DialogRequest, DownloadEvent, FileChooserEvent, NavigationEvent,
+    PageRecord, ScriptError,
 };
 
 /// One thing a page did, delivered over [`PageHandle::events`].
@@ -33,6 +34,19 @@ pub enum PageEvent {
     },
     /// One step of a network request's life (ADR-0030).
     Network(oxidepage_page::NetworkEvent),
+    /// An `<input type=file>` was activated with
+    /// `Page.setInterceptFileChooserDialog` on (ADR-0032 D12).
+    ///
+    /// Unlike a dialog the page is **not** parked: answer with
+    /// [`PageHandle::set_file_input_files`](crate::PageHandle::set_file_input_files)
+    /// whenever convenient, or not at all.
+    FileChooser(FileChooserEvent),
+    /// A `Content-Disposition: attachment` navigation (ADR-0032 D13).
+    ///
+    /// Two per download: one as it begins, one when it has been written or
+    /// refused. A refused download still reports both — a driver that asked for
+    /// one and got silence cannot tell a refusal from a broken link.
+    Download(DownloadEvent),
     /// A sibling called `w.focus()` on this page.
     ///
     /// Reported rather than acted on: focusing a browsing context means
@@ -67,6 +81,8 @@ impl PageEvent {
             PageRecord::Dialog(event) => Self::Dialog(event),
             PageRecord::Binding { name, payload } => Self::Binding { name, payload },
             PageRecord::Network(event) => Self::Network(event),
+            PageRecord::FileChooser(event) => Self::FileChooser(event),
+            PageRecord::Download(event) => Self::Download(event),
         }
     }
 }

@@ -17,11 +17,12 @@
 //! it blocks only the page thread while tokio workers deliver the bytes.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
@@ -45,7 +46,12 @@ use crate::client::HttpClient;
 use crate::cookies::CookieJar;
 use crate::error::{NetError, NetResult};
 use crate::fetch::{
-    FetchEngine, FetchOutcome, NetRequest, RequestDefaults, ResponseType, SharedFetchParts,
+    FetchEngine, FetchOutcome, NetRequest, RequestDefaults, ResourceType, ResponseHead,
+    ResponseType, SharedFetchParts, basic_auth_header, parse_auth_challenge,
+};
+use crate::intercept::{
+    AuthChallenge, AuthResponse, AuthSource, DEFAULT_INTERCEPT_TIMEOUT, FulfilledResponse,
+    InterceptCommand, InterceptControl, RequestOverrides,
 };
 use crate::policy::ResourcePolicy;
 use crate::record::{NetworkEvent, RequestLog};
@@ -69,6 +75,19 @@ pub enum NetEvent {
     Done { id: RequestId },
     /// The request failed.
     Error { id: RequestId, error: NetError },
+    /// **Internal.** A spawned fetch met an auth challenge the driver said it
+    /// would answer (ADR-0032 D8). Carries the response *unstated* so
+    /// `Default`/`CancelAuth` can deliver it unchanged, and the request so
+    /// `ProvideCredentials` can re-issue it under the same id.
+    ///
+    /// [`NetService::note_event`] consumes this and answers `false`; it never
+    /// reaches a consumer, which is why no `dispatch_net_event` arm handles it.
+    AuthRequired {
+        id: RequestId,
+        challenge: Box<AuthChallenge>,
+        outcome: Box<FetchOutcome>,
+        request: Box<NetRequest>,
+    },
 }
 
 impl NetEvent {
@@ -79,7 +98,8 @@ impl NetEvent {
             NetEvent::Headers { id, .. }
             | NetEvent::Chunk { id, .. }
             | NetEvent::Done { id, .. }
-            | NetEvent::Error { id, .. } => *id,
+            | NetEvent::Error { id, .. }
+            | NetEvent::AuthRequired { id, .. } => *id,
         }
     }
 }
@@ -252,17 +272,95 @@ pub struct NetService {
     /// then failed (an `xhr.abort()` after the response landed), nor fail twice,
     /// nor — the direction a plain "did headers arrive" test misses — vanish
     /// with no terminal event at all when it is aborted *before* its headers.
-    open: RefCell<HashMap<RequestId, String>>,
+    open: RefCell<HashMap<RequestId, OpenRequest>>,
     /// Told about every request's progress, when an embedder wants to know.
     ///
     /// `Rc`, not `Arc`: the service lives on the page thread and so does the
     /// observer. Nothing here crosses a thread — the driver side receives this
     /// as a `PageEvent`, which the page's own bus already carries.
     observer: RefCell<Option<NetObserver>>,
+    /// The interception state a driver shares with this page (ADR-0032 D2).
+    ///
+    /// The service holding it is what keeps [`NetService::decisions`] from ever
+    /// disconnecting: a disconnected `Receiver` is permanently *ready* in the
+    /// event loop's `Select`, so a channel whose only sender lived on the
+    /// driver side would turn the one park into a pegged core the moment the
+    /// driver went away.
+    intercept: InterceptControl,
+    decisions: Receiver<InterceptCommand>,
+    /// Asynchronously paused requests, parked here rather than spawned.
+    ///
+    /// Parked **before** `pool.handle().spawn`: the concurrency permit is taken
+    /// inside the spawned task, so sixteen requests paused after the spawn
+    /// would starve every unpaused request on the page (ADR-0032 D1).
+    paused: RefCell<HashMap<RequestId, Pause>>,
+    /// Decisions for *other* requests that arrived while the page thread was
+    /// parked inside a blocking fetch. Applied at the top of the event loop,
+    /// because applying one there would spawn or synthesize under the `dom`
+    /// and `style` borrows the blocking caller holds (ADR-0032 D3).
+    deferred: RefCell<VecDeque<InterceptCommand>>,
+    /// Credential attempts already spent per request, carried across the
+    /// re-issue so a re-challenge cannot loop (see [`MAX_AUTH_ATTEMPTS`]).
+    ///
+    /// Separate from [`NetService::paused`] because the count has to survive
+    /// the window where the request is *not* parked — it is in flight on a
+    /// tokio worker, having been resumed by `continueWithAuth`.
+    retry_auth: RefCell<HashMap<RequestId, u32>>,
 }
+
+/// A request held at the pause point.
+struct Pause {
+    kind: PauseKind,
+    /// When this pause gives up and proceeds unmodified.
+    ///
+    /// The asynchronous half needs this stored, because — unlike the blocking
+    /// half, which parks on `recv_deadline` — nothing here is waiting on a
+    /// clock. Without it a driver that goes quiet while holding the socket open
+    /// leaves the request with **no terminal event at all**: `in_flight` never
+    /// returns to zero, `is_idle` is false forever, and every later `settle`
+    /// burns its whole budget (ADR-0032 D7).
+    deadline: Instant,
+}
+
+enum PauseKind {
+    /// Held before it was sent.
+    Request(Box<NetRequest>),
+    /// Held *after* a 401/407 the driver said it would answer. The response is
+    /// stashed so `Default`/`CancelAuth` deliver it unchanged (ADR-0032 D8).
+    Auth {
+        request: Box<NetRequest>,
+        outcome: Box<FetchOutcome>,
+        /// Which side asked, so the credentials go in `Authorization` for a 401
+        /// and `Proxy-Authorization` for a 407.
+        source: AuthSource,
+        /// Credentials already tried. A driver that answers
+        /// `ProvideCredentials` to a server that keeps refusing them would
+        /// otherwise loop forever — re-issue, 401, re-pause, re-issue — with no
+        /// terminal event and a request per round trip.
+        attempts: u32,
+    },
+}
+
+/// How many times one request may be re-issued with credentials.
+///
+/// One retry is what a browser does and what the blocking half already did; the
+/// async half needs the count stored because its retry goes back through the
+/// same pause map rather than through a straight-line function.
+const MAX_AUTH_ATTEMPTS: u32 = 1;
 
 /// A callback told about each request's progress.
 pub type NetObserver = Rc<dyn Fn(NetworkEvent)>;
+
+/// What [`NetService::open`] remembers about a request still in flight.
+#[derive(Clone, Debug, Default)]
+struct OpenRequest {
+    /// The response's `Content-Type`, once headers have arrived — so the body
+    /// can be classified text-or-bytes when it lands.
+    content_type: String,
+    /// What the request was for. Carried here so a `Responded`/`Failed` can
+    /// repeat it without the observer having to remember the `Requested`.
+    resource_type: ResourceType,
+}
 
 impl NetService {
     /// Builds a service over `policy`, returning it plus the receiver the
@@ -312,6 +410,7 @@ impl NetService {
             request_defaults,
         );
         let (tx, rx) = crossbeam_channel::unbounded();
+        let (intercept, decisions) = InterceptControl::new();
         (
             Self {
                 pool,
@@ -325,6 +424,11 @@ impl NetService {
                 log: RefCell::new(RequestLog::default()),
                 open: RefCell::new(HashMap::new()),
                 observer: RefCell::new(None),
+                intercept,
+                decisions,
+                paused: RefCell::new(HashMap::new()),
+                deferred: RefCell::new(VecDeque::new()),
+                retry_auth: RefCell::new(HashMap::new()),
             },
             rx,
         )
@@ -396,8 +500,8 @@ impl NetService {
     ///
     /// The single gate on every terminal event: a request reports `Finished` or
     /// `Failed` once, or not at all.
-    fn close(&self, id: RequestId) -> bool {
-        self.open.borrow_mut().remove(&id).is_some()
+    fn close(&self, id: RequestId) -> Option<OpenRequest> {
+        self.open.borrow_mut().remove(&id)
     }
 
     /// Announces an outgoing request and starts its record.
@@ -406,12 +510,19 @@ impl NetService {
         // headers arrive still owes the observer a terminal event, and the
         // driver's in-flight count — hence every `networkidle` wait — never
         // settles without one.
-        self.open.borrow_mut().insert(id, String::new());
+        self.open.borrow_mut().insert(
+            id,
+            OpenRequest {
+                content_type: String::new(),
+                resource_type: request.resource_type,
+            },
+        );
         self.notify(NetworkEvent::Requested {
             id,
             url: request.url.clone(),
             method: request.method.clone(),
             headers: request.headers.clone(),
+            resource_type: request.resource_type,
             timestamp: epoch_ms(),
         });
     }
@@ -424,9 +535,10 @@ impl NetService {
     /// the async path alone misses exactly the request a driver cares most
     /// about.
     fn note_blocking_outcome(&self, id: RequestId, outcome: &NetResult<FetchOutcome>) {
-        if !self.close(id) {
+        let Some(open) = self.close(id) else {
             return;
-        }
+        };
+        let resource_type = open.resource_type;
         match outcome {
             Ok(FetchOutcome { head, body }) => {
                 let content_type = header_value(&head.headers, "content-type");
@@ -440,6 +552,7 @@ impl NetService {
                     headers: head.headers.clone(),
                     final_url: head.final_url.clone(),
                     mime_type: mime_of(&content_type),
+                    resource_type,
                     timestamp: epoch_ms(),
                 });
                 self.notify(NetworkEvent::Finished {
@@ -451,6 +564,7 @@ impl NetService {
             Err(error) => self.notify(NetworkEvent::Failed {
                 id,
                 error: error.to_string(),
+                resource_type,
                 timestamp: epoch_ms(),
             }),
         }
@@ -462,7 +576,11 @@ impl NetService {
     /// one place every async response passes through. Doing it inside
     /// `spawn_fetch` is not possible: that runs on a tokio worker, and the log
     /// and observer belong to the page thread.
-    pub fn note_event(&self, event: &NetEvent) {
+    ///
+    /// Reports `false` when the service consumed the event itself, which the
+    /// caller must take as "do not route this any further". Only the internal
+    /// [`NetEvent::AuthRequired`] answers that way.
+    pub fn note_event(&self, event: &NetEvent) -> bool {
         match event {
             NetEvent::Headers {
                 id,
@@ -473,15 +591,16 @@ impl NetService {
                 ..
             } => {
                 let content_type = header_value(headers, "content-type");
-                {
+                let resource_type = {
                     // Only if still open: a response that lands after the page
                     // aborted the request has already reported its outcome.
                     let mut open = self.open.borrow_mut();
                     let Some(slot) = open.get_mut(id) else {
-                        return;
+                        return true;
                     };
-                    slot.clone_from(&content_type);
-                }
+                    slot.content_type.clone_from(&content_type);
+                    slot.resource_type
+                };
                 self.notify(NetworkEvent::Responded {
                     id: *id,
                     status: *status,
@@ -489,6 +608,7 @@ impl NetService {
                     headers: headers.clone(),
                     final_url: final_url.clone(),
                     mime_type: mime_of(&content_type),
+                    resource_type,
                     timestamp: epoch_ms(),
                 });
             }
@@ -496,9 +616,9 @@ impl NetService {
                 // Taken, not read: `Done` uses the entry's absence to tell a
                 // body that already reported `Finished` from one that never
                 // produced a chunk at all.
-                let content_type = self.open.borrow_mut().remove(id);
-                let Some(content_type) = content_type else {
-                    return;
+                let open = self.open.borrow_mut().remove(id);
+                let Some(OpenRequest { content_type, .. }) = open else {
+                    return true;
                 };
                 // Exactly one chunk carries the whole body today, so this is a
                 // retain rather than an append. If chunking ever becomes real,
@@ -518,7 +638,7 @@ impl NetService {
                 // HEAD or a bodyless 404 can be closed out. Without this the
                 // driver counts the request in flight forever and every
                 // `networkidle` wait hangs.
-                if self.close(*id) {
+                if self.close(*id).is_some() {
                     self.notify(NetworkEvent::Finished {
                         id: *id,
                         encoded_len: 0,
@@ -527,25 +647,110 @@ impl NetService {
                 }
             }
             NetEvent::Error { id, error } => {
-                if self.close(*id) {
+                if let Some(open) = self.close(*id) {
                     self.notify(NetworkEvent::Failed {
                         id: *id,
                         error: error.to_string(),
+                        resource_type: open.resource_type,
                         timestamp: epoch_ms(),
                     });
                 }
             }
+            // Not a milestone but a *second pause* under the same id (ADR-0032
+            // D8), reusing the same map, the same release paths and the same
+            // timeout as the first one. Nothing downstream ever sees it.
+            NetEvent::AuthRequired { .. } => return false,
         }
+        true
+    }
+
+    /// Parks a request that met an auth challenge, taking the internal event
+    /// apart. Separate from [`NetService::note_event`] only because the event
+    /// is borrowed there and this needs to own the pieces.
+    pub fn begin_auth_pause(&self, event: NetEvent) {
+        let NetEvent::AuthRequired {
+            id,
+            challenge,
+            outcome,
+            request,
+        } = event
+        else {
+            return;
+        };
+        // Aborted while the fetch was in flight: nothing is owed, and re-parking
+        // would strand the request until the timeout.
+        if self.open.borrow().get(&id).is_none() {
+            return;
+        }
+        let attempts = self.retry_auth.borrow().get(&id).copied().unwrap_or(0);
+        // The challenge's *source* is kept, not just announced: a 407 wants
+        // `Proxy-Authorization` and a 401 wants `Authorization`, and answering
+        // a proxy into the wrong header is refused by every proxy there is —
+        // which is the whole reason `AuthSource` has two variants.
+        let source = challenge.source;
+        self.announce_auth(id, &request, &challenge);
+        self.park(
+            id,
+            PauseKind::Auth {
+                request,
+                outcome,
+                source,
+                attempts,
+            },
+        );
     }
 
     fn spawn_fetch(&self, request: NetRequest) -> RequestId {
         let id = self.next_request_id();
         self.note_request(id, &request);
+        if self.is_offline_for(&request) {
+            // Reported asynchronously, like any other failure: the caller has
+            // already stored its `pending_*` state under this id and expects
+            // exactly one terminal `NetEvent` for it.
+            let _ = self.tx.send(NetEvent::Error {
+                id,
+                error: offline_error(),
+            });
+            return id;
+        }
+        if self.intercepts(&request) {
+            self.announce_pause(id, &request);
+            self.park(id, PauseKind::Request(Box::new(request)));
+            return id;
+        }
+        self.spawn_fetch_with(id, request);
+        id
+    }
+
+    /// Parks a request at the pause point with its give-up deadline.
+    fn park(&self, id: RequestId, kind: PauseKind) {
+        self.paused.borrow_mut().insert(
+            id,
+            Pause {
+                kind,
+                deadline: Instant::now() + DEFAULT_INTERCEPT_TIMEOUT,
+            },
+        );
+    }
+
+    /// Sends a request that already has an id and an announced record.
+    ///
+    /// Split out of [`NetService::spawn_fetch`] so a *resumed* request does not
+    /// re-`note_request` and hand the observer a second `requestWillBeSent` for
+    /// one request — which a driver reads as two, and never balances.
+    fn spawn_fetch_with(&self, id: RequestId, request: NetRequest) {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.borrow_mut().insert(id, Arc::clone(&cancel));
         let engine = self.engine.clone();
         let tx = self.tx.clone();
         let sem = Arc::clone(&self.sem);
+        let latency = self.intercept.config().latency;
+        // Auth is answered only for requests the driver actually asked to
+        // intercept — the same predicate the blocking half applies. Gating on
+        // `handle_auth` alone would raise `Fetch.authRequired` for requests
+        // outside the driver's patterns, and a driver that answers only its own
+        // would leave each of those paused until the timeout.
+        let handle_auth = self.intercepts(&request) && self.intercept.config().handle_auth;
         self.pool.handle().spawn(async move {
             if cancel.load(Ordering::Relaxed) {
                 return;
@@ -558,22 +763,37 @@ impl NetService {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
+            // Emulated latency sleeps *outside* `FetchEngine::fetch`, which
+            // wraps the whole request in `timeout(request_timeout)` — charging
+            // the delay to the request budget would make a 5 s latency turn
+            // every request into a timeout (ADR-0032 D9).
+            if !latency.is_zero() {
+                tokio::time::sleep(latency).await;
+            }
+            // Kept only when it may be needed again: `continueWithAuth`
+            // re-issues the same request under the same id, and
+            // `FetchEngine::fetch` consumes it. The clone is why the predicate
+            // above is narrow — it duplicates the body, and a large POST is
+            // exactly the request a driver is least likely to be intercepting.
+            let retry = handle_auth.then(|| request.clone());
             match engine.fetch(request).await {
                 Ok(out) if !cancel.load(Ordering::Relaxed) => {
-                    let FetchOutcome { head, body } = out;
-                    let _ = tx.send(NetEvent::Headers {
-                        id,
-                        status: head.status,
-                        status_text: head.status_text,
-                        headers: head.headers,
-                        final_url: head.final_url,
-                        redirected: head.redirected,
-                        response_type: head.response_type,
-                    });
-                    if !body.is_empty() && !cancel.load(Ordering::Relaxed) {
-                        let _ = tx.send(NetEvent::Chunk { id, data: body });
+                    if let Some(retry) = retry
+                        && let Some(challenge) = parse_auth_challenge(
+                            &out.head.headers,
+                            out.head.status,
+                            &out.head.final_url,
+                        )
+                    {
+                        let _ = tx.send(NetEvent::AuthRequired {
+                            id,
+                            challenge: Box::new(challenge),
+                            outcome: Box::new(out),
+                            request: Box::new(retry),
+                        });
+                        return;
                     }
-                    let _ = tx.send(NetEvent::Done { id });
+                    emit_outcome(&tx, id, out);
                 }
                 Ok(_) => {} // cancelled after completion; drop silently
                 Err(error) if !cancel.load(Ordering::Relaxed) => {
@@ -582,12 +802,289 @@ impl NetService {
                 Err(_) => {}
             }
         });
-        id
+    }
+
+    // === the pause point (ADR-0032 D1–D3) ===
+
+    /// The driver's handle on this page's interception.
+    #[must_use]
+    pub fn intercept(&self) -> InterceptControl {
+        self.intercept.clone()
+    }
+
+    /// A clone of the decision receiver, for the event loop's `Select`.
+    ///
+    /// Cloning a `crossbeam` receiver *splits* the stream rather than
+    /// duplicating it, which is exactly right: every clone feeds the same one
+    /// consumer path — [`NetService::apply_decision`].
+    #[must_use]
+    pub fn decisions(&self) -> Receiver<InterceptCommand> {
+        self.decisions.clone()
+    }
+
+    /// Whether emulated offline mode fails this request.
+    ///
+    /// **`http`/`https` only**, exactly like the pause gate below and for the
+    /// same reason: `fetch_inner` answers `file://` and `data:` above the scheme
+    /// gate (ADR-0029), and neither involves a network. Chrome resolves a
+    /// `data:` URL with the network disabled — it is bytes already in hand —
+    /// so failing one here would break every inline script, module, stylesheet
+    /// and `fetch` under `emulateNetworkConditions { offline: true }`, which is
+    /// precisely the emulation a driver reaches for to test an *offline* page.
+    fn is_offline_for(&self, request: &NetRequest) -> bool {
+        is_http_scheme(&request.url) && self.intercept.config().offline
+    }
+
+    /// Whether this request pauses.
+    ///
+    /// **`http`/`https` only.** `fetch_inner` answers `file://` and `data:`
+    /// above the scheme gate (ADR-0029), and a driver stores no request record
+    /// for a `data:` URL — so a pause announced for one is never continued, and
+    /// every inline image, font and module would hang until the timeout.
+    fn intercepts(&self, request: &NetRequest) -> bool {
+        if !is_http_scheme(&request.url) {
+            return false;
+        }
+        self.intercept
+            .config()
+            .matches(&request.url, request.resource_type)
+    }
+
+    /// Marks `id` paused and tells the observer, in that order.
+    fn announce_pause(&self, id: RequestId, request: &NetRequest) {
+        self.intercept.config().paused.insert(id);
+        // Announced with the borrow released: an observer that resolves the
+        // pause synchronously (a test, an in-process driver) re-enters here.
+        self.notify(NetworkEvent::Paused {
+            id,
+            url: request.url.clone(),
+            method: request.method.clone(),
+            headers: request.headers.clone(),
+            resource_type: request.resource_type,
+            timestamp: epoch_ms(),
+        });
+    }
+
+    fn announce_auth(&self, id: RequestId, request: &NetRequest, challenge: &AuthChallenge) {
+        self.intercept.config().paused.insert(id);
+        self.notify(NetworkEvent::AuthRequired {
+            id,
+            url: request.url.clone(),
+            challenge: challenge.clone(),
+            resource_type: request.resource_type,
+            timestamp: epoch_ms(),
+        });
+    }
+
+    /// Applies every decision that has arrived, deferred ones first.
+    ///
+    /// Called at the top of the event loop and after each `Select` wake-up.
+    /// Reports whether anything ran, so the loop counts it as progress.
+    pub fn drain_decisions(&self) -> bool {
+        let mut ran = false;
+        loop {
+            let deferred = self.deferred.borrow_mut().pop_front();
+            let Some(command) = deferred else {
+                break;
+            };
+            self.apply_decision(command);
+            ran = true;
+        }
+        while let Ok(command) = self.decisions.try_recv() {
+            self.apply_decision(command);
+            ran = true;
+        }
+        ran | self.release_expired_pauses()
+    }
+
+    /// Releases every pause whose deadline has passed (ADR-0032 D7).
+    ///
+    /// The asynchronous half's backstop. The blocking half gets this from
+    /// `recv_deadline`; here nothing is waiting on a clock, so the sweep has to
+    /// be explicit — and without it a driver that goes quiet while holding the
+    /// socket open leaves a request with no terminal event at all, which is the
+    /// exact failure ADR-0030 D5 records as having twice cost a driver.
+    ///
+    /// Swept rather than timer-driven because the event loop already runs this
+    /// on every pass, and a paused request is not something to wake a parked
+    /// page for: the page has other reasons to be idle, and the release only
+    /// has to be eventual.
+    fn release_expired_pauses(&self) -> bool {
+        let now = Instant::now();
+        // Collected before resolving: `apply_decision` takes the same borrow.
+        let expired: Vec<RequestId> = self
+            .paused
+            .borrow()
+            .iter()
+            .filter(|(_, pause)| pause.deadline <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        if expired.is_empty() {
+            return false;
+        }
+        for id in expired {
+            // `Continue` unmodified, the same answer an explicit release gives:
+            // a driver that merely stalled must not break the page.
+            self.apply_decision(InterceptCommand::release(id));
+        }
+        true
+    }
+
+    /// The soonest a paused request needs attention, for the event loop's park
+    /// deadline. `None` when nothing is paused.
+    #[must_use]
+    pub fn next_pause_deadline(&self) -> Option<Instant> {
+        self.paused
+            .borrow()
+            .values()
+            .map(|pause| pause.deadline)
+            .min()
+    }
+
+    /// Brings every paused request's deadline forward to now.
+    ///
+    /// For tests only: the release *policy* is worth pinning, the 20-second
+    /// constant is not, and a test that actually waited it out would be the
+    /// slowest in the tree by two orders of magnitude.
+    #[doc(hidden)]
+    pub fn expire_pauses_for_test(&self) {
+        let now = Instant::now();
+        for pause in self.paused.borrow_mut().values_mut() {
+            pause.deadline = now;
+        }
+    }
+
+    /// Resolves one asynchronously paused request.
+    ///
+    /// A decision naming an id that is not parked is **dropped**, not an error:
+    /// the request may have been aborted by a navigation, or resolved already.
+    /// The protocol side answers `Invalid InterceptionId` before ever sending
+    /// the second one (ADR-0032 D2), so reaching here means the race was lost
+    /// to the page, not to another command.
+    pub fn apply_decision(&self, command: InterceptCommand) {
+        let id = command.request_id();
+        let parked = self.paused.borrow_mut().remove(&id);
+        let Some(parked) = parked else {
+            return;
+        };
+        self.intercept.config().paused.remove(&id);
+        let fail = |error: String| {
+            let _ = self.tx.send(NetEvent::Error {
+                id,
+                error: NetError::new(oxidepage_base::NetErrorKind::Blocked, error),
+            });
+        };
+        match (parked.kind, command) {
+            (PauseKind::Request(mut request), InterceptCommand::Continue { overrides, .. }) => {
+                apply_overrides(&mut request, &overrides);
+                self.spawn_fetch_with(id, *request);
+            }
+            (PauseKind::Request(request), InterceptCommand::Fulfill { response, .. }) => {
+                emit_outcome(&self.tx, id, fulfilled_outcome(&request.url, *response));
+            }
+            (PauseKind::Request(_), InterceptCommand::Fail { error, .. }) => fail(error),
+            // An auth answer for a request that is not at an auth pause: the
+            // request has not been sent, so the only sane reading is "go".
+            (PauseKind::Request(request), InterceptCommand::Auth { .. }) => {
+                self.spawn_fetch_with(id, *request);
+            }
+            (
+                PauseKind::Auth {
+                    mut request,
+                    outcome,
+                    source,
+                    attempts,
+                },
+                InterceptCommand::Auth {
+                    response: AuthResponse::Provide { username, password },
+                    ..
+                },
+            ) => {
+                // A server that refuses the credentials re-challenges, and a
+                // driver that answers unconditionally would loop forever — one
+                // request per round trip and no terminal event ever. Past the
+                // cap the stashed 401/407 goes through to the page instead,
+                // which is what a browser shows when a user gives up.
+                if attempts >= MAX_AUTH_ATTEMPTS {
+                    emit_outcome(&self.tx, id, *outcome);
+                    return;
+                }
+                apply_basic_auth(&mut request, source, &username, &password);
+                self.retry_auth.borrow_mut().insert(id, attempts + 1);
+                self.spawn_fetch_with(id, *request);
+            }
+            (PauseKind::Auth { .. }, InterceptCommand::Fail { error, .. }) => fail(error),
+            (PauseKind::Auth { request, .. }, InterceptCommand::Fulfill { response, .. }) => {
+                emit_outcome(&self.tx, id, fulfilled_outcome(&request.url, *response));
+            }
+            // `Default`, `CancelAuth`, or a bare continue: the 401/407 the
+            // driver never saw goes through to the page unchanged.
+            (PauseKind::Auth { outcome, .. }, _) => emit_outcome(&self.tx, id, *outcome),
+        }
+    }
+
+    /// Parks the page thread until `id`'s decision arrives, or the timeout.
+    ///
+    /// **Services nothing else** — not `net_rx`, not `wake_rx`, not control
+    /// jobs. `dispatch_net_event` enters JS, and two of `fetch_blocking`'s
+    /// callers park while holding live borrows: `@import` resolution (inside
+    /// stylo, with `dom` and `style` borrowed) and the ES module loader (inside
+    /// QuickJS). Running script here is a deterministic `BorrowMutError`, not a
+    /// race. This is what `run_dialog` already does (ADR-0032 D3).
+    ///
+    /// `recv_deadline`, not `recv_timeout` in a loop: a decision for another id
+    /// would otherwise restart the clock and extend the park without bound.
+    fn await_decision(&self, id: RequestId) -> Option<InterceptCommand> {
+        if let Some(command) = self.take_deferred(id) {
+            return Some(command);
+        }
+        let deadline = Instant::now() + DEFAULT_INTERCEPT_TIMEOUT;
+        loop {
+            match self.decisions.recv_deadline(deadline) {
+                Ok(command) if command.request_id() == id => {
+                    self.intercept.config().paused.remove(&id);
+                    return Some(command);
+                }
+                Ok(command) => self.deferred.borrow_mut().push_back(command),
+                // Timed out, or the channel died. Either way the request
+                // proceeds unmodified, which is the release answer (D7).
+                Err(_) => {
+                    self.intercept.config().paused.remove(&id);
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Takes `id`'s decision out of the deferred queue, if one is waiting.
+    fn take_deferred(&self, id: RequestId) -> Option<InterceptCommand> {
+        let mut deferred = self.deferred.borrow_mut();
+        let at = deferred
+            .iter()
+            .position(|command| command.request_id() == id)?;
+        let command = deferred.remove(at);
+        drop(deferred);
+        if command.is_some() {
+            self.intercept.config().paused.remove(&id);
+        }
+        command
     }
 
     /// Cancels an in-flight request (best-effort; a completed-but-undelivered
     /// response is dropped).
     pub fn abort(&self, id: RequestId) {
+        // A parked request has no task to cancel, so drop it here — and drop it
+        // from the shared set too. `reset_document_state` aborts every pending
+        // script, sheet, image and font on *every* navigation, so leaving it
+        // would leak one `NetRequest` per navigation, and a late
+        // `continueRequest` would resurrect a dead document's request into the
+        // live one.
+        self.paused.borrow_mut().remove(&id);
+        self.intercept.config().paused.remove(&id);
+        self.retry_auth.borrow_mut().remove(&id);
+        self.deferred
+            .borrow_mut()
+            .retain(|command| command.request_id() != id);
         if let Some(flag) = self.cancels.borrow_mut().remove(&id) {
             flag.store(true, Ordering::Relaxed);
         }
@@ -602,10 +1099,11 @@ impl NetService {
         // and `AbortController` *after* the response has landed, and a
         // `loadingFailed` following a `loadingFinished` for a request that
         // succeeded is worse than no event at all.
-        if self.close(id) {
+        if let Some(open) = self.close(id) {
             self.notify(NetworkEvent::Failed {
                 id,
                 error: String::from("net::ERR_ABORTED"),
+                resource_type: open.resource_type,
                 timestamp: epoch_ms(),
             });
         }
@@ -615,17 +1113,14 @@ impl NetService {
     /// consumed it.
     pub fn finish(&self, id: RequestId) {
         self.cancels.borrow_mut().remove(&id);
+        self.retry_auth.borrow_mut().remove(&id);
     }
 
     /// Runs a fetch to completion synchronously, blocking the page thread
     /// (used by the synchronous ES module loader). Tokio workers deliver the
     /// bytes; only the page thread parks.
     pub fn fetch_blocking(&self, request: NetRequest) -> NetResult<FetchOutcome> {
-        let id = self.next_request_id();
-        self.note_request(id, &request);
-        let outcome = self.pool.handle().block_on(self.engine.fetch(request));
-        self.note_blocking_outcome(id, &outcome);
-        outcome
+        self.fetch_blocking_tracked(request).1
     }
 
     /// Like [`NetService::fetch_blocking`], reporting the id it recorded under
@@ -636,10 +1131,191 @@ impl NetService {
     ) -> (RequestId, NetResult<FetchOutcome>) {
         let id = self.next_request_id();
         self.note_request(id, &request);
-        let outcome = self.pool.handle().block_on(self.engine.fetch(request));
+        let outcome = self.run_blocking(id, request);
         self.note_blocking_outcome(id, &outcome);
         (id, outcome)
     }
+
+    /// The blocking half of the pause point (ADR-0032 D3).
+    ///
+    /// Same gate, same timeout and same release semantics as the async half —
+    /// but resolved *inline*, because the caller is waiting on the return value
+    /// rather than on a `NetEvent`. This is the path the top-level document
+    /// takes, which is the one request a driver most wants to intercept.
+    fn run_blocking(&self, id: RequestId, mut request: NetRequest) -> NetResult<FetchOutcome> {
+        if self.is_offline_for(&request) {
+            return Err(offline_error());
+        }
+        let intercepted = self.intercepts(&request);
+        if intercepted {
+            self.announce_pause(id, &request);
+            match self.await_decision(id) {
+                Some(InterceptCommand::Continue { overrides, .. }) => {
+                    apply_overrides(&mut request, &overrides);
+                }
+                Some(InterceptCommand::Fulfill { response, .. }) => {
+                    return Ok(fulfilled_outcome(&request.url, *response));
+                }
+                Some(InterceptCommand::Fail { error, .. }) => {
+                    return Err(NetError::new(oxidepage_base::NetErrorKind::Blocked, error));
+                }
+                // An auth answer at a request pause, or the timeout: proceed
+                // unmodified, which is the release answer (D7).
+                Some(InterceptCommand::Auth { .. }) | None => {}
+            }
+        }
+        let mut outcome = self.block_on_fetch(&request)?;
+        // The retry is a *second pause* under the same id, not a new mechanism.
+        if intercepted && self.intercept.config().handle_auth {
+            let challenge = parse_auth_challenge(
+                &outcome.head.headers,
+                outcome.head.status,
+                &outcome.head.final_url,
+            );
+            if let Some(challenge) = challenge {
+                self.announce_auth(id, &request, &challenge);
+                if let Some(InterceptCommand::Auth {
+                    response: AuthResponse::Provide { username, password },
+                    ..
+                }) = self.await_decision(id)
+                {
+                    // Exactly one retry, as on the async path: a server that
+                    // refuses the credentials re-challenges, and looping here
+                    // would hold the page thread for as long as it kept saying
+                    // no. The second 401 is what the page then sees.
+                    apply_basic_auth(&mut request, challenge.source, &username, &password);
+                    outcome = self.block_on_fetch(&request)?;
+                }
+                // `Default`, `CancelAuth` and the timeout all leave the stashed
+                // 401/407 standing, which is what the page then sees.
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// One `block_on`, with emulated latency charged outside the request's own
+    /// timeout (ADR-0032 D9).
+    fn block_on_fetch(&self, request: &NetRequest) -> NetResult<FetchOutcome> {
+        let latency = self.intercept.config().latency;
+        let engine = self.engine.clone();
+        let request = request.clone();
+        self.pool.handle().block_on(async move {
+            if !latency.is_zero() {
+                tokio::time::sleep(latency).await;
+            }
+            engine.fetch(request).await
+        })
+    }
+}
+
+/// Turns one completed response into the three [`NetEvent`]s every consumer
+/// expects, in order.
+///
+/// Shared by the spawned fetch and by a driver's `fulfillRequest`, and that
+/// sharing is the point: the `Chunk` is skipped for an empty body, which makes
+/// [`NetService::note_event`]'s `Done` arm the **only** place a bodyless
+/// response closes its record out. A fulfil path that closed out differently
+/// would leak the request as in-flight forever and hang every `networkidle`
+/// wait — the contract ADR-0030 D5 records as having already cost a driver
+/// twice.
+fn emit_outcome(tx: &Sender<NetEvent>, id: RequestId, outcome: FetchOutcome) {
+    let FetchOutcome { head, body } = outcome;
+    let _ = tx.send(NetEvent::Headers {
+        id,
+        status: head.status,
+        status_text: head.status_text,
+        headers: head.headers,
+        final_url: head.final_url,
+        redirected: head.redirected,
+        response_type: head.response_type,
+    });
+    if !body.is_empty() {
+        let _ = tx.send(NetEvent::Chunk { id, data: body });
+    }
+    let _ = tx.send(NetEvent::Done { id });
+}
+
+/// Builds the response a driver fabricated.
+///
+/// **`ResponseType::Basic`**, deliberately (ADR-0032 D5): it lets script read a
+/// cross-origin `no-cors` body it could never otherwise read. Chrome behaves the
+/// same way and `request.respond()` depends on it — the driver is the operator,
+/// so this is a considered hole rather than an oversight.
+fn fulfilled_outcome(url: &str, response: FulfilledResponse) -> FetchOutcome {
+    let FulfilledResponse {
+        status,
+        status_text,
+        headers,
+        body,
+    } = response;
+    FetchOutcome {
+        head: ResponseHead {
+            status,
+            status_text,
+            final_url: url.to_owned(),
+            headers,
+            redirected: false,
+            response_type: ResponseType::Basic,
+        },
+        body: Bytes::from(body),
+    }
+}
+
+/// Applies a `continueRequest`'s rewrites.
+///
+/// The URL is *not* re-validated here: the protocol side rejects a malformed or
+/// non-`http(s)` override on the command itself (ADR-0032 D5), and the fetch
+/// pipeline re-enters `fetch_inner` from the top anyway, so `scheme_allowed`,
+/// the per-hop re-check and the connector's address filter all still apply.
+fn apply_overrides(request: &mut NetRequest, overrides: &RequestOverrides) {
+    if let Some(url) = &overrides.url {
+        request.url.clone_from(url);
+    }
+    if let Some(method) = &overrides.method {
+        request.method.clone_from(method);
+    }
+    if let Some(headers) = &overrides.headers {
+        request.headers.clone_from(headers);
+    }
+    if let Some(body) = &overrides.post_data {
+        request.body = Some(body.clone());
+    }
+}
+
+/// Attaches HTTP Basic credentials, replacing any the request already carried.
+///
+/// The header name comes from the challenge's **source**: a 407 answered into
+/// `Authorization` instead of `Proxy-Authorization` is refused by every proxy,
+/// and the request then re-challenges forever.
+fn apply_basic_auth(request: &mut NetRequest, source: AuthSource, username: &str, password: &str) {
+    // Into `NetRequest::auth`, **not** `headers`: both auth header names are on
+    // Fetch's forbidden-request-header list, so anything put in `headers` is
+    // stripped before it reaches the wire. That list governs what *script* may
+    // set; these credentials are the user agent's own.
+    request.auth = Some((
+        source.header().to_owned(),
+        basic_auth_header(username, password),
+    ));
+}
+
+/// Whether a URL is one the pause point applies to.
+///
+/// `file://` and `data:` are answered above the scheme gate (ADR-0029) and must
+/// never pause — see [`NetService::intercepts`] for why a paused `data:` URL
+/// hangs the page.
+fn is_http_scheme(url: &str) -> bool {
+    let Some((scheme, _)) = url.split_once(':') else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+}
+
+/// Chrome's error for a request made while network emulation says offline.
+fn offline_error() -> NetError {
+    NetError::new(
+        oxidepage_base::NetErrorKind::Io,
+        "net::ERR_INTERNET_DISCONNECTED",
+    )
 }
 
 /// Unix-epoch milliseconds, the timestamp every [`NetworkEvent`] carries.
