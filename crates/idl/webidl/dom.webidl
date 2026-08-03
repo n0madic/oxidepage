@@ -356,6 +356,15 @@ interface DOMParser {
   [NewObject] Document parseFromString(DOMString str, DOMString type);
 };
 
+// Namespace *prefix generation* is not implemented: stored prefixes and
+// `xmlns` attributes are emitted as-is, the spec's prefix map and invented
+// declarations are not, and nothing is ever rejected as not well-formed. See
+// `oxidepage_dom::serialize::xml_serialize`.
+interface XMLSerializer {
+  constructor();
+  DOMString serializeToString(Node root);
+};
+
 interface DocumentType : Node {
   readonly attribute DOMString name;
   readonly attribute DOMString publicId;

@@ -1212,6 +1212,17 @@ impl BindCx<'_> {
         }
     }
 
+    /// An `XMLSerializer` brand. Stateless, exactly like `this_dom_parser`.
+    pub(crate) fn this_xml_serializer(&self, value: &JsValue) -> Result<u64, JsThrow> {
+        let Some((TAG_SLAB, key)) = self.payload(value) else {
+            return Err(JsThrow::Type("receiver is not an XMLSerializer".into()));
+        };
+        match self.state.slab.borrow().get(key) {
+            Some(HostData::XmlSerializer) => Ok(key),
+            _ => Err(JsThrow::Type("receiver is not an XMLSerializer".into())),
+        }
+    }
+
     pub(crate) fn this_css_rule(&self, value: &JsValue) -> Result<Rc<RuleData>, JsThrow> {
         self.slab_data(value, "CSSRule", |data| match data {
             HostData::CssRule(r) => Some(Rc::clone(r)),

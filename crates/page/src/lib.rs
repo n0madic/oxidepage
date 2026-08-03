@@ -59,9 +59,12 @@ use style::selector_parser::PseudoElement;
 use style::stylesheets::Origin;
 
 mod command;
+mod domnode;
+pub mod node_handle;
 pub mod remote;
 mod render;
 pub use command::{LoopStats, PageJob};
+pub use domnode::{KeyEvent, LayoutMetrics, MAX_DESCRIPTION_DEPTH, NodeDescription, NodeRef};
 
 pub use render::{ImageFormat, ScreenshotOptions};
 
@@ -71,15 +74,16 @@ pub use render::{ImageFormat, ScreenshotOptions};
 // `oxidepage_bindings` dependency in an embedder's Cargo.toml (ADR-0025 D9).
 pub use oxidepage_bindings::{
     ConsoleLevel, ConsoleMessage, DialogEvent, DialogHandler, DialogKind, DialogRequest,
-    DialogResponse, MAX_STORAGE_ORIGINS, OpenWindowRequest, OpenedWindow, PREVIEW_MAX_DEPTH,
-    PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, PrivateStorageAreas,
-    STORAGE_QUOTA_BYTES, ScriptError, ScriptErrorKind, SharedStorage, StorageArea, StorageAreaKind,
-    StorageNotification, StorageSubscriber, ValuePreview, WindowOp, evict_unreferenced_areas,
+    DialogResponse, KeyEventKind, KeyInput, MAX_STORAGE_ORIGINS, Modifiers, MouseEventKind,
+    MouseInput, OpenWindowRequest, OpenedWindow, PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES,
+    PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, PrivateStorageAreas, STORAGE_QUOTA_BYTES, ScriptError,
+    ScriptErrorKind, SharedStorage, StorageArea, StorageAreaKind, StorageNotification,
+    StorageSubscriber, ValuePreview, WheelInput, WindowOp, evict_unreferenced_areas, key_for_code,
     render_preview, render_preview_top,
 };
 pub use oxidepage_export_pdf::{MAX_PDF_PAGES, Margins, PaperSize, PdfOptions};
 pub use oxidepage_js::{StackFrame, parse_stack};
-pub use oxidepage_layout::disable_system_fonts;
+pub use oxidepage_layout::{BoxQuads, disable_system_fonts};
 pub use oxidepage_net::{
     CachePartition, CookieJar, CookieSource, CookieView, NetPool, NetworkEvent, ResourcePolicy,
     SharedNetConfig,
@@ -1459,6 +1463,14 @@ pub struct Page {
     /// them yields a page that writes to one area while filtering
     /// notifications against another.
     storage_origin_cache: RefCell<String>,
+    /// `backendNodeId` ↔ [`NodeId`], for drivers that name nodes over a wire
+    /// (ADR-0031 D1).
+    ///
+    /// Lives here and not on [`PageState`] because it holds plain data:
+    /// `ObjectStore` is on `PageState` only because its `JsValue`s are `!Send`
+    /// and must drop before the realm, and that argument does not transfer.
+    /// `bindings` never reads this table and should not learn about it.
+    node_handles: RefCell<node_handle::NodeHandleStore>,
 }
 
 impl Page {
@@ -1623,6 +1635,7 @@ impl Page {
             storage_events: Arc::new(Mutex::new(VecDeque::new())),
             storage_subs: RefCell::new(Vec::new()),
             storage_origin_cache: RefCell::new(String::new()),
+            node_handles: RefCell::new(node_handle::NodeHandleStore::default()),
         };
         // The initial document's areas. `install_storage` already resolved the
         // same two areas for the wrappers; this takes the subscriptions that
@@ -2560,6 +2573,12 @@ impl Page {
         self.load_fired.set(false);
         self.network_idle_recorded.set(false);
         self.render.reset();
+        // Every handle named a node of the outgoing document. Keeping them
+        // would be harmless only by luck: the fresh arena is seeded above the
+        // old generation high-water mark, so they resolve to nothing — but a
+        // driver's node cache must go stale at a commit, not linger, and
+        // `DOM.documentUpdated` is what tells it so.
+        self.node_handles.borrow_mut().clear();
         // The rAF timestamp origin restarts at navigation.
         self.start_time.set(Instant::now());
         self.next_render_at.set(Instant::now());

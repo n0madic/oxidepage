@@ -319,6 +319,19 @@ fn navigation_events(
                     ));
                 }
             }
+            // Every node id this connection ever handed out named a node of the
+            // outgoing document, and they are all dead now: the page cleared its
+            // handle table and the fresh arena is seeded above the old
+            // generation high-water mark. `DOM.documentUpdated` is how a driver
+            // learns that without probing each id (ADR-0031 D2), and it is the
+            // one and only consequence of `DOM.enable`.
+            if session.flags.dom.load(Ordering::Relaxed) {
+                connection.emit(Event::session(
+                    &session.id,
+                    "DOM.documentUpdated",
+                    json!({}),
+                ));
+            }
         }
         NavigationEventKind::SameDocument => {
             if page_on {

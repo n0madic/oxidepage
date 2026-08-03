@@ -158,6 +158,8 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         "DOMImplementation" => "this_dom_implementation",
         // A stateless brand: `parseFromString` needs nothing but the realm.
         "DOMParser" => "this_dom_parser",
+        // Likewise stateless: `serializeToString` needs only the node it is given.
+        "XMLSerializer" => "this_xml_serializer",
         "DocumentType" => "this_document_type",
         "DocumentFragment" => "this_document_fragment",
         "ShadowRoot" => "this_shadow_root",

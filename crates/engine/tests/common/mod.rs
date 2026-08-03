@@ -139,6 +139,18 @@ async fn handle(
             tokio::time::sleep(Duration::from_millis(ms)).await;
             ("text/html", Vec::new(), "<title>delayed</title>".to_owned())
         }
+        // A page with something to click, type into and scroll — the fixture
+        // the trusted-input tests drive over a real navigation.
+        "/interact" => (
+            "text/html",
+            Vec::new(),
+            "<title>interact</title><style>body{margin:0}\
+             a{position:absolute;left:0;top:0;width:200px;height:50px}\
+             input{position:absolute;left:0;top:60px;width:200px;height:30px}\
+             #tall{height:4000px;width:100px}</style>\
+             <a id=go href=\"/landed\">go</a><input id=t><div id=tall></div>"
+                .to_owned(),
+        ),
         // Loads `/cached` as a stylesheet, so a page visit exercises the cache.
         "/uses-cache" => (
             "text/html",

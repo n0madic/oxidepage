@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use oxidepage_page::{
-    CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult, LoopStats,
-    NavigationHistory, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions, PageRecord,
-    PaintOptions, PdfOptions, PropertyDescriptor, RemoteError, ScreenshotOptions,
-    SharedLocalStorage, SharedNetConfig, Viewport, WaitUntil, WindowOp,
+    BoxQuads, CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult,
+    KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput, NavigationHistory, NodeDescription,
+    NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions, PageRecord, PaintOptions,
+    PdfOptions, Point, PropertyDescriptor, Rect, RemoteError, RemoteObject, ScreenshotOptions,
+    SharedLocalStorage, SharedNetConfig, Viewport, WaitUntil, WheelInput, WindowOp,
 };
 
 use crate::context::{BrowserContext, PageSettings};
@@ -514,6 +515,164 @@ impl PageHandle {
 
     pub fn set_viewport(&self, viewport: Viewport) -> EngineResult<()> {
         self.with(move |page| page.set_viewport(viewport))
+    }
+
+    // === trusted input (ADR-0031) ===
+
+    /// Synthesizes one trusted mouse event at viewport CSS coordinates.
+    ///
+    /// An ordinary job: it flushes layout and enters JS. A click that follows a
+    /// link performs the navigation before answering, so this call is bounded by
+    /// the same `command_timeout` [`PageHandle::navigate`] is — a slow load makes
+    /// both time out, and treating a click as the more patient of the two would
+    /// be incoherent.
+    pub fn dispatch_mouse(&self, input: MouseInput) -> EngineResult<()> {
+        self.with(move |page| page.dispatch_mouse(input))
+    }
+
+    /// Synthesizes a wheel tick at viewport CSS coordinates.
+    pub fn dispatch_wheel(&self, input: WheelInput) -> EngineResult<()> {
+        self.with(move |page| page.dispatch_wheel(input))
+    }
+
+    /// Synthesizes one trusted key event at the focused element.
+    ///
+    /// Takes the owned [`KeyEvent`] rather than `KeyInput`: a closure crossing
+    /// the channel is `Send + 'static`, so the borrowed form is rebuilt here,
+    /// on the page thread, from data the closure owns.
+    pub fn dispatch_key(&self, event: KeyEvent) -> EngineResult<()> {
+        self.with(move |page| {
+            page.dispatch_key(KeyInput {
+                kind: event.kind,
+                key: &event.key,
+                modifiers: event.modifiers,
+                repeat: event.repeat,
+                text: event.text.as_deref(),
+                code: event.code.as_deref(),
+                location: event.location,
+            });
+        })
+    }
+
+    /// Inserts text at the caret as one edit, with no key events — a paste or
+    /// an IME commit.
+    pub fn insert_text(&self, text: String) -> EngineResult<()> {
+        self.with(move |page| page.insert_text(&text))
+    }
+
+    // === the node surface (ADR-0031) ===
+
+    /// Describes a node and, within `depth`, its subtree.
+    ///
+    /// The double `Result` is the existing idiom: the outer one is transport and
+    /// liveness, the inner one the page's own answer. Every [`NodeRef`] is
+    /// resolved **inside** the closure that acts on it, so no id is carried
+    /// across a job boundary where the document could commit under it.
+    pub fn describe_node(
+        &self,
+        node: NodeRef,
+        depth: i32,
+        pierce: bool,
+    ) -> EngineResult<Result<NodeDescription, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            page.describe_node(id, depth, pierce)
+        })
+    }
+
+    /// The document node, described to `depth`.
+    pub fn document_description(
+        &self,
+        depth: i32,
+        pierce: bool,
+    ) -> EngineResult<Result<NodeDescription, RemoteError>> {
+        self.with(move |page| page.describe_node(page.document_node(), depth, pierce))
+    }
+
+    /// Mints a remote object handle for a node — CDP's `DOM.resolveNode`.
+    pub fn resolve_node(
+        &self,
+        node: NodeRef,
+        group: Option<String>,
+    ) -> EngineResult<Result<RemoteObject, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            page.node_object(id, group.as_deref())
+        })
+    }
+
+    /// The backend handle for a node named some other way — CDP's
+    /// `DOM.requestNode`.
+    pub fn node_handle(&self, node: NodeRef) -> EngineResult<Result<u64, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            page.node_handle(id)
+        })
+    }
+
+    /// `querySelector` (`all = false`) or `querySelectorAll`, rooted at `root`,
+    /// answered as backend handles.
+    ///
+    /// An invalid selector is the inner `Err` — it comes off the wire, so it is
+    /// data, not a bug.
+    pub fn query_selector(
+        &self,
+        root: NodeRef,
+        selector: String,
+        all: bool,
+    ) -> EngineResult<Result<Vec<u64>, String>> {
+        self.with(move |page| {
+            let id = page
+                .resolve_node_ref(root)
+                .map_err(|error| error.to_string())?;
+            let matches = if all {
+                page.query_selector_all(id, &selector)?
+            } else {
+                page.query_selector(id, &selector)?.into_iter().collect()
+            };
+            matches
+                .into_iter()
+                .map(|node| page.node_handle(node).map_err(|e| e.to_string()))
+                .collect()
+        })
+    }
+
+    /// The four CSS boxes of a node — CDP's `DOM.getBoxModel`.
+    pub fn box_quads(&self, node: NodeRef) -> EngineResult<Result<BoxQuads, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            page.box_quads(id)
+                .ok_or_else(|| RemoteError::WrongType(String::from("Could not compute box model.")))
+        })
+    }
+
+    /// The painted quads of a node, one per client rect — CDP's
+    /// `DOM.getContentQuads`.
+    pub fn content_quads(
+        &self,
+        node: NodeRef,
+    ) -> EngineResult<Result<Vec<[Point; 4]>, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            Ok(page.content_quads(id))
+        })
+    }
+
+    /// Scrolls a node into view if it is not already fully visible.
+    pub fn scroll_into_view_if_needed(
+        &self,
+        node: NodeRef,
+        rect: Option<Rect>,
+    ) -> EngineResult<Result<bool, RemoteError>> {
+        self.with(move |page| {
+            let id = page.resolve_node_ref(node)?;
+            Ok(page.scroll_into_view_if_needed(id, rect))
+        })
+    }
+
+    /// The document's scroll position, viewport size and content extent.
+    pub fn layout_metrics(&self) -> EngineResult<LayoutMetrics> {
+        self.with(Page::layout_metrics)
     }
 
     /// Event-loop counters — the diagnostic that proves the loop parks rather

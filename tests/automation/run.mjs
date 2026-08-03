@@ -231,10 +231,63 @@ try {
 
   await check('page.type', async () => {
     await page.goto(`${base}/index.html`);
+    // `clickCount: 3` is how a driver clears a field: the triple click selects
+    // the line, so `type` *replaces* rather than appending to `initial`.
     await page.click('#field', { clickCount: 3 });
     await page.type('#field', 'typed');
-    const value = await page.$eval('#field', (el) => el.value);
-    assert(value.includes('typed'), `field value: ${value}`);
+    assertEqual(await page.$eval('#field', (el) => el.value), 'typed', 'field value');
+  });
+
+  await check('page.hover', async () => {
+    await page.goto(`${base}/index.html`);
+    await page.hover('#hoverme');
+    // Both halves matter: the event fired *and* `:hover` restyled. A driver
+    // that only dispatched the event would pass the first and fail the second.
+    assertEqual(await page.evaluate(() => globalThis.__hovered), 1, 'mouseover count');
+    assertEqual(
+      await page.$eval('#hoverme', (el) => getComputedStyle(el).backgroundColor),
+      'rgb(0, 128, 0)',
+      ':hover background',
+    );
+  });
+
+  await check('page.select', async () => {
+    await page.goto(`${base}/index.html`);
+    const selected = await page.select('#choice', 'two');
+    assertEqual(selected.join(','), 'two', 'select() return');
+    assertEqual(await page.$eval('#choice', (el) => el.value), 'two', 'select value');
+  });
+
+  await check('page.$$eval', async () => {
+    await page.goto(`${base}/index.html`);
+    const texts = await page.$$eval('.para', (els) => els.map((el) => el.textContent));
+    assertEqual(texts.join(','), 'first,second', 'paragraph texts');
+  });
+
+  await check('elementHandle.boundingBox', async () => {
+    await page.goto(`${base}/index.html`);
+    const handle = await page.$('#box');
+    const box = await handle.boundingBox();
+    assert(box, 'no bounding box');
+    assertEqual(box.width, 120, 'box width');
+    assertEqual(box.height, 60, 'box height');
+  });
+
+  await check('page.keyboard.press', async () => {
+    await page.goto(`${base}/index.html`);
+    await page.focus('#field');
+    // `initial` + End + Backspace leaves `initia`; this exercises the named-key
+    // path (no text) rather than the printable one `page.type` covers.
+    await page.keyboard.press('End');
+    await page.keyboard.press('Backspace');
+    assertEqual(await page.$eval('#field', (el) => el.value), 'initia', 'field value');
+  });
+
+  await check('page.mouse.wheel', async () => {
+    await page.goto(`${base}/index.html`);
+    await page.mouse.move(50, 50);
+    await page.mouse.wheel({ deltaY: 240 });
+    assertEqual(await page.evaluate(() => window.scrollY), 240, 'scrollY after wheel');
   });
 
   await check('browserContext isolation', async () => {

@@ -36,6 +36,28 @@ pub struct ClientBox {
     pub height: f32,
 }
 
+/// The four CSS boxes of one element as quads — CDP's `DOM.getBoxModel`.
+///
+/// Each quad's corners are in [`Transform2D::map_quad`] order: top-left,
+/// top-right, bottom-right, bottom-left of the *untransformed* box, so a
+/// rotated element reports the quadrilateral it actually occupies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxQuads {
+    /// Border box grown by the used margins.
+    pub margin: [Point; 4],
+    pub border: [Point; 4],
+    /// Border box shrunk by the used border widths.
+    pub padding: [Point; 4],
+    /// Padding box shrunk by the used padding.
+    pub content: [Point; 4],
+    /// The **untransformed** border-box width — a `scale(2)` element is not
+    /// twice as wide, and `DOM.getBoxModel`'s `width`/`height` mean the used
+    /// value (same reasoning as [`LayoutEngine::border_box_size`]).
+    pub width: f32,
+    /// The untransformed border-box height.
+    pub height: f32,
+}
+
 /// `offsetParent`/`offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OffsetBox {
@@ -433,6 +455,59 @@ impl LayoutEngine {
             .into_iter()
             .map(|(rect, transform)| transform.unwrap_or(Transform2D::IDENTITY).map_quad(rect))
             .collect()
+    }
+
+    /// `DOM.getBoxModel`: the four CSS boxes of `node`'s principal box as
+    /// quads, plus the used border-box size.
+    ///
+    /// One pass over [`Self::border_frame`], so the ancestor walk and the
+    /// transform composition happen once for all four boxes rather than four
+    /// times — and the result is a real quad per box, not a bounding box.
+    ///
+    /// Do **not** route this through [`Self::content_box`]: that one is
+    /// deliberately element-local (its origin is the padding offset, not a
+    /// viewport coordinate) because `ResizeObserverEntry.contentRect` is
+    /// defined that way.
+    #[must_use]
+    pub fn box_quads(&self, node: NodeId) -> Option<BoxQuads> {
+        let box_id = self.tree().box_for_node(node)?;
+        let (rect, transform) = self.border_frame(node)?;
+        let layout = &self.tree().box_(box_id).final_layout;
+        let matrix = transform.unwrap_or(Transform2D::IDENTITY);
+
+        // Each box is derived from the *untransformed* border rect and mapped
+        // through the one matrix, so a rotated element reports four consistent
+        // quadrilaterals rather than four independently bounding-boxed rects.
+        let inset = |top: f32, right: f32, bottom: f32, left: f32| {
+            Rect::from_xywh(
+                rect.min_x() + left,
+                rect.min_y() + top,
+                (rect.size.width - left - right).max(0.0),
+                (rect.size.height - top - bottom).max(0.0),
+            )
+        };
+        let border = layout.border;
+        let padding = layout.padding;
+        let margin = layout.margin;
+
+        Some(BoxQuads {
+            margin: matrix.map_quad(inset(
+                -margin.top,
+                -margin.right,
+                -margin.bottom,
+                -margin.left,
+            )),
+            border: matrix.map_quad(rect),
+            padding: matrix.map_quad(inset(border.top, border.right, border.bottom, border.left)),
+            content: matrix.map_quad(inset(
+                border.top + padding.top,
+                border.right + padding.right,
+                border.bottom + padding.bottom,
+                border.left + padding.left,
+            )),
+            width: layout.size.width,
+            height: layout.size.height,
+        })
     }
 
     /// The untransformed client rects of `node` paired with the transform that

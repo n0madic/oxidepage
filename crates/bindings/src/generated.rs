@@ -1373,6 +1373,22 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         },
     )?;
 
+    let proto_xml_serializer = cx.begin_interface("XMLSerializer", None)?;
+    cx.define_method(
+        &proto_xml_serializer,
+        "serializeToString",
+        1,
+        gen_xml_serializer_serialize_to_string,
+    )?;
+    cx.finish_interface(
+        "XMLSerializer",
+        &proto_xml_serializer,
+        CtorSpec::Native {
+            length: 0,
+            construct: gen_xml_serializer_constructor,
+        },
+    )?;
+
     let proto_document_type = cx.begin_interface("DocumentType", Some("Node"))?;
     cx.define_getter(&proto_document_type, "name", gen_document_type_get_name)?;
     cx.define_getter(
@@ -7936,6 +7952,21 @@ fn gen_dom_parser_parse_from_string(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_dom_parser_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     imp::dom_parser::constructor(cx, call)
+}
+
+fn gen_xml_serializer_serialize_to_string(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_xml_serializer(&call.this)?;
+    let a0 = cx.arg_node(call, 0)?;
+    Ok(JsValue::String(imp::xml_serializer::serialize_to_string(
+        cx, this, a0,
+    )?))
+}
+
+fn gen_xml_serializer_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    imp::xml_serializer::constructor(cx, call)
 }
 
 fn gen_document_type_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

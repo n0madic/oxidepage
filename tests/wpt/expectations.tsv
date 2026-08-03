@@ -1313,7 +1313,6 @@ css/cssom/CSSKeyframesRule.html	name, cssRules, appendRule, findRule, deleteRule
 css/cssom/CSSNamespaceRule.html	CSSOM - CSSNamespaceRule interface	FAIL
 css/cssom/CSSNamespaceRule.html	__harness__	OK
 css/cssom/CSSRuleList.html	__harness__	OK
-css/cssom/CSSStyleDeclaration-iterator.html	CSSStyleDeclaration should expose Symbol.iterator	FAIL
 css/cssom/CSSStyleDeclaration-iterator.html	__harness__	OK
 css/cssom/CSSStyleRule-set-selectorText-namespace.html	__harness__	TIMEOUT
 css/cssom/CSSStyleRule-set-selectorText.html	__harness__	TIMEOUT
@@ -1489,7 +1488,6 @@ css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns
 css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns empty string when single property overridden after 'all' via insertRule	FAIL
 css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns empty string with shorthand 'margin' via insertRule	FAIL
 css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns later 'all' value when it overrides earlier 'all' and properties via insertRule	FAIL
-css/cssom/cssstyledeclaration-csstext-all-shorthand.html	'all' shorthand with all longhands	FAIL
 css/cssom/cssstyledeclaration-csstext-all-shorthand.html	__harness__	OK
 css/cssom/cssstyledeclaration-csstext-final-delimiter.html	__harness__	OK
 css/cssom/cssstyledeclaration-csstext-important.html	__harness__	OK
@@ -1715,7 +1713,6 @@ css/cssom/getComputedStyle-insets-sticky.html	__harness__	OK
 css/cssom/getComputedStyle-layout-dependent-removed-ib-sibling.html	__harness__	OK
 css/cssom/getComputedStyle-layout-dependent-replaced-into-ib-split.html	__harness__	OK
 css/cssom/getComputedStyle-line-height.html	__harness__	OK
-css/cssom/getComputedStyle-logical-enumeration.html	Logical properties in enumeration of computed style	FAIL
 css/cssom/getComputedStyle-logical-enumeration.html	__harness__	OK
 css/cssom/getComputedStyle-margins-roundtrip.html	__harness__	OK
 css/cssom/getComputedStyle-property-order.html	Computed style properties should be sorted lexicographically	FAIL
@@ -1895,8 +1892,6 @@ css/cssom/selectorSerialize.html	single universal selector shows '*' when serial
 css/cssom/selectorText-modification-restyle-002.html	Check that color changes correctly after shadow stylesheet selector and #container class is changed.	FAIL
 css/cssom/selectorText-modification-restyle-002.html	__harness__	OK
 css/cssom/serialization-CSSDeclaration-with-important.html	__harness__	OK
-css/cssom/serialize-all-longhands.html	Computed style	FAIL
-css/cssom/serialize-all-longhands.html	Specified style	FAIL
 css/cssom/serialize-all-longhands.html	__harness__	OK
 css/cssom/serialize-custom-props.html	__harness__	OK
 css/cssom/serialize-media-rule.html	__harness__	OK

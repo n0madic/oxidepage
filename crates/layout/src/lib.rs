@@ -34,7 +34,7 @@ pub use engine::{LayoutEngine, PaintStamp};
 pub use fonts::{
     FontSystem, ParleyFontMetricsProvider, WebFontAttrs, WebFontOutcome, disable_system_fonts,
 };
-pub use geometry::{ClientBox, OffsetBox, ScrollParent, UsedBoxValues};
+pub use geometry::{BoxQuads, ClientBox, OffsetBox, ScrollParent, UsedBoxValues};
 pub use images::{DecodedImage, ImageData, ImageId, ImageStore};
 pub use multicol::{ColumnRange, MulticolContext};
 pub use scroll::ScrollResult;

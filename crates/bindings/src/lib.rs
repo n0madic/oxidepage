@@ -43,6 +43,7 @@ pub use imp::input_synth::{
     dispatch_key as imp_dispatch_key, dispatch_mouse as imp_dispatch_mouse,
     dispatch_wheel as imp_dispatch_wheel, insert_text as imp_insert_text,
 };
+pub use imp::keys::key_for_code;
 pub use preview::{
     PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, ValuePreview,
     format_message, render as render_preview, render_top as render_preview_top,
@@ -464,8 +465,25 @@ fn install_native_helpers(cx: &BindCx<'_>) -> Result<(), JsThrow> {
 /// WebIDL: an interface with an indexed property getter but no `iterable<>`
 /// declaration still exposes `@@iterator` = %Array.prototype.values% (and
 /// nothing else). Sites spread these (`[...element.attributes]` in Swiper).
+///
+/// **Every** such interface, not a chosen few — the rule is uniform and an
+/// interface missing from this list is a spread that throws "value is not
+/// iterable" for no reason a page author can see. `DOMRectList` was exactly
+/// that: Puppeteer's `clickablePoint` is `[...element.getClientRects()]`, so
+/// its absence made `page.click` and `page.type` fail while every other query
+/// worked. `NodeList` and `DOMTokenList` are absent here because they declare
+/// `iterable<>` and the codegen installs the full protocol for them.
 fn install_value_iterators(cx: &BindCx<'_>) -> Result<(), JsThrow> {
-    for interface in ["NamedNodeMap", "HTMLCollection"] {
+    for interface in [
+        "NamedNodeMap",
+        "HTMLCollection",
+        "DOMRectList",
+        "CSSStyleDeclaration",
+        "StyleSheetList",
+        "CSSRuleList",
+        "PluginArray",
+        "MimeTypeArray",
+    ] {
         let proto = cx.interface_proto(interface)?;
         cx.install_value_iterator(&proto)?;
     }

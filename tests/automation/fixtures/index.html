@@ -4,6 +4,9 @@
 <style>
   body { font: 16px/1.4 system-ui, sans-serif; margin: 0; padding: 24px; }
   #box { width: 120px; height: 60px; background: #2d7; }
+  #hoverme { width: 100px; height: 40px; background: #ccc; }
+  #hoverme:hover { background: rgb(0, 128, 0); }
+  #scroller { height: 3000px; }
 </style>
 <h1 id="heading">Fixture</h1>
 <p class="para">first</p>
@@ -11,8 +14,17 @@
 <div id="box"></div>
 <a id="link" href="/other.html">to other</a>
 <input id="field" value="initial">
+<select id="choice">
+  <option value="one">One</option>
+  <option value="two">Two</option>
+</select>
+<div id="hoverme">hover me</div>
+<div id="scroller"></div>
 <script>
   globalThis.__ready = true;
   globalThis.__sum = (a, b) => a + b;
+  globalThis.__hovered = 0;
+  document.getElementById('hoverme')
+    .addEventListener('mouseover', () => { globalThis.__hovered += 1; });
   console.log('fixture loaded', 42);
 </script>

@@ -121,6 +121,7 @@ pub(crate) mod xml_http_request;
 #[path = "xhr_event_target.rs"]
 pub(crate) mod xml_http_request_event_target;
 pub(crate) use xml_http_request_event_target as xhr_event_target;
+pub(crate) mod xml_serializer;
 
 use oxidepage_base::NodeId;
 use oxidepage_js::{JsThrow, JsValue};

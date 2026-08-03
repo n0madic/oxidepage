@@ -358,7 +358,9 @@ fn add_binding(connection: &Arc<Connection>, request: &Request) -> CommandResult
 
 // === serialization ===
 
-fn remote_error(error: RemoteError) -> ProtocolError {
+/// A [`RemoteError`] in the protocol's vocabulary. `pub(crate)` because the
+/// `DOM` domain answers the same errors from the same engine calls.
+pub(crate) fn remote_error(error: RemoteError) -> ProtocolError {
     match error {
         RemoteError::BadArgument(detail) => ProtocolError::invalid_params(detail),
         other => ProtocolError::server(other.to_string()),

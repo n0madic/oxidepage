@@ -170,6 +170,9 @@ pub(crate) enum HostData {
     DomImplementation(oxidepage_base::NodeId),
     /// `new DOMParser()`: a brand with no state of its own.
     DomParser,
+    /// `new XMLSerializer()`: likewise a brand — the node to serialize is the
+    /// argument, not state.
+    XmlSerializer,
     CssRule(Rc<RuleData>),
     CssRuleList(Rc<RuleListData>),
     /// A `DOMRect`/`DOMRectReadOnly`. The geometry is shared behind an `Rc` so

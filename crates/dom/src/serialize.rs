@@ -97,6 +97,164 @@ fn push_children(tree: &DomTree, node: NodeId, stack: &mut Vec<Work>) {
     }
 }
 
+/// A unit of pending XML serialization work on the explicit stack.
+enum XmlWork {
+    /// Serialize this node and its descendants.
+    Node(NodeId),
+    /// Emit the closing tag for an element whose start tag was already written.
+    EndElem(String),
+}
+
+/// XML serialization of `node` and its descendants (DOM Parsing and
+/// Serialization, "XML serialization"), backing `XMLSerializer`.
+///
+/// This is not the HTML serializer with different escapes: XML self-closes an
+/// empty element, has a CDATA production, and has no `<template>` contents
+/// rule.
+///
+/// **Deliberate limit — no namespace prefix generation.** The spec's namespace
+/// prefix map, its invention of `xmlns`/`ns1:` declarations for nodes whose
+/// namespace no in-scope prefix covers, and its well-formedness errors are not
+/// implemented. Whatever prefix a node or attribute stores is emitted as-is,
+/// and `xmlns` attributes are emitted as the ordinary attributes they are
+/// stored as. So a tree parsed from markup round-trips, but a tree assembled
+/// from script with `createElementNS` and no matching `xmlns` attribute
+/// serializes without a namespace declaration, where the spec would invent
+/// one — and no input is ever rejected as not well-formed.
+#[must_use]
+pub fn xml_serialize(tree: &DomTree, node: NodeId) -> String {
+    let mut out = String::new();
+    // Explicit-stack traversal, for the same reason `serialize_node` uses one:
+    // deeply nested content must not overflow the native stack.
+    let mut stack: Vec<XmlWork> = vec![XmlWork::Node(node)];
+    while let Some(work) = stack.pop() {
+        match work {
+            XmlWork::EndElem(name) => {
+                out.push_str("</");
+                out.push_str(&name);
+                out.push('>');
+            }
+            XmlWork::Node(node) => match tree.node(node).data() {
+                NodeData::Element(el) => {
+                    let name = xml_qualified_name(&el.name);
+                    out.push('<');
+                    out.push_str(&name);
+                    for attr in el.attrs() {
+                        out.push(' ');
+                        out.push_str(&xml_qualified_name(&attr.name));
+                        out.push_str("=\"");
+                        escape_attribute(&attr.value, &mut out);
+                        out.push('"');
+                    }
+                    // XML serialization has no template-contents rule: a
+                    // `<template>` serializes its *actual* children (its
+                    // contents fragment is a separate tree that the XML
+                    // production knows nothing about), unlike `push_children`.
+                    let children: Vec<NodeId> = tree.children(node).collect();
+                    if children.is_empty() {
+                        // An empty element self-closes — the XML rule, and the
+                        // one shape the HTML serializer never emits.
+                        out.push_str("/>");
+                    } else {
+                        out.push('>');
+                        stack.push(XmlWork::EndElem(name));
+                        for child in children.into_iter().rev() {
+                            stack.push(XmlWork::Node(child));
+                        }
+                    }
+                }
+                NodeData::Text(t) => escape_text(t, &mut out),
+                // The one place a `CDATASection` must *not* be flattened into
+                // Text: XML has a CDATA production, and its content is not
+                // escaped.
+                NodeData::CdataSection(t) => {
+                    out.push_str("<![CDATA[");
+                    out.push_str(t);
+                    out.push_str("]]>");
+                }
+                NodeData::Comment(t) => {
+                    out.push_str("<!--");
+                    out.push_str(t);
+                    out.push_str("-->");
+                }
+                NodeData::Doctype {
+                    name,
+                    public_id,
+                    system_id,
+                } => {
+                    out.push_str("<!DOCTYPE ");
+                    out.push_str(name);
+                    if !public_id.is_empty() {
+                        out.push_str(" PUBLIC \"");
+                        out.push_str(public_id);
+                        out.push('"');
+                    } else if !system_id.is_empty() {
+                        out.push_str(" SYSTEM");
+                    }
+                    if !system_id.is_empty() {
+                        out.push_str(" \"");
+                        out.push_str(system_id);
+                        out.push('"');
+                    }
+                    out.push('>');
+                }
+                NodeData::ProcessingInstruction { target, data } => {
+                    out.push_str("<?");
+                    out.push_str(target);
+                    out.push(' ');
+                    out.push_str(data);
+                    out.push_str("?>");
+                }
+                NodeData::Document(_) | NodeData::DocumentFragment { .. } => {
+                    let children: Vec<NodeId> = tree.children(node).collect();
+                    for child in children.into_iter().rev() {
+                        stack.push(XmlWork::Node(child));
+                    }
+                }
+            },
+        }
+    }
+    out
+}
+
+/// `prefix:local`, or bare `local` when no prefix is stored. The equivalent of
+/// `bindings`' `imp::names::qualified_name`, written out here rather than
+/// depended on — `dom` sits below `bindings`.
+fn xml_qualified_name(name: &QualName) -> String {
+    match &name.prefix {
+        Some(prefix) => format!("{prefix}:{}", name.local),
+        None => name.local.to_string(),
+    }
+}
+
+/// Escapes an attribute value. Distinct from [`escape_text`] in exactly one
+/// way, and it is the load-bearing one: `"` closes the value here, so it
+/// **must** be escaped.
+fn escape_attribute(value: &str, out: &mut String) {
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+}
+
+/// Escapes character data. A `"` is ordinary data in text and must **not** be
+/// escaped — see [`escape_attribute`] for the other mode.
+fn escape_text(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 /// Spec `innerHTML` getter: serializes the node's descendants.
 #[must_use]
 pub fn inner_html(tree: &DomTree, node: NodeId) -> String {

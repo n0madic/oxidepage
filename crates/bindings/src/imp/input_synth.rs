@@ -285,6 +285,12 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
             if proceed {
                 let to = focusable_from(cx, target);
                 crate::imp::interaction::set_focus_from_input(cx, to)?;
+                // After the focus transfer, never before: focus places a
+                // collapsed caret at the end of the value, which would undo the
+                // selection a multi-click just made.
+                if let Some(focused) = to {
+                    select_on_multi_click(cx, focused, input.click_count)?;
+                }
             }
         }
         MouseEventKind::Up => {
@@ -346,6 +352,36 @@ pub fn dispatch_mouse(cx: &BindCx<'_>, input: MouseInput) -> Result<(), JsThrow>
     Ok(())
 }
 
+/// The selection a repeated click leaves behind in a text control.
+///
+/// A triple click selects the **line** under the pointer. Identifying that line
+/// in general needs a character-level hit test, which this engine does not have
+/// — but a control whose value holds no line break has exactly one line, and
+/// then "the line under the pointer" is the whole value no matter where the
+/// pointer was. That is the case this handles, and it is exact rather than
+/// approximate: every single-line `<input>`, and a `<textarea>` that happens to
+/// hold one line.
+///
+/// A multi-line `<textarea>` is deliberately left alone, and so is the double
+/// click that selects a *word* (ADR-0031): both need the offset the pointer
+/// landed on, and guessing one would select confidently wrong text — worse than
+/// a driver seeing that nothing was selected.
+///
+/// Routed through `text_selection::select` rather than reimplemented, so a
+/// triple click and `el.select()` cannot disagree about direction or clamping.
+fn select_on_multi_click(cx: &BindCx<'_>, target: NodeId, click_count: i32) -> Result<(), JsThrow> {
+    if click_count < 3 {
+        return Ok(());
+    }
+    {
+        let dom = cx.state.dom.borrow();
+        if !dom.is_text_entry(target) || dom.form_value(target).contains('\n') {
+            return Ok(());
+        }
+    }
+    crate::imp::text_selection::select(cx, target)
+}
+
 /// The nearest common inclusive ancestor of two nodes, or `b` when there is no
 /// press target to reconcile with.
 fn common_ancestor(cx: &BindCx<'_>, a: Option<NodeId>, b: Option<NodeId>) -> Option<NodeId> {
@@ -378,6 +414,26 @@ pub struct KeyInput<'a> {
     pub key: &'a str,
     pub modifiers: Modifiers,
     pub repeat: bool,
+    /// The text this key inserts, overriding the key table's answer.
+    ///
+    /// A driver knows its own layout and the table only knows US: a `key` the
+    /// table cannot spell still has to type something. `Some("")` is
+    /// meaningful and not the same as `None` — it says "this key types
+    /// nothing", which is how `Input.dispatchKeyEvent`'s `rawKeyDown` and every
+    /// shortcut-shaped press behave, and it suppresses both `keypress` and the
+    /// text-editing default action.
+    pub text: Option<&'a str>,
+    /// `KeyboardEvent.code`: the *physical* key, overriding the table's guess.
+    ///
+    /// The driver knows its own keyboard and the US-layout table only knows
+    /// one; `code` is also the member that distinguishes keys sharing a `key`
+    /// (`ShiftLeft`/`ShiftRight`), which the table stores only once. `None`
+    /// means "let the table decide", which is what a caller with no keyboard
+    /// in front of it should say.
+    pub code: Option<&'a str>,
+    /// `KeyboardEvent.location`: 0 standard, 1 left, 2 right, 3 numpad. The
+    /// companion of `code` for the same left/right distinction.
+    pub location: u32,
 }
 
 /// The element a key goes to: the focused element, or the body when nothing
@@ -399,7 +455,7 @@ fn keyboard_payload(
     let mut payload = UiPayload::new(UiKind::Keyboard(Box::new(KeyboardFields {
         key: resolved.key.clone(),
         code: resolved.code.clone(),
-        location: 0,
+        location: input.location,
         repeat: input.repeat,
         is_composing: false,
         char_code,
@@ -442,7 +498,22 @@ pub fn dispatch_key(cx: &BindCx<'_>, input: KeyInput<'_>) -> Result<(), JsThrow>
     let Some(target) = key_target(cx) else {
         return Ok(());
     };
-    let resolved = keys::lookup(input.key);
+    let mut resolved = keys::lookup(input.key);
+    // The driver's own answers win over the US-layout table — see
+    // [`KeyInput::text`] and [`KeyInput::code`]. An explicit empty text means
+    // "types nothing", which is exactly `None` for everything downstream: no
+    // `keypress`, no edit.
+    if let Some(text) = input.text {
+        resolved.text = (!text.is_empty()).then(|| text.to_owned());
+    }
+    // `key_code` is deliberately *not* overridden alongside: the legacy code
+    // names the same physical key in every layout the table covers, and a
+    // driver's `windowsVirtualKeyCode` is the member this engine refuses (see
+    // `cdp::domains::input`). `code` is a different axis and the driver is
+    // authoritative on it.
+    if let Some(code) = input.code.filter(|c| !c.is_empty()) {
+        resolved.code = code.to_owned();
+    }
 
     if input.kind == KeyEventKind::Up {
         let payload = keyboard_payload(&resolved, &input, 0);

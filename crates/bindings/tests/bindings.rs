@@ -3401,6 +3401,82 @@ fn second_document_owns_its_nodes_and_stays_inert() {
     );
 }
 
+/// `XMLSerializer` is the XML production, not the HTML one with other escapes:
+/// an empty element self-closes, a `CDATASection` keeps its own syntax, and a
+/// `"` is escaped in an attribute value but is ordinary data in text.
+#[test]
+fn xml_serializer_serializes_the_xml_productions() {
+    let h = Harness::new(PAGE);
+    // Nested tree, an empty element, attribute escaping and text escaping.
+    assert_eq!(
+        h.eval_string(
+            "(() => { const s = new XMLSerializer(); \
+              const d = new DOMParser().parseFromString( \
+                '<div id=\"a\"><p title=\\'q\\\"&amp;<x>\\'>1 &amp; 2 &lt; 3</p><br></div>', \
+                'text/html'); \
+              return s.serializeToString(d.querySelector('div')); })()"
+        ),
+        "<div id=\"a\"><p title=\"q&quot;&amp;&lt;x&gt;\">1 &amp; 2 &lt; 3</p><br/></div>"
+    );
+    // A `"` inside text is data, not a delimiter, and must survive unescaped.
+    assert_eq!(
+        h.eval_string(
+            "(() => { const p = document.createElement('p'); \
+              p.textContent = 'he said \"hi\" & <bye>'; \
+              return new XMLSerializer().serializeToString(p); })()"
+        ),
+        "<p>he said \"hi\" &amp; &lt;bye&gt;</p>"
+    );
+    // Comment, processing instruction and CDATA section. CDATA is the one place
+    // a Text node and a CDATASection must not serialize alike.
+    assert_eq!(
+        h.eval_string(
+            "(() => { const s = new XMLSerializer(); const x = new Document(); \
+              return [s.serializeToString(document.createComment('c<d')), \
+                      s.serializeToString(document.createProcessingInstruction('xml-s', 'href=\"a\"')), \
+                      s.serializeToString(x.createCDATASection('a < b & c')), \
+                      s.serializeToString(x.createTextNode('a < b & c'))].join('|'); })()"
+        ),
+        "<!--c<d-->|<?xml-s href=\"a\"?>|<![CDATA[a < b & c]]>|a &lt; b &amp; c"
+    );
+}
+
+/// The doctype shapes `page.content()` depends on: Puppeteer serializes the
+/// doctype node with `XMLSerializer` and concatenates `documentElement.outerHTML`.
+#[test]
+fn xml_serializer_writes_every_doctype_shape() {
+    let h = Harness::new(PAGE);
+    assert_eq!(
+        h.eval_string(
+            "(() => { const s = new XMLSerializer(); \
+              const impl = document.implementation; \
+              return [s.serializeToString(document.doctype), \
+                      s.serializeToString(impl.createDocumentType('html', \
+                        '-//W3C//DTD XHTML 1.0 Strict//EN', \
+                        'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd')), \
+                      s.serializeToString(impl.createDocumentType('n', 'p', '')), \
+                      s.serializeToString(impl.createDocumentType('n', '', 's'))].join('|'); })()"
+        ),
+        concat!(
+            "<!DOCTYPE html>|",
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" ",
+            "\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">|",
+            "<!DOCTYPE n PUBLIC \"p\">|",
+            "<!DOCTYPE n SYSTEM \"s\">"
+        )
+    );
+    // A Document serializes its children only — the `page.content()` whole-page
+    // case, doctype included.
+    assert_eq!(
+        h.eval_string(
+            "(() => { const d = new DOMParser().parseFromString( \
+                '<!doctype html><html><head></head><body><p>hi</p></body></html>', 'text/html'); \
+              return new XMLSerializer().serializeToString(d); })()"
+        ),
+        "<!DOCTYPE html><html><head/><body><p>hi</p></body></html>"
+    );
+}
+
 /// The mutation-observer compound microtask is queued when the record is
 /// queued, so it is *ordered against* promise reactions rather than draining
 /// after all of them: `await Promise.resolve()` later in the same task must not

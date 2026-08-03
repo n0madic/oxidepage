@@ -93,6 +93,10 @@ pub struct DomainFlags {
     /// `Page.setLifecycleEventsEnabled` — separate from `Page.enable`, because
     /// Puppeteer's `waitUntil: 'networkidle0'` turns it on independently.
     pub lifecycle: AtomicBool,
+    /// `DOM.enable`. Its one consequence is `DOM.documentUpdated` on a commit
+    /// (ADR-0031 D2) — the honest signal that every node id issued so far is
+    /// dead. There is no pushed node tree, so nothing else hangs off it.
+    pub dom: AtomicBool,
 }
 
 /// One attachment of a connection to a target.
@@ -380,8 +384,10 @@ impl Connection {
 
         match request.domain() {
             "Browser" => crate::domains::browser::dispatch(self, request),
+            "DOM" => crate::domains::dom::dispatch(self, request),
             "Emulation" => crate::domains::emulation::dispatch(self, request),
             "Fetch" => crate::domains::fetch::dispatch(self, request),
+            "Input" => crate::domains::input::dispatch(self, request),
             "IO" => crate::domains::io::dispatch(self, request),
             "Log" => crate::domains::log::dispatch(self, request),
             "Network" => crate::domains::network::dispatch(self, request),

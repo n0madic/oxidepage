@@ -58,7 +58,7 @@ stub).
 | 4 | Transform-aware geometry, capture completeness — **landed** | correct click points, `page.pdf()` | ADR-0026 | 3–4 w |
 | 5 | `engine`: Browser, contexts, multi-page, async commands — **landed** | anything protocol-shaped | ADR-0027 | 4–5 w |
 | 6 | CDP transport + Target/Page/Runtime/Network/Log — **landed** | Puppeteer basic green | ADR-0030 | 5–7 w |
-| 7 | `Input` + `DOM` domains | Puppeteer interaction green | no | 2–3 w |
+| 7 | `Input` + `DOM` domains — **landed** | Puppeteer interaction green | ADR-0031 | 2–3 w |
 | 8 | `Fetch` interception, file inputs, downloads | Puppeteer feature-complete (90%) | yes | 4–5 w |
 | 9 | Isolated worlds | the gate to Playwright | **yes** | 4–6 w |
 | 10 | Frame plumbing + Playwright compat surface | **Playwright green** | yes | 5–7 w |
@@ -546,10 +546,35 @@ network position — the SSRF filter protects the *content*, not the *operator*.
 
 ---
 
-## Stage 7 — `Input` and `DOM` domains
+## Stage 7 — `Input` and `DOM` domains — **landed (ADR-0031)**
 
 **Milestone: Puppeteer's `click`, `type`, `hover`, `select`, `$eval`,
-`waitForSelector` green.**
+`waitForSelector` green.** Met: `cargo xtask puppeteer` is **33/33** with an
+empty expectation file, and six new interaction checks were added to the
+harness on the way.
+
+**What landed beyond the plan, and what the plan got wrong.**
+
+- `Page.addScriptToEvaluateOnNewDocument` — the fourth bullet below — was
+  already done, early in stage 6. Nothing to do.
+- Puppeteer 24 does **not** call `DOM.getContentQuads`, `DOM.getBoxModel` or
+  `Page.getLayoutMetrics`: `clickablePoint` is a pure in-page `evaluate` of
+  `getClientRects()`. All three ship anyway — this file lists them and
+  Playwright (stage 10) uses them — but they are not what unblocked the
+  milestone. The load-bearing pair is `describeNode` + `resolveNode`, which
+  Puppeteer's `bindIsolatedHandle` decorator round-trips on nearly every
+  `ElementHandle` call.
+- `DOM.getFrameOwner` is `method_not_found` rather than implemented: there are
+  no nested browsing contexts to own a frame, so there is nothing to withhold
+  and a driver can feature-detect (ADR-0031 D4).
+- `XMLSerializer` was pulled in to close `page.content()` — an engine gap the
+  stage-6 ADR named, not a protocol one.
+- One engine bug surfaced: `DOMRectList` (and five sibling interfaces with an
+  indexed getter) had no `@@iterator`, so `[...el.getClientRects()]` threw and
+  `page.click`/`page.type` stayed red after both domains were complete
+  (ADR-0031 D6).
+
+The original scope follows, for the record.
 
 - `Input.dispatchMouseEvent` (including `mouseWheel`), `dispatchKeyEvent`,
   `insertText`. Thin mapping onto stage 2.

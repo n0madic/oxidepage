@@ -701,3 +701,60 @@ fn a_zero_scaled_box_is_not_hit_testable() {
     let hits = layout.elements_from_point(&dom, 50.0, 20.0);
     assert!(!hits.contains(&d), "{hits:?}");
 }
+
+#[test]
+fn box_quads_nest_from_margin_out_to_content_in() {
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; margin: 5px; \
+         border: 2px solid; padding: 3px'></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    let q = layout.box_quads(d).unwrap();
+    // Border box at (5, 5) sized 100×40 (`width` is the content width plus
+    // border+padding only if `box-sizing` said so; here the used border-box
+    // size is 100+2*(2+3) = 110 wide).
+    let (bx, by) = (q.border[0].x, q.border[0].y);
+    assert_eq!((bx, by), (5.0, 5.0));
+    assert_eq!((q.width, q.height), (110.0, 50.0));
+
+    assert_eq!((q.margin[0].x, q.margin[0].y), (0.0, 0.0));
+    assert_eq!((q.margin[2].x, q.margin[2].y), (120.0, 60.0));
+    assert_eq!((q.padding[0].x, q.padding[0].y), (7.0, 7.0));
+    assert_eq!((q.padding[2].x, q.padding[2].y), (113.0, 53.0));
+    assert_eq!((q.content[0].x, q.content[0].y), (10.0, 10.0));
+    assert_eq!((q.content[2].x, q.content[2].y), (110.0, 50.0));
+}
+
+#[test]
+fn box_quads_are_transformed_but_the_reported_size_is_not() {
+    // The same quarter-turn as `hit_testing_inside_and_outside_a_rotated_box`:
+    // a 100×40 box rotated 90° about its centre (50, 20) occupies
+    // (30, -30)..(70, 70). Its *top-left* corner lands at (70, -30) — the
+    // bounding box's top-right — which is the whole reason a quad is reported
+    // rather than a rect. `width`/`height` stay the used values:
+    // `DOM.getBoxModel` means the untransformed size, exactly as `offset*` does.
+    let (dom, _s, layout) = setup(
+        "<body style='margin: 0'>\
+         <div id=d style='width: 100px; height: 40px; \
+         transform: rotate(90deg)'></div></body>",
+    );
+    let d = find_by_id(&dom, "d");
+    let q = layout.box_quads(d).unwrap();
+    assert_eq!((q.width, q.height), (100.0, 40.0));
+    assert_eq!(
+        (q.border[0].x.round(), q.border[0].y.round()),
+        (70.0, -30.0)
+    );
+    assert_eq!((q.border[2].x.round(), q.border[2].y.round()), (30.0, 70.0));
+    // No border/padding/margin, so all four quads coincide.
+    assert_eq!(q.border, q.padding);
+    assert_eq!(q.border, q.content);
+    assert_eq!(q.border, q.margin);
+}
+
+#[test]
+fn box_quads_are_absent_for_a_display_none_element() {
+    let (dom, _s, layout) = setup("<body><div id=d style='display: none'></div></body>");
+    assert!(layout.box_quads(find_by_id(&dom, "d")).is_none());
+}

@@ -37,6 +37,9 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "Page.addScriptToEvaluateOnNewDocument" => add_init_script(connection, request),
         "Page.removeScriptToEvaluateOnNewDocument" => remove_init_script(connection, request),
         "Page.createIsolatedWorld" => create_isolated_world(connection, request),
+        // The metrics are a pure layout read, so the handler lives beside the
+        // rest of the geometry vocabulary in `domains::dom`.
+        "Page.getLayoutMetrics" => crate::domains::dom::get_layout_metrics(connection, request),
         _ => Err(ProtocolError::method_not_found(&request.method)),
     }
 }

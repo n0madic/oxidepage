@@ -68,14 +68,15 @@ pub use page::{PageHandle, PageId};
 /// embedder needs no `oxidepage-page` dependency of its own.
 pub mod page_api {
     pub use oxidepage_page::{
-        CallArgument, ConsoleLevel, ConsoleMessage, CookieSource, CookieView, DialogEvent,
-        DialogKind, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult,
-        ExceptionDetails, HistoryEntryInfo, ImageFormat, LoopStats, Margins, NavigationEvent,
-        NavigationEventKind, NavigationHistory, NavigatorProfile, NetworkEvent, NodeId, Page,
-        PaintOptions, PaperSize, PdfOptions, Point, PropertyDescriptor, Rect, RemoteError,
-        RemoteObject, RemoteSubtype, RemoteType, RequestId, ResourcePolicy, ScreenProfile,
-        ScreenshotOptions, ScriptError, ScriptErrorKind, Size, StackFrame, ValuePreview, Viewport,
-        WaitUntil, render_preview_top,
+        BoxQuads, CallArgument, ConsoleLevel, ConsoleMessage, CookieSource, CookieView,
+        DialogEvent, DialogKind, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult,
+        ExceptionDetails, HistoryEntryInfo, ImageFormat, KeyEvent, KeyEventKind, KeyInput,
+        LayoutMetrics, LoopStats, Margins, Modifiers, MouseEventKind, MouseInput, NavigationEvent,
+        NavigationEventKind, NavigationHistory, NavigatorProfile, NetworkEvent, NodeDescription,
+        NodeId, NodeRef, Page, PaintOptions, PaperSize, PdfOptions, Point, PropertyDescriptor,
+        Rect, RemoteError, RemoteObject, RemoteSubtype, RemoteType, RequestId, ResourcePolicy,
+        ScreenProfile, ScreenshotOptions, ScriptError, ScriptErrorKind, Size, StackFrame,
+        ValuePreview, Viewport, WaitUntil, WheelInput, key_for_code, render_preview_top,
     };
 }
 

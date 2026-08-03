@@ -260,6 +260,67 @@ pub enum NodeKind {
     ProcessingInstruction,
 }
 
+impl NodeKind {
+    /// The spec's `Node.nodeType` constant for this kind.
+    ///
+    /// Lives here rather than in the bindings layer because it is a DOM
+    /// concept: the protocol surface (`DOM.describeNode`) reports it without
+    /// entering JS, and a second copy of the mapping would drift.
+    #[must_use]
+    pub fn node_type(self) -> u16 {
+        match self {
+            NodeKind::Element => 1,
+            NodeKind::Text => 3,
+            NodeKind::CdataSection => 4,
+            NodeKind::ProcessingInstruction => 7,
+            NodeKind::Comment => 8,
+            NodeKind::Document => 9,
+            NodeKind::Doctype => 10,
+            NodeKind::DocumentFragment => 11,
+        }
+    }
+}
+
+/// The spec's `Node.nodeName` for `id`.
+///
+/// Element names are *qualified* (a prefixed element reports `x:b`, not `b`)
+/// and ASCII-upper-cased in the HTML namespace. Same reasoning as
+/// [`NodeKind::node_type`]: both the JS getter and the protocol's node
+/// description need it, and only one of them can enter JS.
+///
+/// # Panics
+///
+/// Panics if `id` is stale — it goes through [`DomTree::node`].
+#[must_use]
+pub fn node_name(dom: &crate::tree::DomTree, id: NodeId) -> String {
+    match dom.node(id).data() {
+        NodeData::Element(el) => {
+            let name = qualified_name(&el.name);
+            if el.is_html_element() {
+                name.to_ascii_uppercase()
+            } else {
+                name
+            }
+        }
+        NodeData::Text(_) => "#text".to_owned(),
+        NodeData::CdataSection(_) => "#cdata-section".to_owned(),
+        NodeData::Comment(_) => "#comment".to_owned(),
+        NodeData::Document(_) => "#document".to_owned(),
+        NodeData::DocumentFragment { .. } => "#document-fragment".to_owned(),
+        NodeData::Doctype { name, .. } => name.to_string(),
+        NodeData::ProcessingInstruction { target, .. } => target.to_string(),
+    }
+}
+
+/// `prefix:local`, or bare `local` when there is no prefix.
+#[must_use]
+pub fn qualified_name(name: &QualName) -> String {
+    match &name.prefix {
+        Some(prefix) => format!("{prefix}:{}", name.local),
+        None => name.local.to_string(),
+    }
+}
+
 /// Whether `kind` is a Text node in the spec's sense (`CDATASection : Text`).
 ///
 /// Exists so that a `match` on [`NodeKind`] cannot quietly forget the CDATA

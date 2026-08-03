@@ -30,6 +30,24 @@ fn click_at(page: &Page, x: f32, y: f32) {
     }
 }
 
+/// Three presses and releases at one point, with the `detail` a browser
+/// reports for each — how a driver spells "select the line and retype".
+fn triple_click_at(page: &Page, x: f32, y: f32) {
+    for count in 1..=3 {
+        for kind in [MouseEventKind::Down, MouseEventKind::Up] {
+            page.dispatch_mouse(MouseInput {
+                kind,
+                x,
+                y,
+                button: 0,
+                buttons: u16::from(kind == MouseEventKind::Down),
+                modifiers: Modifiers::default(),
+                click_count: count,
+            });
+        }
+    }
+}
+
 fn move_to(page: &Page, x: f32, y: f32) {
     page.dispatch_mouse(MouseInput {
         kind: MouseEventKind::Move,
@@ -401,6 +419,9 @@ fn press_with(page: &Page, key: &str, modifiers: Modifiers) {
             key,
             modifiers,
             repeat: false,
+            text: None,
+            code: None,
+            location: 0,
         });
     }
 }
@@ -1146,4 +1167,215 @@ fn offset_coordinates_are_element_local_under_a_scale() {
     // which is (50, 25) in its own coordinates.
     click_at(&page, 100.0, 50.0);
     assert_eq!(eval_string(&page, "window.seen"), "50,25");
+}
+
+/// A driver's explicit `text` overrides the US-layout key table, and an
+/// explicit *empty* text means "this key types nothing" — the shape
+/// `Input.dispatchKeyEvent`'s `rawKeyDown` relies on. Both still fire
+/// `keydown`; only the text-producing half is suppressed.
+#[test]
+fn an_explicit_text_overrides_the_key_table() {
+    let page = page_with(
+        r##"<!doctype html><input id=t>
+           <script>
+             window.log = [];
+             for (const type of ["keydown", "keypress", "input"]) {
+               document.getElementById("t").addEventListener(type, e => log.push(type));
+             }
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+
+    // `key: "a"` would type "a"; the driver says it types "ä".
+    page.dispatch_key(KeyInput {
+        kind: KeyEventKind::Down,
+        key: "a",
+        modifiers: Modifiers::default(),
+        repeat: false,
+        text: Some("ä"),
+        code: None,
+        location: 0,
+    });
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "ä"
+    );
+    assert_eq!(
+        eval_string(&page, "window.log.join(',')"),
+        "keydown,keypress,input"
+    );
+
+    // The same key with an explicit empty text edits nothing and fires no
+    // `keypress`, even though the table says "a" is printable.
+    page.eval("window.log = []").unwrap();
+    page.dispatch_key(KeyInput {
+        kind: KeyEventKind::Down,
+        key: "a",
+        modifiers: Modifiers::default(),
+        repeat: false,
+        text: Some(""),
+        code: None,
+        location: 0,
+    });
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "ä",
+        "an empty text must not edit"
+    );
+    assert_eq!(eval_string(&page, "window.log.join(',')"), "keydown");
+}
+
+/// `location` distinguishes the two keys that share a `key` — which is the only
+/// thing that tells `ShiftLeft` from `ShiftRight`.
+#[test]
+fn the_drivers_code_and_location_reach_the_event() {
+    let page = page_with(
+        r##"<!doctype html><input id=t>
+           <script>
+             window.locations = [];
+             document.getElementById("t").addEventListener(
+               "keydown", e => locations.push(e.key + ":" + e.code + ":" + e.location));
+           </script>"##,
+    );
+    page.eval("document.getElementById('t').focus()").unwrap();
+    for (code, location) in [("ShiftLeft", 1_u32), ("ShiftRight", 2)] {
+        page.dispatch_key(KeyInput {
+            kind: KeyEventKind::Down,
+            key: "Shift",
+            modifiers: Modifiers::default(),
+            repeat: false,
+            text: None,
+            code: Some(code),
+            location,
+        });
+    }
+    assert_eq!(
+        eval_string(&page, "window.locations.join(',')"),
+        "Shift:ShiftLeft:1,Shift:ShiftRight:2",
+        "the driver's `code` is authoritative: the table stores `Shift` once, so \
+         it can never produce `ShiftRight` on its own"
+    );
+
+    // With no `code` from the caller the table still answers, as before.
+    page.eval("window.locations = []").unwrap();
+    page.dispatch_key(KeyInput {
+        kind: KeyEventKind::Down,
+        key: "Shift",
+        modifiers: Modifiers::default(),
+        repeat: false,
+        text: None,
+        code: None,
+        location: 0,
+    });
+    assert_eq!(
+        eval_string(&page, "window.locations.join(',')"),
+        "Shift:ShiftLeft:0"
+    );
+}
+
+/// A triple click selects the value, so the next thing typed *replaces* it
+/// rather than appending. This is the shape every driver's "clear and retype"
+/// takes (`page.click(sel, {clickCount: 3})` then `page.type`), and without it
+/// `type` silently appended to whatever was there.
+#[test]
+fn a_triple_click_selects_a_single_line_control() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             input { position: absolute; left: 0; top: 0; width: 200px; height: 30px }
+           </style><input id=t value=initial>"##,
+    );
+    let selection = "document.getElementById('t').selectionStart + ':' + \
+                     document.getElementById('t').selectionEnd";
+
+    // A single click focuses and leaves a collapsed caret at the end.
+    click_at(&page, 100.0, 15.0);
+    assert_eq!(eval_string(&page, selection), "7:7");
+
+    triple_click_at(&page, 100.0, 15.0);
+    assert_eq!(
+        eval_string(&page, selection),
+        "0:7",
+        "a triple click must select the whole value"
+    );
+
+    // The selection is real: typing replaces rather than appends.
+    type_text(&page, "typed");
+    assert_eq!(
+        eval_string(&page, "document.getElementById('t').value"),
+        "typed"
+    );
+}
+
+/// The two cases that need the offset the pointer landed on, which this engine
+/// cannot compute. Selecting *something* would be confidently wrong text; the
+/// caret is left where focus put it (ADR-0031).
+#[test]
+fn a_double_click_and_a_multiline_triple_click_select_nothing() {
+    let page = page_with(
+        r##"<!doctype html><style>
+             body { margin: 0 }
+             #t { position: absolute; left: 0; top: 0; width: 200px; height: 30px }
+             #a { position: absolute; left: 0; top: 60px; width: 200px; height: 60px }
+           </style>
+           <input id=t value="one two"><textarea id=a>one
+two</textarea>"##,
+    );
+
+    // A double click carries no word to select without a character hit test.
+    for count in [1, 2] {
+        page.dispatch_mouse(MouseInput {
+            kind: MouseEventKind::Down,
+            x: 100.0,
+            y: 15.0,
+            button: 0,
+            buttons: 1,
+            modifiers: Modifiers::default(),
+            click_count: count,
+        });
+        page.dispatch_mouse(MouseInput {
+            kind: MouseEventKind::Up,
+            x: 100.0,
+            y: 15.0,
+            button: 0,
+            buttons: 0,
+            modifiers: Modifiers::default(),
+            click_count: count,
+        });
+    }
+    assert_eq!(
+        eval_string(
+            &page,
+            "document.getElementById('t').selectionStart + ':' + \
+             document.getElementById('t').selectionEnd"
+        ),
+        "7:7",
+        "a double click must not guess at a word"
+    );
+
+    // A multi-line textarea: the line under the pointer is unknowable, so the
+    // whole value is *not* selected.
+    triple_click_at(&page, 100.0, 90.0);
+    assert_eq!(
+        eval_string(
+            &page,
+            "document.getElementById('a').selectionStart + ':' + \
+             document.getElementById('a').selectionEnd"
+        ),
+        "7:7",
+        "a multi-line textarea must not be selected whole"
+    );
+
+    // A textarea holding one line *is* determinable, and is selected.
+    page.eval("document.getElementById('a').value = 'single'")
+        .unwrap();
+    triple_click_at(&page, 100.0, 90.0);
+    assert_eq!(
+        eval_string(
+            &page,
+            "document.getElementById('a').selectionStart + ':' + \
+             document.getElementById('a').selectionEnd"
+        ),
+        "0:6"
+    );
 }

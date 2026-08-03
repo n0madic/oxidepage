@@ -10,38 +10,12 @@ use crate::imp::names::XMLNS_NS;
 
 pub(crate) fn node_type(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
     let dom = cx.state.dom.borrow();
-    Ok(match dom.node(this).data().kind() {
-        NodeKind::Element => 1.0,
-        NodeKind::Text => 3.0,
-        NodeKind::CdataSection => 4.0,
-        NodeKind::ProcessingInstruction => 7.0,
-        NodeKind::Comment => 8.0,
-        NodeKind::Document => 9.0,
-        NodeKind::Doctype => 10.0,
-        NodeKind::DocumentFragment => 11.0,
-    })
+    Ok(f64::from(dom.node(this).data().kind().node_type()))
 }
 
 pub(crate) fn node_name(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsThrow> {
     let dom = cx.state.dom.borrow();
-    Ok(match dom.node(this).data() {
-        NodeData::Element(el) => {
-            // The *qualified* name, so a prefixed element reports `x:b`, not `b`.
-            let name = crate::imp::names::qualified_name(&el.name);
-            if el.is_html_element() {
-                name.to_ascii_uppercase()
-            } else {
-                name
-            }
-        }
-        NodeData::Text(_) => "#text".to_owned(),
-        NodeData::CdataSection(_) => "#cdata-section".to_owned(),
-        NodeData::Comment(_) => "#comment".to_owned(),
-        NodeData::Document(_) => "#document".to_owned(),
-        NodeData::DocumentFragment { .. } => "#document-fragment".to_owned(),
-        NodeData::Doctype { name, .. } => name.to_string(),
-        NodeData::ProcessingInstruction { target, .. } => target.to_string(),
-    })
+    Ok(oxidepage_dom::node_name(&dom, this))
 }
 
 pub(crate) fn base_uri(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsThrow> {

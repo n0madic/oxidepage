@@ -266,6 +266,78 @@ pub fn lookup(key: &str) -> ResolvedKey {
     }
 }
 
+/// The `key` a physical `code` produces, the reverse of [`lookup`].
+///
+/// A driver may name only the physical key — CDP's `Input.dispatchKeyEvent`
+/// allows `code` without `key` — and this is what turns that back into a `key`
+/// the rest of the pipeline understands.
+///
+/// Deliberately the *same* two sources [`lookup`] uses, so the two cannot
+/// drift: the [`NAMED`] table, then the codes [`printable_code`] emits. A code
+/// neither of them knows (numpad, media keys) is `None` rather than a guess —
+/// synthesizing a `code` the table would never produce is a lie about the
+/// keyboard, and the caller can report a real error instead.
+#[must_use]
+pub fn key_for_code(code: &str, shift: bool) -> Option<String> {
+    if let Some(def) = NAMED.iter().find(|d| d.code == code) {
+        return Some(def.key.to_owned());
+    }
+    // The right-hand and keypad twins of keys [`NAMED`] stores once. They share
+    // a `key` with their left/main counterpart — `KeyboardEvent.location` is
+    // what tells them apart — so the reverse lookup has to know them even
+    // though `lookup` will never *produce* them.
+    let twin = match code {
+        "ShiftRight" => Some("Shift"),
+        "ControlRight" => Some("Control"),
+        "AltRight" => Some("Alt"),
+        "MetaRight" | "OSRight" => Some("Meta"),
+        "NumpadEnter" => Some("Enter"),
+        _ => None,
+    };
+    if let Some(key) = twin {
+        return Some(key.to_owned());
+    }
+    if let Some(letter) = code.strip_prefix("Key")
+        && letter.len() == 1
+        && letter.as_bytes()[0].is_ascii_uppercase()
+    {
+        return Some(if shift {
+            letter.to_owned()
+        } else {
+            letter.to_ascii_lowercase()
+        });
+    }
+    if let Some(digit) = code.strip_prefix("Digit")
+        && digit.len() == 1
+        && let Ok(index) = digit.parse::<usize>()
+    {
+        // The US-layout shifted legends, in digit order starting at `0`.
+        const SHIFTED_DIGITS: [char; 10] = [')', '!', '@', '#', '$', '%', '^', '&', '*', '('];
+        let ch = if shift {
+            SHIFTED_DIGITS[index]
+        } else {
+            digit.as_bytes()[0] as char
+        };
+        return Some(ch.to_string());
+    }
+    let (unshifted, shifted) = match code {
+        "Space" => (' ', ' '),
+        "Backquote" => ('`', '~'),
+        "Minus" => ('-', '_'),
+        "Equal" => ('=', '+'),
+        "BracketLeft" => ('[', '{'),
+        "BracketRight" => (']', '}'),
+        "Backslash" => ('\\', '|'),
+        "Semicolon" => (';', ':'),
+        "Quote" => ('\'', '"'),
+        "Comma" => (',', '<'),
+        "Period" => ('.', '>'),
+        "Slash" => ('/', '?'),
+        _ => return None,
+    };
+    Some(if shift { shifted } else { unshifted }.to_string())
+}
+
 /// `code` and legacy `keyCode` for a printable character, from the physical
 /// US-layout key that produces it.
 fn printable_code(ch: char) -> (String, u32) {

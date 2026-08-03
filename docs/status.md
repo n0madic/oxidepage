@@ -541,27 +541,30 @@ v1 limits.
   would be exactly the always-installed no-op P6 forbids. `capi`/cbindgen and a
   windowed embedder remain out of scope. Decisions and v1 limits: ADR-0027.
 - **Phase 9 — Chrome DevTools Protocol (`cdp`)**: done for the automation
-  roadmap's stage 6. `oxidepage serve` exposes a loopback WebSocket endpoint
+  roadmap's stage 7. `oxidepage serve` exposes a loopback WebSocket endpoint
   that a real `puppeteer-core` connects to and drives: `Browser`, `Target`
-  (flat sessions only), `Page`, `Runtime`, `Log`, `Network`, `Emulation`,
-  `Security`, `Performance`, `IO`, and `Fetch.disable`. Behind it are three
-  pieces of new engine work — a remote object table living in `PageState`
-  (an `objectId` names a live `JsValue`, which is `!Send` and must drop before
-  the realm), request/response retention with a bounded body store answering
-  `Network.getResponseBody`, and cookie enumeration/removal on `CookieJar`.
-  Commands run one OS thread per session, because `PageHandle::with` blocks and
-  is deferred during a load. The endpoint binds `127.0.0.1`, requires a loopback
-  `Host` (DNS-rebinding defence), refuses any request carrying an `Origin`,
-  serves `/json/new` on `PUT` only (`GET`/`POST` are CORS-simple, so a page
-  could otherwise open and navigate a target with an `<img>` tag) and carries a
-  128-bit CSPRNG path token.
+  (flat sessions only), `Page`, `Runtime`, `DOM`, `Input`, `Log`, `Network`,
+  `Emulation`, `Security`, `Performance`, `IO`, and `Fetch.disable`. Behind it
+  are four pieces of new engine work — a remote object table living in
+  `PageState` (an `objectId` names a live `JsValue`, which is `!Send` and must
+  drop before the realm), request/response retention with a bounded body store
+  answering `Network.getResponseBody`, cookie enumeration/removal on
+  `CookieJar`, and a `backendNodeId` ↔ `NodeId` registry on `Page` that carries
+  the arena generation literally rather than packing it into a JSON number
+  (ADR-0031 D1). Commands run one OS thread per session, because
+  `PageHandle::with` blocks and is deferred during a load. The endpoint binds
+  `127.0.0.1`, requires a loopback `Host` (DNS-rebinding defence), refuses any
+  request carrying an `Origin`, serves `/json/new` on `PUT` only (`GET`/`POST`
+  are CORS-simple, so a page could otherwise open and navigate a target with an
+  `<img>` tag) and carries a 128-bit CSPRNG path token.
   `cargo xtask puppeteer` drives it with a pinned Puppeteer over loopback
-  fixtures under the same two-sided expectation contract as WPT: 20 of 27 checks
-  pass. **Not implemented:** the `DOM` and `Input` domains (the next stage —
-  they are what the seven failing checks need), `Fetch` interception, isolated
-  worlds (a world name is accepted and maps to the main world), user-agent
-  override, response timing, and every inspector-facing domain. Decisions and
-  v1 limits: ADR-0030.
+  fixtures under the same two-sided expectation contract as WPT: **33 of 33
+  checks pass**, with an empty expectation file. **Not implemented:** `Fetch`
+  interception, isolated worlds (a world name is accepted and maps to the main
+  world), user-agent override, response timing, DOM mutation events over the
+  protocol, touch and drag input, and every inspector-facing domain. Decisions
+  and v1 limits: ADR-0030 (transport, remote objects) and ADR-0031 (`Input`,
+  `DOM`, `XMLSerializer`).
 - Phases 8+: Phase 8 (embedding surface) is **half landed** — `engine` is real,
   per the entry above; the C ABI (`capi` + cbindgen header, a ctypes example)
   and the versioning policy are not. GPU raster (`raster-vello`) is not started;

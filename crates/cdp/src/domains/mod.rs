@@ -16,8 +16,10 @@
 //! of vendoring ~2.5 MB of JSON for drift protection the compiler already gives.
 
 pub mod browser;
+pub mod dom;
 pub mod emulation;
 pub mod fetch;
+pub mod input;
 pub mod io;
 pub mod log;
 pub mod network;

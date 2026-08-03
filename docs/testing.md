@@ -11,7 +11,12 @@ cargo xtask wpt-single tests/wpt/vendor/dom/nodes/Node-appendChild.html
 cargo xtask wpt --update             # rebaseline expectations.tsv
 cargo xtask golden [--update] [--filter <stem>]   # display-list JSON goldens
 cargo xtask reftest [--filter <stem>]             # Ahem pixel reftests
+cargo xtask puppeteer [--update] [--filter <substr>]  # real Puppeteer over the CDP endpoint
 ```
+
+`puppeteer` needs a Node toolchain and installs `tests/automation`'s pinned
+`puppeteer-core` on first run. It starts the CDP endpoint **in process** and
+serves its fixtures from loopback, so CI still touches no network.
 
 `tests/wpt/vendor/` and `tests/html5lib-tests/` are committed, so a fresh
 clone needs no fetch. `fetch-wpt` / `fetch-html5lib` exist only to bump the
@@ -24,7 +29,7 @@ cargo xtask fetch-html5lib     # re-vendor the html5lib-tests tree-construction 
 
 ## The expectation files are a two-sided contract, not a suppression list
 
-Both runners fail CI on regressions **and on unexpected passes and stale
+All three fail CI on regressions **and on unexpected passes and stale
 entries**:
 
 - `tests/wpt/expectations.tsv` — only non-PASS outcomes are listed; absent
@@ -34,6 +39,10 @@ entries**:
 - `tests/html5lib-expectations.txt` — enforced by a plain `#[test]` in
   `crates/dom/tests/html5lib.rs`, not by xtask. Hand-delete the lines you
   fixed.
+- `tests/automation/expectations.tsv` — one `name<TAB>FAIL` line per Puppeteer
+  check expected to fail. Regenerate with `cargo xtask puppeteer --update`,
+  which refuses `--filter` for the same reason `wpt` does: an update rewrites
+  the whole file, so a filtered run would delete every entry it did not see.
 
 So **fixing a bug breaks CI until you update the expectation**. The
 expectation edit lands in the same commit as the behavior change; diff the
