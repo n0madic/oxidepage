@@ -540,11 +540,32 @@ v1 limits.
   API in the engine at all, so a `PermissionState` map that no code consults
   would be exactly the always-installed no-op P6 forbids. `capi`/cbindgen and a
   windowed embedder remain out of scope. Decisions and v1 limits: ADR-0027.
+- **Phase 9 — Chrome DevTools Protocol (`cdp`)**: done for the automation
+  roadmap's stage 6. `oxidepage serve` exposes a loopback WebSocket endpoint
+  that a real `puppeteer-core` connects to and drives: `Browser`, `Target`
+  (flat sessions only), `Page`, `Runtime`, `Log`, `Network`, `Emulation`,
+  `Security`, `Performance`, `IO`, and `Fetch.disable`. Behind it are three
+  pieces of new engine work — a remote object table living in `PageState`
+  (an `objectId` names a live `JsValue`, which is `!Send` and must drop before
+  the realm), request/response retention with a bounded body store answering
+  `Network.getResponseBody`, and cookie enumeration/removal on `CookieJar`.
+  Commands run one OS thread per session, because `PageHandle::with` blocks and
+  is deferred during a load. The endpoint binds `127.0.0.1`, requires a loopback
+  `Host` (DNS-rebinding defence), refuses any request carrying an `Origin`,
+  serves `/json/new` on `PUT` only (`GET`/`POST` are CORS-simple, so a page
+  could otherwise open and navigate a target with an `<img>` tag) and carries a
+  128-bit CSPRNG path token.
+  `cargo xtask puppeteer` drives it with a pinned Puppeteer over loopback
+  fixtures under the same two-sided expectation contract as WPT: 20 of 27 checks
+  pass. **Not implemented:** the `DOM` and `Input` domains (the next stage —
+  they are what the seven failing checks need), `Fetch` interception, isolated
+  worlds (a world name is accepted and maps to the main world), user-agent
+  override, response timing, and every inspector-facing domain. Decisions and
+  v1 limits: ADR-0030.
 - Phases 8+: Phase 8 (embedding surface) is **half landed** — `engine` is real,
   per the entry above; the C ABI (`capi` + cbindgen header, a ctypes example)
-  and the versioning policy are not. Phase 9 (CDP, `cdp`) and GPU raster
-  (`raster-vello`) are not started; those three crates are still documented
-  stubs.
+  and the versioning policy are not. GPU raster (`raster-vello`) is not started;
+  it and `capi` are still documented stubs.
 
 Conformance work landing outside the phase plan:
 

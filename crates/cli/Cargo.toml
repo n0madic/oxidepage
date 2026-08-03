@@ -16,6 +16,10 @@ path = "src/main.rs"
 oxidepage-bindings = { workspace = true }
 oxidepage-dom = { workspace = true }
 oxidepage-page = { workspace = true }
+# Only `serve` uses these. Every other subcommand still drives one `Page`
+# synchronously and does not go through the engine (ADR-0027).
+oxidepage-cdp = { workspace = true }
+oxidepage-engine = { workspace = true }
 
 [lints]
 workspace = true

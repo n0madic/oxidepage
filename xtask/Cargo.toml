@@ -11,6 +11,11 @@ publish = false
 
 [dependencies]
 oxidepage-idl = { workspace = true }
+# The Puppeteer runner starts the CDP endpoint in process rather than shelling
+# out to `oxidepage serve`: no pipe to babysit, and a server panic surfaces as a
+# panic here instead of a closed socket.
+oxidepage-cdp = { workspace = true }
+oxidepage-engine = { workspace = true }
 oxidepage-page = { workspace = true }
 oxidepage-raster-skia = { workspace = true }
 oxidepage-js = { workspace = true }

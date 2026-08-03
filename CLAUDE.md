@@ -62,7 +62,12 @@ cargo xtask wpt-single tests/wpt/vendor/dom/nodes/Node-appendChild.html
 cargo xtask wpt --update             # rebaseline expectations.tsv
 cargo xtask golden [--update] [--filter <stem>]   # display-list JSON goldens
 cargo xtask reftest [--filter <stem>]             # Ahem pixel reftests
+cargo xtask puppeteer [--update] [--filter <substr>]  # real Puppeteer over the CDP endpoint
 ```
+
+`puppeteer` needs a Node toolchain and installs `tests/automation`'s pinned
+`puppeteer-core` on first run. It starts the endpoint **in process** and serves
+fixtures from loopback, so CI still touches no network.
 
 `tests/wpt/vendor/` and `tests/html5lib-tests/` are committed, so a fresh clone needs no fetch. `fetch-wpt` / `fetch-html5lib` exist only to bump the pinned upstream revisions.
 
@@ -70,6 +75,7 @@ cargo xtask reftest [--filter <stem>]             # Ahem pixel reftests
 
 - `tests/wpt/expectations.tsv` — only non-PASS outcomes are listed; absent means expected PASS. Regenerate with `cargo xtask wpt --update` (it refuses `--filter`, since an update rewrites the whole file, and refuses to write if the run had any HANG/CRASH — re-run until clean).
 - `tests/html5lib-expectations.txt` — enforced by a plain `#[test]` in `crates/dom/tests/html5lib.rs`, not by xtask. Hand-delete the lines you fixed.
+- `tests/automation/expectations.tsv` — one `name<TAB>FAIL` line per Puppeteer check that is expected to fail. Regenerate with `cargo xtask puppeteer --update` (it refuses `--filter`, for the same reason `wpt` does).
 
 So **fixing a bug breaks CI until you update the expectation**. The expectation edit lands in the same commit as the behavior change; diff the regenerated TSV and confirm every line that vanished is one you meant to fix.
 
@@ -85,7 +91,13 @@ cargo run -p oxidepage-cli -- dump-layout | dump-display-list
 cargo run -p oxidepage-cli -- render <file|url> -o out.{png,jpg,pdf,html} [--dpr N] [--full-page] [--paper A4]
 ```
 
+```sh
+cargo run -p oxidepage-cli -- serve [--port N] [--viewport WxH] [--allow-private]
+```
+
 `--allow-private` is needed to hit loopback/private hosts (SSRF filter is on by default).
+
+`serve` starts the CDP endpoint and prints its WebSocket URL on **stdout** (the banner goes to stderr). Five defences, all structural: it binds `127.0.0.1` only; every request must carry a loopback `Host` (without that check a hostile page rebinds its own domain to `127.0.0.1` and drives the endpoint through the user's browser); a request carrying an `Origin` is refused, because a browser applies no CORS to `new WebSocket` and such a request has a genuinely loopback `Host`; `/json/new` takes `PUT` only, since `GET`/`POST` are CORS-simple and an `<img src=…>` would otherwise let any page open and navigate a target; and the WebSocket path carries a 128-bit CSPRNG token. The token is **not** secret from anything that can reach the port and read a reply — `/json/version` publishes it, as Chrome's does, because that is how `puppeteer.connect({ browserURL })` finds the socket. The SSRF filter protects the content the engine loads, not the operator: reaching the port is equivalent to owning the process.
 
 ## Architecture
 
@@ -95,15 +107,16 @@ cargo run -p oxidepage-cli -- render <file|url> -o out.{png,jpg,pdf,html} [--dpr
 base ──┬─ dom ── style ── layout ── paint ─┬─ raster-skia ─┐
        │                                   └─ export-pdf ──┤
        ├─ net ─────────────────────────────────────────────┤
-js ────┴───────────── bindings ─────────────────────────────┴── page ─┬─ cli
-                                                                      └─ engine
+js ────┴───────────── bindings ─────────────────────────────┴── page ─┬─ engine ── cdp ─┬─ cli
+                                                                      └─────────────────┘
 idl (build-time only: consumed by xtask codegen, not by any runtime crate)
 ```
 
 - **`idl` is not a dependency of `bindings`.** It is a codegen library driven only by `cargo xtask codegen`; its output is checked in as `crates/bindings/src/generated.rs`.
 - **`page` is the only crate that sees the whole stack.** `bindings` deliberately does not depend on `paint`/`raster`/`page` — the render cache lives on `Page`, not on `PageState`.
 - **`engine` is above `page`, and `cli` does not go through it** (ADR-0027). `Browser` → `BrowserContext` → `PageHandle` are `Send + Sync` façades over one OS thread per `Page` — `Page` is permanently `!Send` (rquickjs without `parallel`, stylo's thread-locals), so only messages cross. The edge points one way and stays that way: `page` learns nothing about browsers or protocols because a command is an opaque `Box<dyn FnOnce(&Page) + Send>`. Adding a `page → engine` dependency is how that inverts.
-- `capi`, `cdp`, `raster-vello` are documented **stubs** for later phases.
+- **`cdp` is above `engine`, and only `oxidepage serve` reaches it** (ADR-0030). It owns the WebSocket, the target registry and the command lanes; nothing below it knows the protocol exists. Every other CLI subcommand still drives one `Page` synchronously and depends on neither `engine` nor `cdp`.
+- `capi` and `raster-vello` are documented **stubs** for later phases.
 
 ### Pipeline
 

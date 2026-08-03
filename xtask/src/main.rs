@@ -4,6 +4,7 @@
 //! scaffolded here and error out until their phase lands.
 
 mod golden;
+mod puppeteer;
 mod reftest;
 mod testserver;
 mod wpt;
@@ -57,6 +58,15 @@ fn main() -> ExitCode {
                 .map(String::as_str);
             reftest::run(&workspace_root(), filter)
         }
+        Some("puppeteer") => {
+            let update = args.iter().any(|a| a == "--update");
+            let filter = args
+                .iter()
+                .position(|a| a == "--filter")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            puppeteer::run(&workspace_root(), update, filter)
+        }
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
             usage();
@@ -81,7 +91,10 @@ fn usage() {
          \x20 golden [--update] [--filter <substr>]\n\
          \x20                    compare display-list JSON goldens (tests/goldens)\n\
          \x20 reftest [--filter <substr>]\n\
-         \x20                    run pixel-compare reftests (tests/reftests)"
+         \x20                    run pixel-compare reftests (tests/reftests)\n\
+         \x20 puppeteer [--update] [--filter <substr>]\n\
+         \x20                    drive the CDP endpoint with a real Puppeteer\n\
+         \x20                    (tests/automation; needs a Node toolchain)"
     );
 }
 

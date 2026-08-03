@@ -1,0 +1,12 @@
+{
+  "name": "oxidepage-automation",
+  "private": true,
+  "type": "module",
+  "description": "Puppeteer conformance harness driven by `cargo xtask puppeteer`.",
+  "scripts": {
+    "check": "node run.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "24.10.2"
+  }
+}

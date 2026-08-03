@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OxidePage automation fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 0; padding: 24px; }
+  #box { width: 120px; height: 60px; background: #2d7; }
+</style>
+<h1 id="heading">Fixture</h1>
+<p class="para">first</p>
+<p class="para">second</p>
+<div id="box"></div>
+<a id="link" href="/other.html">to other</a>
+<input id="field" value="initial">
+<script>
+  globalThis.__ready = true;
+  globalThis.__sum = (a, b) => a + b;
+  console.log('fixture loaded', 42);
+</script>

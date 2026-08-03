@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use oxidepage_page::{
-    DialogRequest, DialogResponse, LoopStats, OpenWindowRequest, OpenedWindow, Page, PageJob,
-    PageOptions, PageRecord, PaintOptions, PdfOptions, ScreenshotOptions, SharedLocalStorage,
-    SharedNetConfig, Viewport, WaitUntil, WindowOp,
+    CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult, LoopStats,
+    NavigationHistory, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions, PageRecord,
+    PaintOptions, PdfOptions, PropertyDescriptor, RemoteError, ScreenshotOptions,
+    SharedLocalStorage, SharedNetConfig, Viewport, WaitUntil, WindowOp,
 };
 
 use crate::context::{BrowserContext, PageSettings};
@@ -329,6 +330,145 @@ impl PageHandle {
         self.with(move |page| page.navigate(&url, wait).map_err(|e| e.to_string()))
     }
 
+    /// Reloads the current document, bypassing the HTTP cache.
+    pub fn reload(&self, wait: WaitUntil) -> EngineResult<Result<(), String>> {
+        self.with(move |page| page.reload(wait).map_err(|e| e.to_string()))
+    }
+
+    /// Cancels queued navigations, returning how many were dropped.
+    ///
+    /// A **control** call. An ordinary job is deferred while the page
+    /// navigates, which is the one moment this method exists for: it would
+    /// answer only once the load it was meant to cut short had finished. As a
+    /// control job it answers at the page's first wait point instead. It clears
+    /// one `RefCell` queue whose borrow is never held across a wait point, so it
+    /// is sound at any of them.
+    ///
+    /// It is still not instant: a page inside a **blocking** document fetch
+    /// services no job at all, so a caller must not treat this as interruptible
+    /// on demand (`cdp::session::is_priority` explains what that rules out).
+    pub fn stop_loading(&self) -> EngineResult<usize> {
+        self.with_control(Page::stop_loading)
+    }
+
+    /// A snapshot of the session history.
+    pub fn navigation_history(&self) -> EngineResult<NavigationHistory> {
+        self.with(Page::navigation_history)
+    }
+
+    /// Traverses to an absolute session-history index.
+    pub fn navigate_to_history_entry(
+        &self,
+        index: usize,
+        wait: WaitUntil,
+    ) -> EngineResult<Result<(), String>> {
+        self.with(move |page| {
+            page.navigate_to_history_entry(index, wait)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    // === the remote object model (ADR-0030) ===
+
+    /// Evaluates `source` in the page's main world.
+    pub fn evaluate(
+        &self,
+        source: &str,
+        options: EvaluateOptions,
+    ) -> EngineResult<EvaluationResult> {
+        let source = source.to_owned();
+        self.with(move |page| page.evaluate(&source, &options))
+    }
+
+    /// Calls a function expression with `this` bound to a live handle.
+    pub fn call_function_on(
+        &self,
+        declaration: String,
+        object_id: Option<u64>,
+        args: Vec<CallArgument>,
+        options: EvaluateOptions,
+    ) -> EngineResult<Result<EvaluationResult, RemoteError>> {
+        self.with(move |page| page.call_function_on(&declaration, object_id, &args, &options))
+    }
+
+    /// The own enumerable properties of a handle.
+    pub fn get_properties(
+        &self,
+        object_id: u64,
+        group: Option<String>,
+    ) -> EngineResult<Result<Vec<PropertyDescriptor>, RemoteError>> {
+        self.with(move |page| page.get_properties(object_id, group.as_deref()))
+    }
+
+    /// Settles a promise handle.
+    pub fn await_promise(
+        &self,
+        object_id: u64,
+        options: EvaluateOptions,
+    ) -> EngineResult<Result<EvaluationResult, RemoteError>> {
+        self.with(move |page| page.await_promise(object_id, &options))
+    }
+
+    /// Releases one handle. `false` if it was already gone.
+    pub fn release_object(&self, object_id: u64) -> EngineResult<bool> {
+        self.with(move |page| page.release_object(object_id))
+    }
+
+    /// Releases every handle in a group, returning how many.
+    pub fn release_object_group(&self, group: String) -> EngineResult<usize> {
+        self.with(move |page| page.release_object_group(&group))
+    }
+
+    /// Installs a global function that reports its argument to the embedder.
+    pub fn add_binding(&self, name: String) -> EngineResult<Result<(), String>> {
+        self.with(move |page| page.add_binding(&name))
+    }
+
+    /// Takes the binding payloads produced since the last call.
+    pub fn drain_binding_calls(&self) -> EngineResult<Vec<(String, String)>> {
+        self.with(Page::drain_binding_calls)
+    }
+
+    /// The id of the current document's execution context.
+    ///
+    /// A **control** call, and that is load-bearing. It reads a single `Cell`,
+    /// so it is sound at any wait point — and it is read from a driver's event
+    /// thread, which must never block: an ordinary job is deferred while the
+    /// page navigates, parses, is suspended, or is parked in a dialog, so this
+    /// would otherwise stall *every* event on that connection, for every
+    /// target, for up to the command timeout.
+    pub fn execution_context_id(&self) -> EngineResult<u64> {
+        self.with_control(Page::execution_context_id)
+    }
+
+    /// Registers a script to run at the start of every new document.
+    pub fn add_init_script(&self, source: String) -> EngineResult<u64> {
+        self.with(move |page| page.add_init_script(&source))
+    }
+
+    /// Removes an init script. `false` if no script has that id.
+    pub fn remove_init_script(&self, id: u64) -> EngineResult<bool> {
+        self.with(move |page| page.remove_init_script(id))
+    }
+
+    /// Bytes the page's JavaScript heap is currently using.
+    pub fn js_heap_used(&self) -> EngineResult<i64> {
+        self.with(Page::js_heap_used)
+    }
+
+    /// A retained response body, and whether it is text rather than bytes.
+    pub fn response_body(
+        &self,
+        id: oxidepage_page::RequestId,
+    ) -> EngineResult<Option<(Vec<u8>, bool)>> {
+        self.with(move |page| page.response_body(id))
+    }
+
+    /// The current document URL.
+    pub fn url(&self) -> EngineResult<String> {
+        self.with(|page| page.dom().document_url().to_owned())
+    }
+
     /// Loads an in-memory document as the current one.
     pub fn set_content(&self, html: &str) -> EngineResult<Result<(), String>> {
         let html = html.to_owned();
@@ -367,6 +507,11 @@ impl PageHandle {
         self.with(Page::document_html)
     }
 
+    /// The page's current layout viewport, including its device pixel ratio.
+    pub fn viewport(&self) -> EngineResult<Viewport> {
+        self.with(Page::viewport)
+    }
+
     pub fn set_viewport(&self, viewport: Viewport) -> EngineResult<()> {
         self.with(move |page| page.set_viewport(viewport))
     }
@@ -396,6 +541,26 @@ impl PageHandle {
     /// nothing.
     pub fn resume(&self) -> EngineResult<()> {
         self.with_control(Page::resume)
+    }
+
+    /// Whether a dialog on this page is *held* for an explicit answer.
+    ///
+    /// False under [`DialogPolicy::Dismiss`] and [`DialogPolicy::Accept`],
+    /// where the page answers itself and [`PageHandle::answer_dialog`] can only
+    /// ever fail. A driver needs to know this before it promises a user that a
+    /// dialog will wait — it is exactly CDP's `hasBrowserHandler`.
+    #[must_use]
+    pub fn awaits_dialog_answer(&self) -> bool {
+        matches!(self.0.dialog_policy, DialogPolicy::Ask { .. })
+    }
+
+    /// Whether a dialog is open on this page right now.
+    ///
+    /// Read from a shared atomic, so it stays truthful for a page that is
+    /// parked in the dialog and can answer nothing else.
+    #[must_use]
+    pub fn dialog_pending(&self) -> bool {
+        self.0.dialog_pending.load(Ordering::Acquire)
     }
 
     /// Answers the dialog the page is parked on under [`DialogPolicy::Ask`].

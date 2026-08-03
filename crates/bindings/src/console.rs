@@ -29,8 +29,13 @@ pub enum ConsoleLevel {
 }
 
 impl ConsoleLevel {
-    /// The console method name this level came from — `Runtime.consoleAPICalled`'s
-    /// `type`, and what the CLI prints.
+    /// The console **method name** this level came from, and what the CLI
+    /// prints.
+    ///
+    /// Close to, but *not*, CDP's `Runtime.consoleAPICalled.type`: that enum
+    /// spells `console.warn`'s level `warning`. The protocol layer maps it
+    /// (`crates/cdp/src/pump.rs`); this stays the method name, which is what a
+    /// human reading CLI output expects to see.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

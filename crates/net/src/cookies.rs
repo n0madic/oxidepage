@@ -64,6 +64,46 @@ impl Cookie {
     }
 }
 
+/// An owned, inspectable view of one stored cookie.
+///
+/// Separate from the jar's internal `Cookie` on purpose: that type carries
+/// `last_access`, `creation` and the eviction bookkeeping RFC 6265bis §5.6
+/// needs, none of which is anyone else's business — and exposing it would make
+/// every future change to eviction a breaking API change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CookieView {
+    pub name: String,
+    pub value: String,
+    /// Canonical: lowercase, no leading dot.
+    pub domain: String,
+    pub path: String,
+    /// `None` for a session cookie.
+    pub expires: Option<SystemTime>,
+    pub secure: bool,
+    pub http_only: bool,
+    /// `"Strict"`, `"Lax"` or `"None"`.
+    pub same_site: &'static str,
+}
+
+impl CookieView {
+    fn from_cookie(cookie: &Cookie) -> Self {
+        Self {
+            name: cookie.name.clone(),
+            value: cookie.value.clone(),
+            domain: cookie.domain.clone(),
+            path: cookie.path.clone(),
+            expires: cookie.expires,
+            secure: cookie.secure,
+            http_only: cookie.http_only,
+            same_site: match cookie.same_site {
+                SameSite::Strict => "Strict",
+                SameSite::Lax => "Lax",
+                SameSite::None => "None",
+            },
+        }
+    }
+}
+
 /// A page's cookie store.
 #[derive(Default)]
 pub struct CookieJar {
@@ -180,7 +220,7 @@ impl CookieJar {
             return Vec::new();
         };
         let secure_request = url.scheme() == "https";
-        let req_path = default_path(url);
+        let req_path = request_path(url);
 
         let mut indices: Vec<usize> = Vec::new();
         for (i, c) in self.cookies.iter().enumerate() {
@@ -272,6 +312,67 @@ impl CookieJar {
                 break;
             }
         }
+    }
+
+    /// Every unexpired cookie, as an owned snapshot.
+    ///
+    /// The jar's own `Cookie` stays private — it carries `last_access` and
+    /// eviction bookkeeping nobody outside should depend on — so this hands
+    /// back a separate view type. Added for CDP's `Network.getAllCookies`
+    /// (ADR-0030), which is also what a driver's `context.cookies()` reads.
+    #[must_use]
+    pub fn snapshot(&self, now: SystemTime) -> Vec<CookieView> {
+        self.cookies
+            .iter()
+            .filter(|cookie| !cookie.is_expired(now))
+            .map(CookieView::from_cookie)
+            .collect()
+    }
+
+    /// The unexpired cookies that would be *sent* to `url`.
+    ///
+    /// Unlike [`CookieJar::cookie_header`] this reports `HttpOnly` cookies too
+    /// and does not touch `last_access`: it is an inspection, not a request.
+    #[must_use]
+    pub fn snapshot_for(&self, url: &Url, now: SystemTime) -> Vec<CookieView> {
+        let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+            return Vec::new();
+        };
+        let secure_request = url.scheme() == "https";
+        let path = request_path(url);
+        self.cookies
+            .iter()
+            .filter(|cookie| {
+                !cookie.is_expired(now)
+                    && domain_matches(&host, &cookie.domain, cookie.host_only)
+                    && path_matches(&path, &cookie.path)
+                    && (!cookie.secure || secure_request)
+            })
+            .map(CookieView::from_cookie)
+            .collect()
+    }
+
+    /// Removes cookies matching `name`, and — when given — `domain` and `path`.
+    ///
+    /// Returns how many were removed. An absent `domain` or `path` matches any,
+    /// which is what CDP's `Network.deleteCookies` specifies.
+    pub fn remove(&mut self, name: &str, domain: Option<&str>, path: Option<&str>) -> usize {
+        let domain = domain.map(|d| d.trim_start_matches('.').to_ascii_lowercase());
+        let before = self.cookies.len();
+        self.cookies.retain(|cookie| {
+            let matches = cookie.name == name
+                && domain.as_ref().is_none_or(|d| &cookie.domain == d)
+                && path.is_none_or(|p| cookie.path == p);
+            !matches
+        });
+        before - self.cookies.len()
+    }
+
+    /// Empties the jar, returning how many cookies were dropped.
+    pub fn clear(&mut self) -> usize {
+        let dropped = self.cookies.len();
+        self.cookies.clear();
+        dropped
     }
 
     /// Number of stored cookies (test/introspection aid).
@@ -467,7 +568,21 @@ fn path_matches(request_path: &str, cookie_path: &str) -> bool {
     cookie_path.ends_with('/') || request_path.as_bytes().get(cookie_path.len()) == Some(&b'/')
 }
 
-/// RFC 6265 §5.1.4 default path from a request URI.
+/// RFC 6265bis §5.4's **request-path**: the URI's path, verbatim.
+///
+/// Not [`default_path`], which is §5.1.4 and applies only when *storing* a
+/// cookie that carried no `Path`. Using the default path to match was a real
+/// bug: it drops the last segment, so a cookie with `Path=/app` was never sent
+/// to `/app` itself — only to something below it.
+fn request_path(url: &Url) -> String {
+    let path = url.path();
+    if path.is_empty() {
+        return "/".to_owned();
+    }
+    path.to_owned()
+}
+
+/// RFC 6265 §5.1.4 default path from a request URI, for *storing* a cookie.
 fn default_path(url: &Url) -> String {
     let path = url.path();
     if path.is_empty() || !path.starts_with('/') {
@@ -885,6 +1000,136 @@ mod tests {
         assert!(
             jar.cookie_header(&u, true, CookieSource::Http, cap + Duration::from_secs(10))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_every_stored_cookie() {
+        let mut jar = CookieJar::new();
+        let url = url("https://example.com/a/b");
+        jar.set_cookie(&url, "a=1", CookieSource::Http, t0());
+        jar.set_cookie(&url, "b=2; HttpOnly", CookieSource::Http, t0());
+
+        let mut names: Vec<String> = jar.snapshot(t0()).into_iter().map(|c| c.name).collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+
+        // Unlike `document.cookie`, an inspection sees HttpOnly too — that is
+        // the whole point of `Network.getAllCookies`.
+        let http_only = jar
+            .snapshot(t0())
+            .into_iter()
+            .find(|c| c.name == "b")
+            .unwrap();
+        assert!(http_only.http_only);
+        assert_eq!(http_only.domain, "example.com");
+    }
+
+    #[test]
+    fn snapshot_for_filters_by_url_without_touching_access_time() {
+        let mut jar = CookieJar::new();
+        jar.set_cookie(
+            &url("https://example.com/"),
+            "a=1",
+            CookieSource::Http,
+            t0(),
+        );
+        jar.set_cookie(&url("https://other.test/"), "b=2", CookieSource::Http, t0());
+
+        let names: Vec<String> = jar
+            .snapshot_for(&url("https://example.com/x"), t0())
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["a"]);
+        assert!(
+            jar.snapshot_for(&url("https://nowhere.test/"), t0())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn remove_matches_name_and_optionally_domain_and_path() {
+        let mut jar = CookieJar::new();
+        jar.set_cookie(
+            &url("https://example.com/x"),
+            "a=1; Path=/x",
+            CookieSource::Http,
+            t0(),
+        );
+        jar.set_cookie(
+            &url("https://example.com/y"),
+            "a=2; Path=/y",
+            CookieSource::Http,
+            t0(),
+        );
+        jar.set_cookie(
+            &url("https://example.com/"),
+            "b=3",
+            CookieSource::Http,
+            t0(),
+        );
+        assert_eq!(jar.len(), 3);
+
+        // Path narrows the match; the other `a` survives.
+        assert_eq!(jar.remove("a", None, Some("/x")), 1);
+        assert_eq!(jar.len(), 2);
+
+        // An absent domain and path match any, per `Network.deleteCookies`.
+        assert_eq!(jar.remove("a", None, None), 1);
+        assert_eq!(jar.remove("missing", None, None), 0);
+        assert_eq!(jar.len(), 1);
+
+        // A leading dot on the domain is not significant.
+        assert_eq!(jar.remove("b", Some(".example.com"), None), 1);
+        assert!(jar.is_empty());
+    }
+
+    #[test]
+    fn clear_empties_the_jar() {
+        let mut jar = CookieJar::new();
+        jar.set_cookie(
+            &url("https://example.com/"),
+            "a=1",
+            CookieSource::Http,
+            t0(),
+        );
+        jar.set_cookie(&url("https://other.test/"), "b=2", CookieSource::Http, t0());
+        assert_eq!(jar.clear(), 2);
+        assert!(jar.is_empty());
+        assert_eq!(jar.clear(), 0);
+    }
+
+    #[test]
+    fn a_cookie_is_sent_to_its_own_path() {
+        // RFC 6265bis §5.4 matches on the URI's **request-path**. Using
+        // §5.1.4's default-path instead drops the last segment, so `Path=/app`
+        // reached `/app/x` but never `/app` itself.
+        let mut jar = CookieJar::new();
+        jar.set_cookie(
+            &url("http://example.com/app/"),
+            "p=2; Path=/app",
+            CookieSource::Http,
+            t0(),
+        );
+
+        let exact = url("http://example.com/app");
+        assert_eq!(
+            jar.cookie_header(&exact, true, CookieSource::Http, t0())
+                .as_deref(),
+            Some("p=2")
+        );
+        // The inspection path agrees with the request path.
+        assert_eq!(jar.snapshot_for(&exact, t0()).len(), 1);
+        // And a sibling still does not match.
+        assert!(
+            jar.cookie_header(
+                &url("http://example.com/other"),
+                true,
+                CookieSource::Http,
+                t0()
+            )
+            .is_none()
         );
     }
 }

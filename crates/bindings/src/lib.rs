@@ -21,6 +21,7 @@ mod handlers;
 pub mod imp;
 mod netdata;
 pub mod preview;
+pub mod remote;
 mod script;
 pub mod state;
 pub mod storage;

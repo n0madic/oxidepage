@@ -104,6 +104,19 @@ impl BrowserContext {
         self.0.id
     }
 
+    /// The options this context was created with.
+    ///
+    /// Exposed so a caller can create a *sibling* configured like an existing
+    /// one. A driver's `createBrowserContext` is the case that needs it: the
+    /// operator configured the browser's default context (viewport, dialog
+    /// policy), and an incognito context that silently reverted to the stock
+    /// defaults would answer dialogs differently from every other page in the
+    /// same process.
+    #[must_use]
+    pub fn options(&self) -> ContextOptions {
+        self.0.options.clone()
+    }
+
     /// This context's cookie jar, shared by all its pages.
     #[must_use]
     pub fn cookies(&self) -> Arc<Mutex<CookieJar>> {

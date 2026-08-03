@@ -29,11 +29,12 @@ pub mod fetch;
 pub mod file;
 pub mod ip_filter;
 pub mod policy;
+pub mod record;
 pub mod service;
 
 pub use cache::{CachePartition, HttpCache};
 pub use client::HttpClient;
-pub use cookies::{CookieJar, CookieSource};
+pub use cookies::{CookieJar, CookieSource, CookieView};
 pub use data::DataBody;
 pub use error::{NetError, NetResult};
 pub use fetch::{
@@ -43,6 +44,7 @@ pub use fetch::{
 };
 pub use ip_filter::ip_allowed;
 pub use policy::ResourcePolicy;
+pub use record::{NetworkEvent, RequestLog};
 pub use service::{NetEvent, NetPool, NetPoolOptions, NetService, SharedNetConfig};
 
 pub use oxidepage_base::{NetErrorKind, RequestId};

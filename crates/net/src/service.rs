@@ -18,6 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +48,7 @@ use crate::fetch::{
     FetchEngine, FetchOutcome, NetRequest, RequestDefaults, ResponseType, SharedFetchParts,
 };
 use crate::policy::ResourcePolicy;
+use crate::record::{NetworkEvent, RequestLog};
 
 /// A net→page progress event, tagged with the originating [`RequestId`].
 #[derive(Debug)]
@@ -238,7 +240,29 @@ pub struct NetService {
     cancels: RefCell<HashMap<RequestId, Arc<AtomicBool>>>,
     /// Bounds simultaneous in-flight spawned fetches.
     sem: Arc<Semaphore>,
+    /// Retained response bodies, for a driver reading one back (ADR-0030).
+    log: RefCell<RequestLog>,
+    /// The requests announced to the observer that have not yet reported a
+    /// terminal outcome — and, once headers arrive, each one's `Content-Type`.
+    ///
+    /// One map for two jobs on purpose: the content type is remembered so the
+    /// body can be classified text-or-bytes when it lands, and *membership* is
+    /// what makes a terminal event exactly-once. Every `Finished`/`Failed` goes
+    /// through [`NetService::close`], so a request cannot report finished and
+    /// then failed (an `xhr.abort()` after the response landed), nor fail twice,
+    /// nor — the direction a plain "did headers arrive" test misses — vanish
+    /// with no terminal event at all when it is aborted *before* its headers.
+    open: RefCell<HashMap<RequestId, String>>,
+    /// Told about every request's progress, when an embedder wants to know.
+    ///
+    /// `Rc`, not `Arc`: the service lives on the page thread and so does the
+    /// observer. Nothing here crosses a thread — the driver side receives this
+    /// as a `PageEvent`, which the page's own bus already carries.
+    observer: RefCell<Option<NetObserver>>,
 }
+
+/// A callback told about each request's progress.
+pub type NetObserver = Rc<dyn Fn(NetworkEvent)>;
 
 impl NetService {
     /// Builds a service over `policy`, returning it plus the receiver the
@@ -298,6 +322,9 @@ impl NetService {
                 next_id: Cell::new(1),
                 cancels: RefCell::new(HashMap::new()),
                 sem: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
+                log: RefCell::new(RequestLog::default()),
+                open: RefCell::new(HashMap::new()),
+                observer: RefCell::new(None),
             },
             rx,
         )
@@ -337,8 +364,183 @@ impl NetService {
         self.spawn_fetch(request)
     }
 
+    /// Installs the network observer, replacing any previous one.
+    pub fn set_observer(&self, observer: Option<NetObserver>) {
+        *self.observer.borrow_mut() = observer;
+    }
+
+    fn notify(&self, event: NetworkEvent) {
+        // Cloned out of the `RefCell` before the call: an observer that starts
+        // another request would otherwise re-enter this borrow.
+        let observer = self.observer.borrow().clone();
+        if let Some(observer) = observer {
+            observer(event);
+        }
+    }
+
+    /// The retained body of `id`, and whether it is text rather than bytes.
+    #[must_use]
+    pub fn response_body(&self, id: RequestId) -> Option<(Vec<u8>, bool)> {
+        self.log
+            .borrow()
+            .body(id)
+            .map(|(bytes, text)| (bytes.to_vec(), text))
+    }
+
+    /// Drops every retained body — a new document's requests replace them.
+    pub fn clear_log(&self) {
+        self.log.borrow_mut().clear();
+    }
+
+    /// Ends `id`'s record, reporting whether it was still open.
+    ///
+    /// The single gate on every terminal event: a request reports `Finished` or
+    /// `Failed` once, or not at all.
+    fn close(&self, id: RequestId) -> bool {
+        self.open.borrow_mut().remove(&id).is_some()
+    }
+
+    /// Announces an outgoing request and starts its record.
+    fn note_request(&self, id: RequestId, request: &NetRequest) {
+        // Opened here, not on the response: a request aborted before its
+        // headers arrive still owes the observer a terminal event, and the
+        // driver's in-flight count — hence every `networkidle` wait — never
+        // settles without one.
+        self.open.borrow_mut().insert(id, String::new());
+        self.notify(NetworkEvent::Requested {
+            id,
+            url: request.url.clone(),
+            method: request.method.clone(),
+            headers: request.headers.clone(),
+            timestamp: epoch_ms(),
+        });
+    }
+
+    /// Records and announces a completed synchronous fetch.
+    ///
+    /// The blocking path produces **no** `NetEvent`, so without this the main
+    /// document — and every ES module and blocking `@import` — would be
+    /// invisible to a driver and unavailable to `getResponseBody`. A hook on
+    /// the async path alone misses exactly the request a driver cares most
+    /// about.
+    fn note_blocking_outcome(&self, id: RequestId, outcome: &NetResult<FetchOutcome>) {
+        if !self.close(id) {
+            return;
+        }
+        match outcome {
+            Ok(FetchOutcome { head, body }) => {
+                let content_type = header_value(&head.headers, "content-type");
+                self.log
+                    .borrow_mut()
+                    .retain(id, body.clone(), &content_type);
+                self.notify(NetworkEvent::Responded {
+                    id,
+                    status: head.status,
+                    status_text: head.status_text.clone(),
+                    headers: head.headers.clone(),
+                    final_url: head.final_url.clone(),
+                    mime_type: mime_of(&content_type),
+                    timestamp: epoch_ms(),
+                });
+                self.notify(NetworkEvent::Finished {
+                    id,
+                    encoded_len: body.len() as u64,
+                    timestamp: epoch_ms(),
+                });
+            }
+            Err(error) => self.notify(NetworkEvent::Failed {
+                id,
+                error: error.to_string(),
+                timestamp: epoch_ms(),
+            }),
+        }
+    }
+
+    /// Folds one asynchronous [`NetEvent`] into the log.
+    ///
+    /// Called by the page at the top of its `dispatch_net_event`, which is the
+    /// one place every async response passes through. Doing it inside
+    /// `spawn_fetch` is not possible: that runs on a tokio worker, and the log
+    /// and observer belong to the page thread.
+    pub fn note_event(&self, event: &NetEvent) {
+        match event {
+            NetEvent::Headers {
+                id,
+                status,
+                status_text,
+                headers,
+                final_url,
+                ..
+            } => {
+                let content_type = header_value(headers, "content-type");
+                {
+                    // Only if still open: a response that lands after the page
+                    // aborted the request has already reported its outcome.
+                    let mut open = self.open.borrow_mut();
+                    let Some(slot) = open.get_mut(id) else {
+                        return;
+                    };
+                    slot.clone_from(&content_type);
+                }
+                self.notify(NetworkEvent::Responded {
+                    id: *id,
+                    status: *status,
+                    status_text: status_text.clone(),
+                    headers: headers.clone(),
+                    final_url: final_url.clone(),
+                    mime_type: mime_of(&content_type),
+                    timestamp: epoch_ms(),
+                });
+            }
+            NetEvent::Chunk { id, data } => {
+                // Taken, not read: `Done` uses the entry's absence to tell a
+                // body that already reported `Finished` from one that never
+                // produced a chunk at all.
+                let content_type = self.open.borrow_mut().remove(id);
+                let Some(content_type) = content_type else {
+                    return;
+                };
+                // Exactly one chunk carries the whole body today, so this is a
+                // retain rather than an append. If chunking ever becomes real,
+                // this is the line that has to grow a buffer.
+                self.log
+                    .borrow_mut()
+                    .retain(*id, data.clone(), &content_type);
+                self.notify(NetworkEvent::Finished {
+                    id: *id,
+                    encoded_len: data.len() as u64,
+                    timestamp: epoch_ms(),
+                });
+            }
+            NetEvent::Done { id } => {
+                // A response with an **empty body** produces no `Chunk` at all
+                // (`spawn_fetch` skips it), so `Done` is the only place a 204, a
+                // HEAD or a bodyless 404 can be closed out. Without this the
+                // driver counts the request in flight forever and every
+                // `networkidle` wait hangs.
+                if self.close(*id) {
+                    self.notify(NetworkEvent::Finished {
+                        id: *id,
+                        encoded_len: 0,
+                        timestamp: epoch_ms(),
+                    });
+                }
+            }
+            NetEvent::Error { id, error } => {
+                if self.close(*id) {
+                    self.notify(NetworkEvent::Failed {
+                        id: *id,
+                        error: error.to_string(),
+                        timestamp: epoch_ms(),
+                    });
+                }
+            }
+        }
+    }
+
     fn spawn_fetch(&self, request: NetRequest) -> RequestId {
         let id = self.next_request_id();
+        self.note_request(id, &request);
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.borrow_mut().insert(id, Arc::clone(&cancel));
         let engine = self.engine.clone();
@@ -389,6 +591,24 @@ impl NetService {
         if let Some(flag) = self.cancels.borrow_mut().remove(&id) {
             flag.store(true, Ordering::Relaxed);
         }
+        // The cancelled task returns silently, so this is the only place the
+        // `Requested` event already sent to an observer can be closed out.
+        // `reset_document_state` aborts every pending script, sheet, image and
+        // font on *every* navigation, so without this each `goto` permanently
+        // leaks the previous document's in-flight count into the driver's
+        // bookkeeping — and a `networkidle` wait never resolves.
+        //
+        // Only if still open, though: `abort` is reachable from `xhr.abort()`
+        // and `AbortController` *after* the response has landed, and a
+        // `loadingFailed` following a `loadingFinished` for a request that
+        // succeeded is worse than no event at all.
+        if self.close(id) {
+            self.notify(NetworkEvent::Failed {
+                id,
+                error: String::from("net::ERR_ABORTED"),
+                timestamp: epoch_ms(),
+            });
+        }
     }
 
     /// Forgets an in-flight request's cancel flag once the page has fully
@@ -401,6 +621,53 @@ impl NetService {
     /// (used by the synchronous ES module loader). Tokio workers deliver the
     /// bytes; only the page thread parks.
     pub fn fetch_blocking(&self, request: NetRequest) -> NetResult<FetchOutcome> {
-        self.pool.handle().block_on(self.engine.fetch(request))
+        let id = self.next_request_id();
+        self.note_request(id, &request);
+        let outcome = self.pool.handle().block_on(self.engine.fetch(request));
+        self.note_blocking_outcome(id, &outcome);
+        outcome
     }
+
+    /// Like [`NetService::fetch_blocking`], reporting the id it recorded under
+    /// so a caller can read the body back.
+    pub fn fetch_blocking_tracked(
+        &self,
+        request: NetRequest,
+    ) -> (RequestId, NetResult<FetchOutcome>) {
+        let id = self.next_request_id();
+        self.note_request(id, &request);
+        let outcome = self.pool.handle().block_on(self.engine.fetch(request));
+        self.note_blocking_outcome(id, &outcome);
+        (id, outcome)
+    }
+}
+
+/// Unix-epoch milliseconds, the timestamp every [`NetworkEvent`] carries.
+///
+/// Wall clock rather than monotonic because a driver correlates these with the
+/// page's own `Date.now()`-based records — console lines, navigation
+/// milestones — which are all epoch-based.
+fn epoch_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |since| since.as_secs_f64() * 1000.0)
+}
+
+/// A header value by case-insensitive name.
+fn header_value(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
+/// The MIME type of a `Content-Type`, without parameters.
+fn mime_of(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }

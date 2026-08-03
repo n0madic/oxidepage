@@ -25,6 +25,14 @@ pub enum PageEvent {
     /// A dialog the page opened, with the answer it got. Always follows a
     /// [`PageEvent::DialogOpening`].
     Dialog(DialogEvent),
+    /// Page script called a function installed by
+    /// [`PageHandle::add_binding`](crate::PageHandle::add_binding).
+    Binding {
+        name: String,
+        payload: String,
+    },
+    /// One step of a network request's life (ADR-0030).
+    Network(oxidepage_page::NetworkEvent),
     /// A sibling called `w.focus()` on this page.
     ///
     /// Reported rather than acted on: focusing a browsing context means
@@ -57,6 +65,8 @@ impl PageEvent {
             PageRecord::Error(error) => Self::Error(error),
             PageRecord::DialogOpening(request) => Self::DialogOpening(request),
             PageRecord::Dialog(event) => Self::Dialog(event),
+            PageRecord::Binding { name, payload } => Self::Binding { name, payload },
+            PageRecord::Network(event) => Self::Network(event),
         }
     }
 }

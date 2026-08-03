@@ -44,7 +44,7 @@ pub struct BindCx<'a> {
 
 /// The page state installed in `scope`'s realm. Host callbacks recover it here
 /// rather than capturing it, which keeps JS→Rust reference cycles impossible.
-pub(crate) fn page_state(scope: &dyn JsScope) -> Result<Rc<PageState>, JsThrow> {
+pub fn page_state(scope: &dyn JsScope) -> Result<Rc<PageState>, JsThrow> {
     scope
         .state()
         .and_then(|s| s.downcast::<PageState>().ok())

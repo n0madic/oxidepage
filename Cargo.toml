@@ -26,6 +26,7 @@ oxidepage-raster-vello = { path = "crates/raster-vello" }
 oxidepage-export-pdf = { path = "crates/export-pdf" }
 oxidepage-page = { path = "crates/page" }
 oxidepage-engine = { path = "crates/engine" }
+oxidepage-cdp = { path = "crates/cdp" }
 
 # External dependencies
 # Pinned: the nested-module `meta()` path (import.meta.url for statically
@@ -124,6 +125,30 @@ url = "2"
 percent-encoding = "2"
 psl = "2"
 http-cache-semantics = "2"
+
+# Chrome DevTools Protocol server (Phase 9 / automation stage 6, ADR-0030).
+#
+# `serde` + `serde_json` are the first serde in the tree. They are scoped to
+# `crates/cdp`: the protocol is a JSON wire format defined by someone else, so
+# hand-writing its escaping and number formatting buys nothing. This does *not*
+# reopen `crates/paint/src/json.rs`, which hand-writes JSON on purpose because
+# display-list goldens must be byte-stable and reviewable.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# WebSocket framing only. `default-features = false` drops `connect` (we are a
+# server, never a client) and with it every TLS stack — the endpoint is
+# loopback-only by design (ADR-0030), so a TLS listener would be dead code
+# pulling a second rustls configuration into the binary. `handshake` is the one
+# feature kept: it is what `accept_async` needs. permessage-deflate is a
+# `tungstenite` feature and is *not* enabled — CDP messages are small and a
+# compression state machine is attack surface the endpoint does not need.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# `WebSocketStream` is a `Stream` + `Sink` and nothing else; `futures-util` is
+# where the `.next()` / `.send()` those traits are used through live. It is
+# already in the tree as tokio-tungstenite's own dependency, so naming it here
+# adds no build. `default-features = false` keeps out the executor and the
+# `futures` compat shims — this is a trait-extension dependency, not a runtime.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 # Dev dependencies
 proptest = "1"

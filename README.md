@@ -108,6 +108,39 @@ oxidepage dump-layout page.html                    # box tree with computed posi
 oxidepage dump-display-list page.html -o list.json  # paint display list as JSON
 ```
 
+### Drive it with Puppeteer
+
+`serve` starts a Chrome DevTools Protocol endpoint and prints its WebSocket URL
+on stdout:
+
+```sh
+oxidepage serve --port 9222
+# ws://127.0.0.1:9222/devtools/browser/<token>
+```
+
+```js
+import puppeteer from 'puppeteer-core';
+
+const browser = await puppeteer.connect({ browserWSEndpoint: process.argv[2] });
+const page = await browser.newPage();
+await page.goto('https://example.com');
+console.log(await page.title());
+await page.screenshot({ path: 'shot.png' });
+await browser.disconnect();
+```
+
+Working today: `goto`, `evaluate`, `evaluateHandle`, `screenshot`, `pdf`,
+`cookies`, `exposeFunction`, `goBack`/`reload`, `setViewport`, console and
+`pageerror` events, and browser contexts. Not yet: anything that needs the `DOM`
+or `Input` domains — `page.$`, `waitForSelector`, `click`, `type` — plus request
+interception and isolated worlds. See ADR-0030 for the full list of deliberate
+limits.
+
+> **Security.** The endpoint is unauthenticated control of a process that runs
+> attacker-supplied web content. It binds `127.0.0.1` only, requires a loopback
+> `Host` header, and carries a random path token — but anyone who can reach the
+> port owns the process. Do not forward it.
+
 ### Useful options
 
 All commands accept:
@@ -120,6 +153,8 @@ All commands accept:
 | `--max-bytes <sz>` / `--max-requests <n>` | Per-page network budget (e.g. `--max-bytes 1G`) |
 | `--lazy-images` / `--no-lazy-images` | Fetch `<img>` only near the viewport, or always eagerly |
 | `--quiet` | Suppress page `console.*` output on stderr (script errors and dialogs still print) |
+
+`serve` additionally takes `--port <N>` (default `0`, which picks a free port and prints it).
 
 `render` additionally takes:
 

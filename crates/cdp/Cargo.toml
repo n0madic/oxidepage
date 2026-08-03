@@ -9,6 +9,28 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+oxidepage-engine.workspace = true
+crossbeam-channel.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Origin parsing for `Page.Frame.securityOrigin` only. Already in the tree via
+# `oxidepage-net`; the alternative is hand-rolling scheme/host/port extraction.
+url.workspace = true
+tokio = { workspace = true }
+tokio-tungstenite.workspace = true
+# Not for TLS: `rustls` is already linked into every binary through
+# `oxidepage-net`, and its ring provider exposes the platform CSPRNG. That is
+# where the WebSocket path token comes from, so the endpoint gets real entropy
+# without a `rand` entry in `[workspace.dependencies]` (ADR-0030).
+rustls.workspace = true
+
+[dev-dependencies]
+# The tests need the *client* half tokio-tungstenite's `connect` feature
+# provides. It stays out of the library build on purpose: the server never dials
+# out, and `connect` drags in the stream wrappers the endpoint has no use for.
+tokio-tungstenite = { workspace = true, features = ["connect"] }
 
 [lints]
 workspace = true

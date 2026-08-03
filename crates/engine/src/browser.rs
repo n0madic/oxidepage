@@ -49,6 +49,7 @@ impl Browser {
             },
         )
         .map_err(|e| EngineError::Launch(e.to_string()))?;
+        let default_context = options.default_context.clone();
         let inner = Arc::new(BrowserInner {
             options,
             net_pool,
@@ -57,8 +58,8 @@ impl Browser {
             closed: AtomicBool::new(false),
         });
         let browser = Self(inner);
-        // Context 0 always exists, so `default_context()` never fails.
-        browser.spawn_context(ContextOptions::default());
+        // The default context always exists, so `default_context()` never fails.
+        browser.spawn_context(default_context);
         Ok(browser)
     }
 

@@ -8,7 +8,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use oxidepage_cdp::{CdpServer, ServerOptions};
 use oxidepage_dom::decode::decode_document_bytes;
+use oxidepage_engine::{Browser, BrowserOptions, ContextOptions};
 use oxidepage_page::{
     DialogResponse, ImageFormat, Margins, Page, PageOptions, PaintOptions, PaperSize, PdfOptions,
     Rect, ScreenshotOptions, WaitUntil,
@@ -51,6 +53,7 @@ fn main() -> ExitCode {
         Some("dump-layout") => dump_layout_command(&args[1..]),
         Some("dump-display-list") => dump_display_list_command(&args[1..]),
         Some("render") => render_command(&args[1..]),
+        Some("serve") => serve_command(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             usage();
             ExitCode::from(2)
@@ -73,7 +76,8 @@ fn usage() {
         "usage: oxidepage eval <file.html | http(s)://URL> [expression] [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
          \x20      oxidepage dump-layout <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
          \x20      oxidepage dump-display-list <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [-o <file>] [--quiet]\n\
-         \x20      oxidepage render <file.html | http(s)://URL> -o <out.{{png,jpg,pdf,html}}> [--format png|jpeg|pdf|html] [--viewport WxH] [--dpr N] [--full-page] [--clip X,Y,W,H] [--quality N] [--paper <name|WxH>] [--margin <px|t,r,b,l>] [--scale N] [--landscape] [--single-page] [--no-fit-to-width] [--no-print-background] [--settle-ms <ms>] [--quiet]\n\n\
+         \x20      oxidepage render <file.html | http(s)://URL> -o <out.{{png,jpg,pdf,html}}> [--format png|jpeg|pdf|html] [--viewport WxH] [--dpr N] [--full-page] [--clip X,Y,W,H] [--quality N] [--paper <name|WxH>] [--margin <px|t,r,b,l>] [--scale N] [--landscape] [--single-page] [--no-fit-to-width] [--no-print-background] [--settle-ms <ms>] [--quiet]\n\
+         \x20      oxidepage serve [--port N] [--viewport WxH] [--allow-private]\n\n\
          eval: loads a local HTML file or fetches a document over the network\n\
          (SSRF- and policy-checked), runs its scripts and the event loop until\n\
          it settles, then evaluates `expression` (default: `document.title`)\n\
@@ -94,6 +98,11 @@ fn usage() {
          file. A viewport image only fetches images near the viewport;\n\
          --full-page, --clip, pdf, and html fetch everything and are visible to\n\
          IntersectionObserver.\n\n\
+         serve: starts a Chrome DevTools Protocol endpoint and prints its\n\
+         WebSocket URL, then serves until Browser.close or Ctrl-C. This is what\n\
+         puppeteer.connect({{ browserWSEndpoint }}) attaches to. The endpoint\n\
+         binds 127.0.0.1 only and its URL carries a random token: anyone who can\n\
+         reach it has full control of this process, so do not forward the port.\n\n\
          options:\n\
          \x20 --settle-ms <ms>  event-loop settle budget (default 5000)\n\
          \x20 --viewport WxH    layout viewport in CSS px (default 1280x800)\n\
@@ -113,6 +122,8 @@ fn usage() {
          \x20 --single-page     one PDF page as tall as the whole document\n\
          \x20 --no-fit-to-width do not shrink wide content to the PDF page width\n\
          \x20 --no-print-background  omit element backgrounds from the PDF\n\
+         \x20 --port N          serve: loopback port for the DevTools endpoint\n\
+         \x20                   (default 0 = pick a free one and print it)\n\
          \x20 -o, --output <file>  write output to <file> instead of stdout\n\
          \x20 --quiet           suppress page console output\n\
          \x20 --max-bytes <sz>  per-page response byte budget (e.g. 1G, 2G; default 512M)\n\
@@ -598,6 +609,104 @@ fn load_page(
         return Err(ExitCode::FAILURE);
     }
     Ok(page)
+}
+
+/// `serve`: a CDP endpoint over a real [`Browser`], not the single `Page` every
+/// other subcommand drives.
+///
+/// This is the one subcommand that goes through `oxidepage-engine`. The others
+/// deliberately do not (ADR-0027): they own one page, drive it synchronously
+/// through `settle`, and would gain nothing but a thread hop from a browser.
+fn serve_command(args: &[String]) -> ExitCode {
+    let (args, flags) = match extract_common_flags("serve", args) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+
+    let mut port: u16 = 0;
+    let mut allow_private = false;
+    let mut viewport = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--port" => {
+                let Some(value) = iter.next().and_then(|v| v.parse::<u16>().ok()) else {
+                    eprintln!("oxidepage serve: --port requires a number (0-65535)");
+                    return ExitCode::from(2);
+                };
+                port = value;
+            }
+            "--viewport" => {
+                let Some(value) = iter.next().and_then(|v| parse_viewport(v)) else {
+                    eprintln!("oxidepage serve: --viewport requires WxH (e.g. 1280x800)");
+                    return ExitCode::from(2);
+                };
+                viewport = Some(value);
+            }
+            "--allow-private" => allow_private = true,
+            other => {
+                eprintln!("oxidepage serve: unexpected argument `{other}`");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    let mut policy = allow_private
+        .then(oxidepage_page::ResourcePolicy::permissive_localhost)
+        .unwrap_or_default();
+    policy.max_total_bytes = flags.max_total_bytes.unwrap_or(DEFAULT_MAX_TOTAL_BYTES);
+    if let Some(requests) = flags.max_requests {
+        policy.max_requests = requests;
+    }
+
+    // These land on the *default* context, not a new one: a driver's
+    // `Target.createTarget` without a `browserContextId` creates its page there,
+    // so anything configured on a fresh context would be invisible to it.
+    let browser = match Browser::new(BrowserOptions {
+        policy,
+        default_context: ContextOptions {
+            viewport: Some(viewport.unwrap_or(DEFAULT_VIEWPORT)),
+            lazy_images: flags.lazy_images.unwrap_or(false),
+            // A driver expects `alert()` to be reported and answered over the
+            // protocol, not auto-dismissed behind its back. `Ask` is what makes
+            // `Page.javascriptDialogOpening` and `handleJavaScriptDialog` real.
+            dialog_policy: oxidepage_engine::DialogPolicy::Ask {
+                timeout: oxidepage_engine::DEFAULT_DIALOG_TIMEOUT,
+            },
+            ..ContextOptions::default()
+        },
+        ..BrowserOptions::default()
+    }) {
+        Ok(browser) => browser,
+        Err(e) => {
+            eprintln!("oxidepage serve: failed to start the browser: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let server = match CdpServer::start(
+        browser,
+        ServerOptions {
+            port,
+            ..ServerOptions::default()
+        },
+    ) {
+        Ok(server) => server,
+        Err(e) => {
+            eprintln!("oxidepage serve: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // stdout, not stderr: this line is the whole point of the command, and a
+    // caller scripting `oxidepage serve` needs to be able to read it back.
+    println!("{}", server.browser_ws_url());
+    eprintln!(
+        "oxidepage: DevTools endpoint on {} — anyone who can reach it controls this process",
+        server.http_url()
+    );
+    server.wait();
+    ExitCode::SUCCESS
 }
 
 fn eval_command(args: &[String]) -> ExitCode {

@@ -947,6 +947,27 @@ pub struct PageState {
     /// fields) lives only on that wrapper and cannot be reconstructed — so it
     /// must be retained for the element's lifetime. Cleared on navigation.
     pub(crate) custom_wrappers: RefCell<HashMap<NodeId, JsValue>>,
+    /// CDP's `objectId` table (ADR-0030).
+    ///
+    /// Here rather than in the protocol crate because it holds live `JsValue`s:
+    /// they are `!Send`, and they must drop before the realm — which is what
+    /// `Page`'s field order encodes. A store owned by a session on the driver's
+    /// thread would outlive the realm it points into.
+    pub remote_objects: RefCell<crate::remote::ObjectStore>,
+    /// CDP's `Runtime.ExecutionContextId`, bumped on every document commit so a
+    /// driver can tell a stale context from the live one.
+    pub execution_context_id: Cell<u64>,
+    /// Payloads delivered by `Runtime.addBinding` functions, drained by the
+    /// page into `Runtime.bindingCalled`.
+    pub binding_calls: RefCell<VecDeque<(String, String)>>,
+    /// Scripts run at the start of every new document, in insertion order.
+    ///
+    /// Deliberately **not** cleared by `reset_for_navigation`: the whole point
+    /// is that they survive navigation. That is what makes a driver's
+    /// `exposeFunction` and `evaluateOnNewDocument` still be there on the next
+    /// page (CDP `Page.addScriptToEvaluateOnNewDocument`).
+    pub init_scripts: RefCell<Vec<(u64, String)>>,
+    pub next_init_script: Cell<u64>,
     /// Strong references to the JS wrappers of *connected* nodes. The generic
     /// node-wrapper cache is weak, so a node kept alive only by tree
     /// connectedness (no JS reference to its wrapper) can have its wrapper GC'd
@@ -1061,6 +1082,11 @@ impl PageState {
             named_props_version: Cell::new(None),
             custom_elements: RefCell::new(CustomElementRegistry::default()),
             custom_wrappers: RefCell::new(HashMap::new()),
+            remote_objects: RefCell::new(crate::remote::ObjectStore::default()),
+            execution_context_id: Cell::new(1),
+            binding_calls: RefCell::new(VecDeque::new()),
+            init_scripts: RefCell::new(Vec::new()),
+            next_init_script: Cell::new(0),
             connected_wrappers: RefCell::new(HashMap::new()),
             adopted_sheets: RefCell::new(HashMap::new()),
             start,
@@ -1225,6 +1251,17 @@ impl PageState {
         self.custom_wrappers.borrow_mut().clear();
         self.connected_wrappers.borrow_mut().clear();
         self.adopted_sheets.borrow_mut().clear();
+        // Every `objectId` named a value of the outgoing document. Keeping them
+        // would pin that document's whole object graph for the life of the
+        // realm, and would let a driver read a stale handle as if it were live.
+        // The bumped context id is how the driver learns they all died at once.
+        self.remote_objects.borrow_mut().clear();
+        // A payload the outgoing document queued belongs to a world that is
+        // gone; reporting it against the new document would attribute it to the
+        // wrong execution context.
+        self.binding_calls.borrow_mut().clear();
+        self.execution_context_id
+            .set(self.execution_context_id.get() + 1);
         self.dom.borrow_mut().clear_custom_elements();
         self.current_script.set(None);
         self.parser_script_active.set(false);
@@ -1259,6 +1296,19 @@ impl PageState {
     /// [`Self::queue_scroll_event`] for the viewport.
     pub fn queue_viewport_scroll_event(&self) {
         self.queue_scroll_event(None);
+    }
+
+    /// Drops every queued navigation, returning how many were dropped.
+    ///
+    /// This is CDP's `Page.stopLoading` reaching in. It cancels what has been
+    /// *asked for* and not yet performed; a document fetch already in flight is
+    /// beyond it, because the page thread is inside that fetch and services no
+    /// ordinary job until it returns (ADR-0027 D3).
+    pub fn clear_pending_navigations(&self) -> usize {
+        let mut queue = self.pending_navigation.borrow_mut();
+        let dropped = queue.len();
+        queue.clear();
+        dropped
     }
 
     /// Queues a navigation for the page's event loop (see

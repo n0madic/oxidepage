@@ -140,6 +140,15 @@ impl JsError {
         out
     }
 
+    /// The exception's message, without the name or the stack.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            JsError::Exception { message, .. } => message,
+            JsError::Engine(message) => message,
+        }
+    }
+
     /// The exception's `name`, when it is an exception that has one.
     #[must_use]
     pub fn name(&self) -> Option<&str> {

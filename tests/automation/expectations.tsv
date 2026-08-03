@@ -1,0 +1,9 @@
+# Puppeteer conformance expectations. Regenerate with `cargo xtask puppeteer --update`.
+# Only non-PASS outcomes are listed; absent means the check is expected to pass.
+page.$ and elementHandle.evaluate	FAIL
+page.$$	FAIL
+page.$eval	FAIL
+page.click	FAIL
+page.content	FAIL
+page.type	FAIL
+page.waitForSelector	FAIL

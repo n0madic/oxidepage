@@ -57,7 +57,7 @@ stub).
 | 3 | Dialogs & structured page events — **landed** | real sites stop throwing on `alert` | ADR-0025 | 1–2 w |
 | 4 | Transform-aware geometry, capture completeness — **landed** | correct click points, `page.pdf()` | ADR-0026 | 3–4 w |
 | 5 | `engine`: Browser, contexts, multi-page, async commands — **landed** | anything protocol-shaped | ADR-0027 | 4–5 w |
-| 6 | CDP transport + Target/Page/Runtime/Network/Log | **Puppeteer basic green** | yes | 5–7 w |
+| 6 | CDP transport + Target/Page/Runtime/Network/Log — **landed** | Puppeteer basic green | ADR-0030 | 5–7 w |
 | 7 | `Input` + `DOM` domains | Puppeteer interaction green | no | 2–3 w |
 | 8 | `Fetch` interception, file inputs, downloads | Puppeteer feature-complete (90%) | yes | 4–5 w |
 | 9 | Isolated worlds | the gate to Playwright | **yes** | 4–6 w |
@@ -451,10 +451,32 @@ between contexts. No regression in the `geometry_rmw` and `reflow` benchmarks.
 
 ---
 
-## Stage 6 — CDP transport and the Puppeteer core loop
+## Stage 6 — CDP transport and the Puppeteer core loop — **landed (ADR-0030)**
 
-**Milestone: `puppeteer.connect()` → `newPage` → `goto` → `evaluate` →
-`screenshot` → `pdf` → cookies, green in CI.**
+**Milestone reached.** `puppeteer.connect()` → `newPage` → `goto` → `evaluate` →
+`screenshot` → `pdf` → cookies all work against `oxidepage serve`, verified in
+CI by `cargo xtask puppeteer` (20 of 27 checks pass; the rest are named below).
+
+**Four deviations from the scope below**, all recorded in ADR-0030:
+
+- **Message types are hand-written, not generated.** `cargo xtask cdp-codegen`
+  does not exist. The drift protection codegen gives `bindings` does not
+  transfer to ~70 hand-picked commands against a pinned protocol version, and it
+  would cost a vendored ~2.5 MB of JSON plus a second generator.
+- **`Runtime.addBinding` and `Page.addScriptToEvaluateOnNewDocument` needed the
+  one-world compromise this plan had put in stage 9.** Puppeteer creates a
+  utility world while setting up *every* page, so refusing a `worldName` makes
+  `browser.newPage()` throw. A named world is accepted, reports a distinct
+  context id, and acts on the main world.
+- **`Emulation.setUserAgentOverride` is refused**, not implemented: a page's
+  navigator identity and its `User-Agent` header are both fixed at construction,
+  and changing one without the other would have a page claim one identity to
+  script and another to the server.
+- **`Page.addScriptToEvaluateOnNewDocument`, `Performance`, `IO` and
+  `Fetch.disable` arrived early**, because a real driver sends all four while
+  creating a page.
+
+The original scope follows, for the record.
 
 **Scope.**
 

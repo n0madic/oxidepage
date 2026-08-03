@@ -78,3 +78,26 @@ jobs:
       # runner fans the subprocesses out across all cores.
       - name: Run WPT subsets against expectations
         run: cargo run --release -p xtask -- wpt
+
+  puppeteer:
+    name: Puppeteer conformance
+    # Ubuntu only, like the WPT job: the runner drives one endpoint with a real
+    # driver, and a second platform would triple the time for no extra signal.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/automation/package.json
+      - uses: Swatinem/rust-cache@v2
+      # Release for the same reason the WPT job is: this drives the whole engine
+      # through a real driver, and a debug build turns minutes into tens of them.
+      # Fixtures are served from loopback; CI never touches the internet.
+      - name: Puppeteer
+        run: cargo run --release -p xtask -- puppeteer

@@ -32,11 +32,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use oxidepage_base::RequestId;
 // Geometry is part of this crate's own public surface (`layout_rect`,
 // `content_quads`, `ScreenshotOptions::clip`), so an embedder needs no
 // `oxidepage_base` dependency of its own.
-pub use oxidepage_base::{NodeId, Point, Rect};
+pub use oxidepage_base::{NodeId, Point, Rect, RequestId, Size};
+/// The remote object model (ADR-0030): CDP's `Runtime` vocabulary as plain,
+/// `Send` Rust data. The live values stay in `PageState`.
+pub use oxidepage_bindings::remote::{
+    EvaluationResult, ExceptionDetails, MAX_REMOTE_OBJECTS, PropertyDescriptor, RemoteObject,
+    RemoteSubtype, RemoteType,
+};
 use oxidepage_bindings::{
     BindCx, EventTargetKey, HostHooks, NavigationBody, PageState, PendingNavigation,
     TimingMilestone, is_classic_script_type,
@@ -49,10 +54,12 @@ use oxidepage_js::{
 use oxidepage_layout::{LayoutEngine, PaintStamp};
 use oxidepage_net::{NetEvent, NetRequest, NetService, decode_charset};
 use oxidepage_style::{BlockingImportLoader, CssFetcher, StyleEngine};
+pub use remote::{CallArgument, EvaluateOptions, MAX_PROPERTIES, RemoteError};
 use style::selector_parser::PseudoElement;
 use style::stylesheets::Origin;
 
 mod command;
+pub mod remote;
 mod render;
 pub use command::{LoopStats, PageJob};
 
@@ -73,7 +80,10 @@ pub use oxidepage_bindings::{
 pub use oxidepage_export_pdf::{MAX_PDF_PAGES, Margins, PaperSize, PdfOptions};
 pub use oxidepage_js::{StackFrame, parse_stack};
 pub use oxidepage_layout::disable_system_fonts;
-pub use oxidepage_net::{CachePartition, CookieJar, NetPool, ResourcePolicy, SharedNetConfig};
+pub use oxidepage_net::{
+    CachePartition, CookieJar, CookieSource, CookieView, NetPool, NetworkEvent, ResourcePolicy,
+    SharedNetConfig,
+};
 pub use oxidepage_paint::{DisplayList, PaintOptions};
 pub use oxidepage_raster_skia::{RasterImage, RasterOptions};
 pub use oxidepage_style::Viewport;
@@ -239,6 +249,22 @@ pub enum PageRecord {
     DialogOpening(DialogRequest),
     /// A dialog that has been answered, with the answer it got.
     Dialog(DialogEvent),
+    /// One step of a network request's life.
+    ///
+    /// The bus carried no network events before ADR-0030: nothing about a
+    /// request was retained, and a driver's `Network` domain needs both the
+    /// milestones and the body. Both arrived together rather than as a half
+    /// version a later stage would replace (ADR-0027's recorded deviation).
+    Network(oxidepage_net::NetworkEvent),
+    /// Page script called a function installed by [`Page::add_binding`].
+    ///
+    /// A task source rather than something the embedder polls: a binding called
+    /// from a timer, with no command in flight, must still reach the driver
+    /// promptly — polling would hold it until the next unrelated command.
+    Binding {
+        name: String,
+        payload: String,
+    },
 }
 
 /// Every origin's `localStorage`, shared by the pages of one browsing context.
@@ -274,6 +300,24 @@ pub enum WaitUntil {
     /// Return once `load` has fired (subresources settled).
     #[default]
     Load,
+}
+
+/// A `Send` snapshot of the session history, for a driver on another thread.
+///
+/// Deliberately not a view of [`oxidepage_bindings::SessionHistory`]: an entry
+/// there holds the `history.state` as a live `JsValue`, which belongs to the
+/// realm's thread and cannot cross a channel.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NavigationHistory {
+    /// Index of the entry the page is currently on.
+    pub current_index: usize,
+    pub entries: Vec<HistoryEntryInfo>,
+}
+
+/// One entry of a [`NavigationHistory`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntryInfo {
+    pub url: String,
 }
 
 /// Immutable browser identity and practical Navigator capabilities for a Page.
@@ -1625,6 +1669,146 @@ impl Page {
         )
     }
 
+    /// Reloads the current document, bypassing the HTTP cache.
+    ///
+    /// The session-history entry is *replaced*, not pushed: a reload does not
+    /// add to the back stack. This is CDP's `Page.reload`.
+    pub fn reload(&self, wait_until: WaitUntil) -> Result<(), JsError> {
+        let url = self.state.dom.borrow().document_url().to_owned();
+        self.run_navigation(
+            PendingNavigation::Load {
+                url,
+                replace: true,
+                body: None,
+                reload: true,
+            },
+            wait_until,
+            /* embedder */ true,
+        )
+    }
+
+    /// Registers a script to run at the start of every new document,
+    /// returning its identifier. CDP's
+    /// `Page.addScriptToEvaluateOnNewDocument`.
+    pub fn add_init_script(&self, source: &str) -> u64 {
+        let id = self.state.next_init_script.get() + 1;
+        self.state.next_init_script.set(id);
+        self.state
+            .init_scripts
+            .borrow_mut()
+            .push((id, source.to_owned()));
+        id
+    }
+
+    /// Removes an init script. `false` if no script has that id.
+    pub fn remove_init_script(&self, id: u64) -> bool {
+        let mut scripts = self.state.init_scripts.borrow_mut();
+        let before = scripts.len();
+        scripts.retain(|(existing, _)| *existing != id);
+        scripts.len() != before
+    }
+
+    /// Runs every registered init script against the current document.
+    ///
+    /// A script that throws is *reported and skipped*, not propagated: one bad
+    /// init script must not stop the document from loading, and it must not
+    /// stop the others from running either.
+    fn run_init_scripts(&self) {
+        let scripts: Vec<(u64, String)> = self.state.init_scripts.borrow().clone();
+        for (_, source) in scripts {
+            if let Err(error) = self.with_cx(|cx| cx.scope.eval(&source, "oxidepage:initScript")) {
+                self.report_script_error(&error);
+            }
+        }
+    }
+
+    /// Bytes the JavaScript heap is currently using.
+    ///
+    /// Straight from the engine, not an estimate: `Performance.getMetrics`
+    /// reports it as `JSHeapUsedSize`, and a driver watching for a leak needs
+    /// the real number or none at all.
+    #[must_use]
+    pub fn js_heap_used(&self) -> i64 {
+        self.realm.memory_used()
+    }
+
+    /// The retained body of a completed request, and whether it is text.
+    ///
+    /// `false` means the bytes are not valid text and a caller putting them in
+    /// a JSON string must base64-encode first. Backs CDP's
+    /// `Network.getResponseBody`.
+    #[must_use]
+    pub fn response_body(&self, id: oxidepage_net::RequestId) -> Option<(Vec<u8>, bool)> {
+        self.net.response_body(id)
+    }
+
+    /// Cancels every navigation that has been queued and not yet performed,
+    /// returning how many were dropped. CDP's `Page.stopLoading`.
+    ///
+    /// **What it cannot do**, and the reason is structural: a document fetch
+    /// already in flight is not interruptible from here. The page thread is
+    /// *inside* that fetch and services no ordinary job until it returns
+    /// (ADR-0027 D3), so this command cannot even run while the load it would
+    /// cancel is happening. It stops what is queued, which is what a
+    /// `stopLoading` sent between navigations means.
+    pub fn stop_loading(&self) -> usize {
+        self.state.clear_pending_navigations()
+    }
+
+    /// The session history, as an owned snapshot.
+    ///
+    /// Owned rather than borrowed because the caller is on another thread:
+    /// `HistoryEntry` holds a `JsValue`, which is `!Send` and must not leave
+    /// the realm's thread. Only the URL crosses.
+    #[must_use]
+    pub fn navigation_history(&self) -> NavigationHistory {
+        let history = self.state.history();
+        NavigationHistory {
+            current_index: history.index(),
+            entries: (0..history.len())
+                .filter_map(|index| history.entry(index))
+                .map(|entry| HistoryEntryInfo {
+                    url: entry.url.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Traverses to an absolute session-history index. CDP's
+    /// `Page.navigateToHistoryEntry`.
+    ///
+    /// Expressed as a delta internally because that is what the traversal path
+    /// takes, and what decides whether the move needs a document load at all.
+    /// An out-of-range index is a silent no-op, matching `history.go`.
+    pub fn navigate_to_history_entry(
+        &self,
+        index: usize,
+        wait_until: WaitUntil,
+    ) -> Result<(), JsError> {
+        let delta = {
+            let history = self.state.history();
+            if index >= history.len() {
+                return Ok(());
+            }
+            let (Ok(target), Ok(current)) = (i64::try_from(index), i64::try_from(history.index()))
+            else {
+                return Ok(());
+            };
+            match i32::try_from(target - current) {
+                Ok(delta) => delta,
+                Err(_) => return Ok(()),
+            }
+        };
+        if delta == 0 {
+            return Ok(());
+        }
+        self.run_navigation(
+            PendingNavigation::Traverse { delta },
+            wait_until,
+            /* embedder */ true,
+        )
+    }
+
     /// Synthesizes one trusted mouse event at viewport CSS coordinates
     /// `(x, y)`, with everything a browser produces around it: the
     /// `mouseover`/`mouseenter` chain on a move, the focus transfer and
@@ -1871,6 +2055,27 @@ impl Page {
     /// does.
     pub fn set_event_sink(&self, sink: Option<EventSink>) {
         *self.hooks.event_sink.borrow_mut() = sink;
+        // The net stack reports through the same bus, so its observer is
+        // installed and removed with the sink.
+        //
+        // **Weak, and that is load-bearing.** `Page`'s field order is
+        // `state, hooks, realm, net` — which is drop order — so `net` outlives
+        // `realm`. A strong `Rc<PageHooks>` in the observer would keep the
+        // hooks alive past the realm's teardown, and the hooks hold pending
+        // timer and animation-frame callbacks, which are `JsValue`s. That is a
+        // `Persistent` outliving its runtime, and QuickJS aborts the process on
+        // a non-empty `gc_obj_list` in `JS_FreeRuntime`.
+        let hooks = Rc::downgrade(&self.hooks);
+        self.net
+            .set_observer(if self.hooks.event_sink.borrow().is_some() {
+                Some(Rc::new(move |event| {
+                    if let Some(hooks) = hooks.upgrade() {
+                        hooks.emit(PageRecord::Network(event));
+                    }
+                }))
+            } else {
+                None
+            });
     }
 
     /// Forwards promise rejections still unhandled to the installed
@@ -2133,6 +2338,11 @@ impl Page {
             ),
             None => NetRequest::navigation_with(url.to_owned(), referrer.clone(), reload),
         };
+        // Drop the outgoing document's retained bodies *before* the new
+        // document is fetched, not in `reset_for_navigation`: that runs after
+        // the fetch, so clearing there would throw away the body of the very
+        // document just loaded — the one a driver most wants to read back.
+        self.net.clear_log();
         let outcome = match self.net.fetch_blocking(request) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -2402,6 +2612,11 @@ impl Page {
         // Fully tear down any previous document before parsing the new one.
         self.reset_document_state();
         self.state.set_parsing(true);
+        // Init scripts run against the *fresh* global, before a single byte of
+        // the document is parsed. That ordering is the whole contract of
+        // `Page.addScriptToEvaluateOnNewDocument`: a driver installs a binding
+        // or a stub here precisely so page script sees it already in place.
+        self.run_init_scripts();
         // The (synchronous) response has fully arrived and parsing begins.
         self.state
             .mark_timing(TimingMilestone::ResponseEndDomLoading);
@@ -3316,6 +3531,8 @@ impl Page {
             progressed |= self.drain_storage_events();
             // Script scrolls queue `scroll` events; dispatch them as tasks.
             progressed |= self.drain_scroll_events();
+            // Payloads page script handed to an `add_binding` function.
+            progressed |= self.drain_binding_events();
             // Deliver ResizeObserver/IntersectionObserver notifications. Driven
             // here (not in `update_the_rendering`, which only runs with a
             // pending rAF, nor in every microtask checkpoint) so the initial
@@ -3371,6 +3588,10 @@ impl Page {
     /// everything else (fetch/XHR) is delivered to the bindings.
     fn dispatch_net_event(&self, event: NetEvent) {
         let id = event.request_id();
+        // Retention and observation first, before routing consumes the event.
+        // This is the one point every asynchronous response passes through;
+        // the synchronous path records itself inside `fetch_blocking`.
+        self.net.note_event(&event);
         if self.pending_async.borrow().contains_key(&id) {
             self.handle_async_script_event(id, event);
             return;
@@ -4226,6 +4447,30 @@ impl Page {
 
     // === Style loading (Phase 4) ===
 
+    /// Reports binding payloads to the embedder.
+    ///
+    /// Returns whether anything was delivered, so the loop keeps turning while
+    /// a page is producing them. Reporting cannot re-enter JS — it is a channel
+    /// send — so it is safe at this point in the drain order.
+    fn drain_binding_events(&self) -> bool {
+        // Push and pull are alternatives, not a pipeline: without a sink the
+        // queue belongs to `Page::drain_binding_calls`, and draining it here
+        // would silently discard every payload an embedder using the pull API
+        // is waiting for. The queue is bounded either way.
+        if self.hooks.event_sink.borrow().is_none() {
+            return false;
+        }
+        let calls: Vec<(String, String)> =
+            self.state.binding_calls.borrow_mut().drain(..).collect();
+        if calls.is_empty() {
+            return false;
+        }
+        for (name, payload) in calls {
+            self.hooks.emit(PageRecord::Binding { name, payload });
+        }
+        true
+    }
+
     /// Dispatches `scroll` events for the targets whose position changed
     /// from script (WP-G2): elements get a non-bubbling `scroll`; a viewport
     /// scroll fires on the document (bubbling on to the window).
@@ -4727,6 +4972,12 @@ impl Page {
         let mut dom = self.state.dom.borrow_mut();
         let mut style = self.state.style.borrow_mut();
         self.state.layout.borrow_mut().reflow(&mut dom, &mut style);
+    }
+
+    /// The current layout viewport, including its device pixel ratio.
+    #[must_use]
+    pub fn viewport(&self) -> Viewport {
+        self.viewport.get()
     }
 
     /// Replaces the viewport: media queries re-evaluate and the next layout

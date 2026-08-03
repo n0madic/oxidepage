@@ -64,6 +64,15 @@ pub struct BrowserOptions {
     ///
     /// [`BrowserContext::new_page`]: crate::BrowserContext::new_page
     pub max_pages_per_context: usize,
+    /// Options for the default context, which
+    /// [`Browser::new`](crate::Browser::new) creates before the caller can
+    /// reach it.
+    ///
+    /// Without this the default context is stuck on `ContextOptions::default()`
+    /// forever, and an embedder that wants — say — a viewport for it has no way
+    /// to say so: `new_context` configures a *different* context, and pages
+    /// created by a driver land in the default one.
+    pub default_context: ContextOptions,
 }
 
 /// Default popup cap. Generous for real content, fatal to a loop.
@@ -91,6 +100,7 @@ impl Default for BrowserOptions {
             max_pages_per_context: DEFAULT_MAX_PAGES_PER_CONTEXT,
             net_worker_threads: default_net_worker_threads(),
             cache_entries: DEFAULT_SHARED_CACHE_ENTRIES,
+            default_context: ContextOptions::default(),
         }
     }
 }
