@@ -83,7 +83,7 @@ crates/
 │                 # port, Page API
 ├── engine        # Browser / BrowserContext / PageHandle: one thread per page,
 │                 # Send+Sync handles over command channels, shared net pool
-├── cli           # `oxidepage eval | dump-layout | dump-display-list | render`
+├── cli           # `oxidepage eval | dump | render | serve`
 ├── style         # stylo integration: stylesheet set, cascade, CSSOM ops
 ├── layout        # box tree, taffy driver, parley IFCs, geometry, transforms,
 │                 # page breaks, image store

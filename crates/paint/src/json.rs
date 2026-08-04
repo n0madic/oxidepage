@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn non_finite_coordinates_serialize_to_valid_json() {
         // A display item carrying inf/NaN geometry still dumps to JSON that a
-        // strict parser accepts (the goldens / `--dump-display-list` output).
+        // strict parser accepts (the goldens / `dump --format display-list`).
         let list = DisplayList {
             viewport: Size::new(f32::INFINITY, f32::NAN),
             content_size: Size::new(800.0, 600.0),

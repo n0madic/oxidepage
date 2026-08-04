@@ -42,6 +42,12 @@ rasterization.
   embedded/subset fonts (selectable text, not outlines); or the final
   serialized HTML after scripts have run — plus a JSON display list for
   debugging.
+- **Drive it with Puppeteer or Playwright.** `oxidepage serve` speaks the
+  Chrome DevTools Protocol on a loopback WebSocket, so a real `puppeteer-core`
+  or `playwright-core` script connects to it unmodified — navigation,
+  `evaluate` and selectors, clicks and typing, screenshots and PDF, request
+  interception, file inputs and downloads, and isolated worlds. Conformance is
+  measured against the actual drivers in CI, not asserted.
 - **Stay bounded.** Per-page request and byte budgets, a script execution
   timeout, and sandboxed `file://` access, so a hostile page can't run away
   with your process.
@@ -88,7 +94,7 @@ oxidepage render page.html -o crop.jpg --clip 0,0,400,300 --quality 80
 oxidepage render page.html -o page.pdf
 
 # Serialize the DOM after scripts have run
-oxidepage render page.html -o page.html
+oxidepage render https://example.com -o page.html
 ```
 
 The output format is inferred from `-o`'s extension, or set explicitly with
@@ -104,8 +110,8 @@ oxidepage eval https://example.com "document.querySelectorAll('a').length"
 ### Inspect layout and painting (debugging)
 
 ```sh
-oxidepage dump-layout page.html                    # box tree with computed positions/sizes
-oxidepage dump-display-list page.html -o list.json  # paint display list as JSON
+oxidepage dump page.html                                       # box tree with computed positions/sizes
+oxidepage dump page.html --format display-list -o list.json    # paint display list as JSON
 ```
 
 ### Drive it with Puppeteer or Playwright

@@ -2,7 +2,7 @@
 //!
 //! Phase 2 surface: `eval` loads a local HTML file (inline scripts execute
 //! during the parse), settles the event loop, and evaluates an expression.
-//! `render`/`dump-display-list` arrive with their phases.
+//! `render`/`dump` arrive with their phases.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -50,8 +50,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("eval") => eval_command(&args[1..]),
-        Some("dump-layout") => dump_layout_command(&args[1..]),
-        Some("dump-display-list") => dump_display_list_command(&args[1..]),
+        Some("dump") => dump_command(&args[1..]),
         Some("render") => render_command(&args[1..]),
         Some("serve") => serve_command(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
@@ -74,8 +73,7 @@ const DEFAULT_SETTLE_MS: u64 = 5000;
 fn usage() {
     eprintln!(
         "usage: oxidepage eval <file.html | http(s)://URL> [expression] [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
-         \x20      oxidepage dump-layout <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [--quiet]\n\
-         \x20      oxidepage dump-display-list <file.html | http(s)://URL> [--viewport WxH] [--settle-ms <ms>] [-o <file>] [--quiet]\n\
+         \x20      oxidepage dump <file.html | http(s)://URL> [--format layout|display-list] [--viewport WxH] [--settle-ms <ms>] [-o <file>] [--quiet]\n\
          \x20      oxidepage render <file.html | http(s)://URL> -o <out.{{png,jpg,pdf,html}}> [--format png|jpeg|pdf|html] [--viewport WxH] [--dpr N] [--full-page] [--clip X,Y,W,H] [--quality N] [--paper <name|WxH>] [--margin <px|t,r,b,l>] [--scale N] [--landscape] [--single-page] [--no-fit-to-width] [--no-print-background] [--settle-ms <ms>] [--quiet]\n\
          \x20      oxidepage serve [--port N] [--viewport WxH] [--allow-private]\n\
          \x20                      [--download-path DIR]\n\n\
@@ -83,10 +81,10 @@ fn usage() {
          (SSRF- and policy-checked), runs its scripts and the event loop until\n\
          it settles, then evaluates `expression` (default: `document.title`)\n\
          and prints the result.\n\n\
-         dump-layout: loads the document the same way, lays it out, and prints\n\
-         the box tree with computed positions/sizes.\n\n\
-         dump-display-list: loads and lays out the document, then prints the\n\
-         paint display list as JSON (stable, golden-friendly). Loads every image\n\
+         dump: loads the document the same way, lays it out, and prints an\n\
+         internal representation of it — the box tree with computed positions and\n\
+         sizes (--format layout, the default), or the paint display list as JSON\n\
+         (--format display-list; stable, golden-friendly). Loads every image\n\
          eagerly — unlike a viewport screenshot of the same document, whose list\n\
          is the same one but built after lazy loading skipped the images below\n\
          the fold. Pass --lazy-images to see what the screenshot sees.\n\n\
@@ -107,8 +105,9 @@ fn usage() {
          options:\n\
          \x20 --settle-ms <ms>  event-loop settle budget (default 5000)\n\
          \x20 --viewport WxH    layout viewport in CSS px (default 1280x800)\n\
-         \x20 --format <fmt>    output format for render: png, jpeg, pdf, or html\n\
-         \x20                   (default: inferred from -o's extension)\n\
+         \x20 --format <fmt>    render: png, jpeg, pdf, or html (default: inferred\n\
+         \x20                   from -o's extension); dump: layout or display-list\n\
+         \x20                   (default layout)\n\
          \x20 --dpr N           device pixel ratio; also what the page sees as\n\
          \x20                   window.devicePixelRatio (image output only, default 1)\n\
          \x20 --full-page       render the whole document, not just the viewport\n\
@@ -138,63 +137,30 @@ fn usage() {
     );
 }
 
-fn dump_layout_command(args: &[String]) -> ExitCode {
-    let (args, flags) = match extract_common_flags("dump-layout", args) {
-        Ok(parsed) => parsed,
-        Err(code) => return code,
-    };
-    let mut file: Option<&str> = None;
-    let mut settle_ms: u64 = DEFAULT_SETTLE_MS;
-    let mut quiet = false;
-    let mut allow_private = false;
-    let mut viewport: Option<oxidepage_page::Viewport> = None;
-
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--settle-ms" => {
-                let Some(value) = iter.next().and_then(|v| v.parse().ok()) else {
-                    eprintln!("oxidepage dump-layout: --settle-ms requires a number");
-                    return ExitCode::from(2);
-                };
-                settle_ms = value;
-            }
-            "--viewport" => {
-                let Some(parsed) = iter.next().and_then(|v| parse_viewport(v)) else {
-                    eprintln!("oxidepage dump-layout: --viewport expects WxH (e.g. 1280x720)");
-                    return ExitCode::from(2);
-                };
-                viewport = Some(parsed);
-            }
-            "--quiet" => quiet = true,
-            "--allow-private" => allow_private = true,
-            other if file.is_none() => file = Some(other),
-            other => {
-                eprintln!("oxidepage dump-layout: unexpected argument `{other}`");
-                return ExitCode::from(2);
-            }
-        }
-    }
-    let Some(file) = file else {
-        eprintln!("oxidepage dump-layout: missing <file.html | URL>");
-        usage();
-        return ExitCode::from(2);
-    };
-
-    let page = match load_page(file, allow_private, viewport, flags, false, false) {
-        Ok(page) => page,
-        Err(code) => return code,
-    };
-    page.settle(Duration::from_millis(settle_ms));
-
-    let dump = page.dump_layout();
-    flush_page_output(&page, quiet);
-    print!("{dump}");
-    ExitCode::SUCCESS
+/// What `dump` prints. Both formats come from the same loaded, settled page —
+/// the display list is built from the very box tree `layout` prints — so they
+/// are one command with one parser rather than two that drift apart.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum DumpFormat {
+    /// The box tree with computed positions and sizes.
+    #[default]
+    Layout,
+    /// The paint display list as JSON.
+    DisplayList,
 }
 
-fn dump_display_list_command(args: &[String]) -> ExitCode {
-    let (args, flags) = match extract_common_flags("dump-display-list", args) {
+impl DumpFormat {
+    fn by_name(s: &str) -> Option<Self> {
+        match s {
+            "layout" => Some(DumpFormat::Layout),
+            "display-list" => Some(DumpFormat::DisplayList),
+            _ => None,
+        }
+    }
+}
+
+fn dump_command(args: &[String]) -> ExitCode {
+    let (args, flags) = match extract_common_flags("dump", args) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
@@ -204,29 +170,38 @@ fn dump_display_list_command(args: &[String]) -> ExitCode {
     let mut allow_private = false;
     let mut viewport: Option<oxidepage_page::Viewport> = None;
     let mut output: Option<&str> = None;
+    let mut format = DumpFormat::default();
 
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--settle-ms" => {
                 let Some(value) = iter.next().and_then(|v| v.parse().ok()) else {
-                    eprintln!("oxidepage dump-display-list: --settle-ms requires a number");
+                    eprintln!("oxidepage dump: --settle-ms requires a number");
                     return ExitCode::from(2);
                 };
                 settle_ms = value;
             }
             "--viewport" => {
                 let Some(parsed) = iter.next().and_then(|v| parse_viewport(v)) else {
-                    eprintln!(
-                        "oxidepage dump-display-list: --viewport expects WxH (e.g. 1280x720)"
-                    );
+                    eprintln!("oxidepage dump: --viewport expects WxH (e.g. 1280x720)");
                     return ExitCode::from(2);
                 };
                 viewport = Some(parsed);
             }
+            "--format" => {
+                let Some(parsed) = iter
+                    .next()
+                    .and_then(|v| DumpFormat::by_name(&v.to_lowercase()))
+                else {
+                    eprintln!("oxidepage dump: --format expects layout or display-list");
+                    return ExitCode::from(2);
+                };
+                format = parsed;
+            }
             "-o" | "--output" => {
                 let Some(value) = iter.next() else {
-                    eprintln!("oxidepage dump-display-list: -o requires a path");
+                    eprintln!("oxidepage dump: -o requires a path");
                     return ExitCode::from(2);
                 };
                 output = Some(value);
@@ -235,13 +210,13 @@ fn dump_display_list_command(args: &[String]) -> ExitCode {
             "--allow-private" => allow_private = true,
             other if file.is_none() => file = Some(other),
             other => {
-                eprintln!("oxidepage dump-display-list: unexpected argument `{other}`");
+                eprintln!("oxidepage dump: unexpected argument `{other}`");
                 return ExitCode::from(2);
             }
         }
     }
     let Some(file) = file else {
-        eprintln!("oxidepage dump-display-list: missing <file.html | URL>");
+        eprintln!("oxidepage dump: missing <file.html | URL>");
         usage();
         return ExitCode::from(2);
     };
@@ -252,16 +227,19 @@ fn dump_display_list_command(args: &[String]) -> ExitCode {
     };
     page.settle(Duration::from_millis(settle_ms));
 
-    let json = page.display_list_json();
+    let dump = match format {
+        DumpFormat::Layout => page.dump_layout(),
+        DumpFormat::DisplayList => page.display_list_json(),
+    };
     flush_page_output(&page, quiet);
     match output {
         Some(path) => {
-            if let Err(e) = std::fs::write(path, &json) {
-                eprintln!("oxidepage dump-display-list: cannot write {path}: {e}");
+            if let Err(e) = std::fs::write(path, &dump) {
+                eprintln!("oxidepage dump: cannot write {path}: {e}");
                 return ExitCode::FAILURE;
             }
         }
-        None => print!("{json}"),
+        None => print!("{dump}"),
     }
     ExitCode::SUCCESS
 }

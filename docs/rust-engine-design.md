@@ -226,7 +226,7 @@ oxidepage/
 │   ├── engine/                 # public embedding API: Browser, Page, options
 │   ├── capi/                   # C ABI (cbindgen)
 │   ├── cdp/                    # Chrome DevTools Protocol server
-│   └── cli/                    # `oxidepage-cli`: screenshot / pdf / dump-display-list / eval
+│   └── cli/                    # `oxidepage-cli`: render / dump / eval / serve
 ├── xtask/                      # codegen driver, WPT runner, reftest runner
 └── tests/
     ├── wpt/                    # vendored WPT subsets + expectations
@@ -526,7 +526,7 @@ pub enum DisplayItem {
 - Built by walking the fragment tree in stacking-context paint order.
 - Immutable and `Send` once built; carries an `Arc`'d resource table (decoded images,
   font references) so rasterization can run on any thread.
-- `to_json()` for `--dump-display-list` debugging and golden tests (glyph runs include
+- `to_json()` for `dump --format display-list` debugging and golden tests (glyph runs include
   `debug_text` so goldens are reviewable; golden comparison can ignore glyph ids where
   fonts differ across platforms).
 
@@ -618,10 +618,12 @@ let pdf: Vec<u8> = page.print_to_pdf();
 - **`capi`** and **`cdp`** remain documented stub crates — the rest of Phase 8, and
   Phase 9, in §10.
 - **`cli`** (`oxidepage`, `crates/cli`): `oxidepage eval <file|url> [expr]`,
-  `dump-layout`, `dump-display-list`, and `render -o out.{png,pdf,html}` (format inferred
+  `dump [--format layout|display-list]`, and `render -o out.{png,pdf,html}` (format inferred
   from the extension, or set with `--format`; folds what this section originally called
   separate `screenshot`/`pdf` subcommands into one, since PNG/PDF/HTML are all "render
-  the loaded page"). Common flags: `--viewport`, `--settle-ms`, `--allow-private`,
+  the loaded page"). `dump` is the same fold applied to the debugging output: the
+  box tree and the display list are two views of one loaded, settled page, and
+  `--format` selects between them (`layout` by default). Common flags: `--viewport`, `--settle-ms`, `--allow-private`,
   `--max-bytes`/`--max-requests`, `--lazy-images`. Doubles as the smoke-test harness; see
   the main [`README.md`](../README.md) for the full reference.
 
@@ -797,7 +799,7 @@ read-modify-write benchmark within budget; `getClientRects` per-line correctness
 **Phase 6 — Paint & raster & PDF.** Landed (ADR-0007).
 Fragment-tree → DisplayList (paint order, clips, radii, gradients), tiny-skia backend,
 glyph rasterization + cache, `image`/`resvg` decode integration, backgrounds
-(size/position/repeat), borders, PNG screenshots, `pdf-writer` export, `dump-display-list`.
+(size/position/repeat), borders, PNG screenshots, `pdf-writer` export, `dump --format display-list`.
 *Exit: reftest suite green on pinned fonts; golden display lists stable; CLI screenshot/PDF
 on a real-page corpus reviewed* — the CLI folded `screenshot`/`pdf` into one `render`
 subcommand later; see §5.12.

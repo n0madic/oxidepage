@@ -1,6 +1,6 @@
 [package]
 name = "oxidepage-cli"
-description = "Command-line interface: render, dump-display-list, eval"
+description = "Command-line interface: render, dump, eval, serve"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

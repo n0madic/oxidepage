@@ -103,7 +103,7 @@ impl Page {
     }
 
     /// The stable JSON dump of the current display list (for
-    /// `--dump-display-list` and golden tests).
+    /// `dump --format display-list` and golden tests).
     #[must_use]
     pub fn display_list_json(&self) -> String {
         self.display_list().to_json()

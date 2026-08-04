@@ -92,7 +92,7 @@ So **fixing a bug breaks CI until you update the expectation**. The expectation 
 
 ```sh
 cargo run -p oxidepage-cli -- eval <file.html | http(s)://URL> [expr] [--viewport WxH] [--settle-ms N]
-cargo run -p oxidepage-cli -- dump-layout | dump-display-list
+cargo run -p oxidepage-cli -- dump <file|url> [--format layout|display-list] [-o out]
 cargo run -p oxidepage-cli -- render <file|url> -o out.{png,jpg,pdf,html} [--dpr N] [--full-page] [--paper A4]
 ```
 

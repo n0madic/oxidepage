@@ -87,7 +87,7 @@ v1 limits.
   `getComputedStyle` for the layout-backed properties. `ex`/`ch` units
   resolve through a parley/skrifa font-metrics provider; the WPT **Ahem**
   font is bundled so metric tests are deterministic across platforms.
-  `oxidepage dump-layout <file|url> [--viewport WxH]` prints the box tree.
+  `oxidepage dump <file|url> [--viewport WxH]` prints the box tree.
   Gated by layout/geometry unit + page integration suites and the WPT
   `css/cssom-view` + `css/css-flexbox` testharness subsets, with a
   read-modify-write reflow benchmark (numbers in ADR-0006). Implementation
@@ -119,7 +119,7 @@ v1 limits.
   full-page output. `requestAnimationFrame` +
   "update the rendering" run in the headless loop (bounded by the settle
   budget). CLI: `render --format <png|pdf|html> --dpr [--full-page]`,
-  `dump-display-list`, `--lazy-images` / `--no-lazy-images`;
+  `dump --format display-list`, `--lazy-images` / `--no-lazy-images`;
   `--full-page` captures the whole document (like PDF) instead of the viewport.
   Gated by paint/
   raster/PDF unit suites, an **Ahem reftest** corpus (`cargo xtask reftest`), and

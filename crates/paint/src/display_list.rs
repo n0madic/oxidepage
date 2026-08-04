@@ -474,7 +474,7 @@ impl DisplayList {
         }
     }
 
-    /// A stable, human-reviewable JSON dump for `--dump-display-list` and
+    /// A stable, human-reviewable JSON dump for `dump --format display-list` and
     /// golden tests (floats fixed to two decimals; see [`crate::json`]).
     #[must_use]
     pub fn to_json(&self) -> String {
