@@ -755,3 +755,92 @@ fn an_attachment_downloads_instead_of_committing() {
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A download navigation's `init` must carry the loader that navigation minted,
+/// not the loader of the document that stays.
+///
+/// Same contract as `each_navigation_reports_a_fresh_loader_on_init`, reached
+/// through the one navigation that starts and ends back to back: nothing is
+/// parsed between `Started` and the `Failed` that abandons the load, so this is
+/// the tightest window in which the abandon could spend the id `init` still has
+/// to carry. It holds even when event formatting is delayed by an order of
+/// magnitude more than that window — checked by hand with a sleep in
+/// `dispatch_page_event`, since the ordering is what the assertion is about.
+#[test]
+fn a_download_navigation_reports_a_fresh_loader_on_init() {
+    let directory =
+        std::env::temp_dir().join(format!("oxidepage-cdp-dl-init-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let fixtures = Fixtures::start(vec![("/index.html", "<title>doc</title>")]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call(
+        "Browser.setDownloadBehavior",
+        json!({ "behavior": "allow", "downloadPath": directory.to_string_lossy() }),
+    );
+    client.call_on(
+        &session,
+        "Page.setLifecycleEventsEnabled",
+        json!({ "enabled": true }),
+    );
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/index.html") }),
+    );
+
+    // The committed loader, read after the document that stays has landed.
+    client.forget_events(std::time::Duration::from_millis(300));
+    let committed = client.call_on(&session, "Page.getFrameTree", json!({}))["frameTree"]["frame"]
+        ["loaderId"]
+        .as_str()
+        .expect("a loader")
+        .to_owned();
+
+    client.call_on(&session, "Network.enable", json!({}));
+    client.call_on(&session, "Fetch.enable", json!({}));
+    let navigate = client.dispatch(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/report.csv") }),
+    );
+    let paused = client.await_event("Fetch.requestPaused");
+    let request_id = paused["params"]["requestId"].as_str().unwrap().to_owned();
+    client.call_on(
+        &session,
+        "Fetch.fulfillRequest",
+        json!({
+            "requestId": request_id,
+            "responseCode": 200,
+            "responseHeaders": [
+                { "name": "content-type", "value": "text/csv" },
+                { "name": "content-disposition", "value": "attachment; filename=\"report.csv\"" },
+            ],
+            "body": oxidepage_cdp::base64::encode(b"a,b\n1,2\n"),
+        }),
+    );
+    let _ = client.collect(navigate);
+
+    let init = loop {
+        let event = client.await_event("Page.lifecycleEvent");
+        if event["params"]["name"] == "init" {
+            break event["params"]["loaderId"].as_str().unwrap().to_owned();
+        }
+    };
+    assert_ne!(
+        init, committed,
+        "a download navigation's `init` carried the loader of the document that stayed; a driver \
+         telling documents apart by loader then never sees this navigation end"
+    );
+
+    // And the document really did stay — the fresh loader is the navigation's,
+    // not evidence of a commit.
+    let title = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.title", "returnByValue": true }),
+    );
+    assert_eq!(title["result"]["value"], "doc");
+    let _ = std::fs::remove_dir_all(&directory);
+}

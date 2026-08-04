@@ -493,20 +493,33 @@ try {
   });
 
   await check('a download does not commit a document', async () => {
-    const downloads = await browser.newPage();
+    // Every step bounded and named, unlike the rest of the suite: this check
+    // hung in CI (twice in three runs) and the check-level budget could only say
+    // *that* it hung, not where. A step that blows its bound now names itself.
+    const downloads = await within(10_000, 'browser.newPage', browser.newPage());
     try {
-      await downloads.goto(`${base}/index.html`);
-      const client = await downloads.createCDPSession();
-      await client.send('Browser.setDownloadBehavior', {
-        behavior: 'allow',
-        downloadPath: downloadDir,
-      });
+      await within(10_000, 'goto index.html', downloads.goto(`${base}/index.html`));
+      const client = await within(10_000, 'createCDPSession', downloads.createCDPSession());
+      await within(
+        10_000,
+        'Browser.setDownloadBehavior',
+        client.send('Browser.setDownloadBehavior', {
+          behavior: 'allow',
+          downloadPath: downloadDir,
+        }),
+      );
       const began = new Promise((resolve) => {
         client.on('Page.downloadWillBegin', resolve);
       });
-      await client.send('Page.enable');
-      // The navigation answers rather than committing; the document stays.
-      await downloads.goto(`${base}/-/attachment`).catch(() => {});
+      await within(10_000, 'Page.enable', client.send('Page.enable'));
+      // The navigation answers rather than committing; the document stays. It
+      // is *allowed* to reject — Chrome aborts a download navigation and
+      // Puppeteer surfaces that — but it must settle either way.
+      await within(
+        10_000,
+        'the download navigation to settle',
+        downloads.goto(`${base}/-/attachment`).catch(() => {}),
+      );
       const event = await within(10_000, 'Page.downloadWillBegin', began);
       assertEqual(event.suggestedFilename, 'report.csv', 'suggestedFilename');
       assertEqual(downloads.url(), `${base}/index.html`, 'the document must not have moved');
@@ -516,7 +529,9 @@ try {
         'the download landed on disk',
       );
     } finally {
-      await downloads.close();
+      // Bounded like the rest: a `close` that never answers would otherwise
+      // report as a failure of whatever the check last awaited.
+      await within(10_000, 'page.close', downloads.close());
     }
   });
 
