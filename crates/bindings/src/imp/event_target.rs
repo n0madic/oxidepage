@@ -150,5 +150,5 @@ pub(crate) fn dispatch_event(
 ) -> Result<bool, JsThrow> {
     let event = cx.this_event(&event_value)?;
     event.borrow_mut().is_trusted = false;
-    events::dispatch_event(cx, this, &event_value, &event)
+    events::dispatch_event_with(cx, this, &event, Some(&event_value))
 }

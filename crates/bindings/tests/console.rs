@@ -1,7 +1,7 @@
 //! ADR-0025: the console argument encoder and the console methods.
 //!
 //! No event loop is needed — the encoder runs entirely inside one host call —
-//! so this uses the same realm-plus-`PageState` harness as `bindings.rs`.
+//! so this uses the same realm-plus-`WorldState` harness as `bindings.rs`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -9,7 +9,7 @@ use std::rc::Rc;
 use oxidepage_base::{RequestId, id::FIRST_GENERATION};
 use oxidepage_bindings::{
     BindCx, ConsoleLevel, ConsoleMessage, DialogRequest, DialogResponse, HostHooks,
-    PREVIEW_MAX_ENTRIES, PREVIEW_MAX_STRING, PageState, ScriptError, ValuePreview, install,
+    PREVIEW_MAX_ENTRIES, PREVIEW_MAX_STRING, ScriptError, ValuePreview, WorldState, install,
 };
 use oxidepage_bindings::{PrivateStorageAreas, SharedStorage, StorageAreaKind};
 use oxidepage_dom::{ParseOptions, parse_document};
@@ -40,11 +40,18 @@ impl HostHooks for Hooks {
     fn run_dialog(&self, _request: DialogRequest) -> DialogResponse {
         DialogResponse::Dismiss
     }
-    fn schedule_timer(&self, _c: JsValue, _a: Vec<JsValue>, _d: f64, _r: bool) -> f64 {
+    fn schedule_timer(
+        &self,
+        _w: oxidepage_bindings::WorldId,
+        _c: JsValue,
+        _a: Vec<JsValue>,
+        _d: f64,
+        _r: bool,
+    ) -> f64 {
         0.0
     }
     fn clear_timer(&self, _id: f64) {}
-    fn request_animation_frame(&self, _callback: JsValue) -> f64 {
+    fn request_animation_frame(&self, _w: oxidepage_bindings::WorldId, _callback: JsValue) -> f64 {
         0.0
     }
     fn cancel_animation_frame(&self, _id: f64) {}
@@ -63,7 +70,7 @@ impl HostHooks for Hooks {
 struct Harness {
     // Field order = drop order: the state owns persistent JS references and
     // must drop before the realm.
-    state: Rc<PageState>,
+    state: Rc<WorldState>,
     hooks: Rc<Hooks>,
     realm: oxidepage_js::QuickJsRealm,
 }

@@ -1,4 +1,4 @@
-//! The custom-element registry data held by [`PageState`](crate::PageState).
+//! The custom-element registry data held by [`WorldState`](crate::WorldState).
 //!
 //! The DOM crate stores only per-element state and reaction intents (it cannot
 //! depend on JS). The *definitions* — constructors, lifecycle callbacks — live

@@ -114,9 +114,14 @@ pub(crate) fn buttons(_cx: &BindCx<'_>, this: EventRef) -> Result<f64, JsThrow> 
 /// The stored wrapper itself, so `e.relatedTarget === theNodeThatWasPassedIn`.
 /// Re-minting it from an id would be both slower and, for a node freed since,
 /// a throw where the spec wants the object back.
-pub(crate) fn related_target(_cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
-    let related = fields(&this, "MouseEvent", |m| m.related.clone())?;
-    Ok(related.unwrap_or(JsValue::Null))
+pub(crate) fn related_target(cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
+    // Resolved through **this** world's wrapper cache. `node_to_js` is a cache
+    // lookup, so `e.relatedTarget === node` still holds within a world; across
+    // worlds the objects are necessarily distinct (ADR-0033 D5).
+    let related = fields(&this, "MouseEvent", |m| {
+        m.related.as_ref().map(crate::events::PinnedNode::id)
+    })?;
+    cx.opt_node_to_js(related)
 }
 
 pub(crate) fn ctrl_key(_cx: &BindCx<'_>, this: EventRef) -> Result<bool, JsThrow> {

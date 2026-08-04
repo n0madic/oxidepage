@@ -9,14 +9,30 @@
 use oxidepage_base::{EngineError, NetErrorKind};
 
 /// A network-layer failure with a structured category and owned detail.
-#[derive(Clone, Debug, thiserror::Error)]
-#[error("{}: {detail}", kind.as_str())]
+#[derive(Clone, Debug)]
 pub struct NetError {
     pub kind: NetErrorKind,
     /// The offending URL, status, or cause. Owned so no borrowed state
     /// crosses the async/sync boundary.
     pub detail: String,
+    /// Whether `detail` is already a complete wire-level error text.
+    ///
+    /// See [`NetError::wire`]. Not public: the only way to set it is that
+    /// constructor, so a `net::ERR_…` string cannot acquire the flag by
+    /// accident, nor an ordinary detail lose its category prefix.
+    verbatim: bool,
 }
+
+impl std::fmt::Display for NetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.verbatim {
+            return f.write_str(&self.detail);
+        }
+        write!(f, "{}: {}", self.kind.as_str(), self.detail)
+    }
+}
+
+impl std::error::Error for NetError {}
 
 impl NetError {
     #[must_use]
@@ -24,6 +40,27 @@ impl NetError {
         Self {
             kind,
             detail: detail.into(),
+            verbatim: false,
+        }
+    }
+
+    /// A failure whose detail is already Chrome's own `net::ERR_…` text.
+    ///
+    /// Such a string reaches a driver through `Network.loadingFailed.errorText`
+    /// and `Page.navigate.errorText`, where it is compared by **equality** —
+    /// Puppeteer's `navigateFrame` tests
+    /// `errorText === 'net::ERR_HTTP_RESPONSE_CODE_FAILURE'`, and
+    /// `request.abort(errorCode)` round-trips the name it was given. Gluing
+    /// this error's category in front of it (`blocked: net::ERR_ABORTED`) is
+    /// exactly what such a test never matches, so a verbatim detail is
+    /// displayed alone. The `kind` is still carried, for the engine's own
+    /// structured handling.
+    #[must_use]
+    pub fn wire(kind: NetErrorKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: text.into(),
+            verbatim: true,
         }
     }
 

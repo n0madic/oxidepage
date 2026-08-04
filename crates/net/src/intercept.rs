@@ -38,6 +38,17 @@ use crate::fetch::ResourceType;
 /// `EngineError::Timeout` to the driver *while the page is still loading*, and
 /// the driver would see a navigation fail that in fact succeeded moments later.
 ///
+/// The bound holds because `run_blocking` measures it **once per blocking
+/// operation** rather than once per pause: one request can park twice (its
+/// request pause, then its auth pause), and two independent 20 s waits would
+/// blow the command timeout the constant exists to stay under.
+///
+/// What is *not* covered, and is a deliberate limit: several blocking loads
+/// inside one embedder command — a document plus two intercepted `@import`s —
+/// are separate operations and each gets its own budget. `net` has no notion of
+/// the command above it, and reaching that case at all means the driver has
+/// stopped answering, which is the state this backstop exists for.
+///
 /// The timeout is a backstop, not the release mechanism — a driver that
 /// detaches or drops its socket releases every paused request explicitly
 /// (ADR-0032 D7). It only covers a driver that is wedged while holding the
@@ -273,6 +284,26 @@ pub struct InterceptConfig {
     /// Requests announced as paused and not yet resolved. Membership is what
     /// makes a resolution idempotent.
     pub paused: HashSet<RequestId>,
+    /// The protocol sessions that currently want interception.
+    ///
+    /// `enabled` is page-wide while the protocol's `Fetch` domain is per
+    /// session, and a target can carry several sessions — on one connection
+    /// (`Target.attachToTarget` twice, which `createCDPSession` does) or on
+    /// two. One session's `Fetch.disable` used to clear the page-wide config
+    /// for all of them, leaving the others' flags `true` and silently starved
+    /// of `Fetch.requestPaused`. Interception ends when the last session lets
+    /// go — which is also what makes a connection dropping harmless to a
+    /// second driver still attached.
+    wanted_by: HashSet<String>,
+    /// Receive order of the last `Fetch.enable`/`disable` that was applied.
+    ///
+    /// `Fetch.disable` runs on the shared priority lane and `Fetch.enable` on
+    /// its session's, so the two write this config from threads that race. A
+    /// driver that does not await `setRequestInterception(true)` before sending
+    /// `(false)` could therefore get disable-then-enable and be left with
+    /// interception **on** while believing it off. The stamp makes the driver's
+    /// order win regardless of which lane got there first.
+    config_seq: u64,
 }
 
 impl InterceptConfig {
@@ -332,8 +363,24 @@ impl InterceptControl {
     }
 
     /// Turns interception on. Replaces any previous patterns.
-    pub fn enable(&self, patterns: Vec<RequestPattern>, handle_auth: bool) {
+    /// `seq` is the request's receive order; an older one is ignored.
+    pub fn enable(
+        &self,
+        seq: u64,
+        session: &str,
+        patterns: Vec<RequestPattern>,
+        handle_auth: bool,
+    ) {
         let mut config = self.config();
+        // The claim is registered only if this enable is the driver's *latest*
+        // word. Claiming first would let an enable that a newer disable already
+        // superseded leave a permanent entry in `wanted_by`, which then blocks
+        // the last-session disable that is supposed to end interception.
+        if seq < config.config_seq {
+            return;
+        }
+        config.wanted_by.insert(session.to_owned());
+        config.config_seq = seq;
         config.enabled = true;
         config.patterns = patterns;
         config.handle_auth = handle_auth;
@@ -343,12 +390,42 @@ impl InterceptControl {
     ///
     /// The caller sends the releases; this only clears the state, so the two
     /// cannot interleave with a request pausing in between.
-    pub fn disable(&self) -> Vec<RequestId> {
+    /// `seq` is the request's receive order. A **stale** disable still releases
+    /// everything paused — letting go is always safe, and the driver did ask —
+    /// but does not roll the config back over a newer enable.
+    /// Interception ends only when the **last** session lets go. Until then
+    /// this releases **nothing** and the config stands: `paused` is page-wide
+    /// and carries no session, so draining it here would let go of requests the
+    /// sessions still attached are in the middle of answering.
+    pub fn disable(&self, seq: u64, session: &str) -> Vec<RequestId> {
         let mut config = self.config();
+        config.wanted_by.remove(session);
+        if !config.wanted_by.is_empty() {
+            return Vec::new();
+        }
+        let released: Vec<RequestId> = config.paused.drain().collect();
+        if seq < config.config_seq {
+            return released;
+        }
+        config.config_seq = seq;
         config.enabled = false;
         config.patterns.clear();
         config.handle_auth = false;
-        config.paused.drain().collect()
+        released
+    }
+
+    /// Drops every session of one connection, then disables if none are left.
+    pub fn release_sessions(&self, sessions: &[String]) -> Vec<RequestId> {
+        {
+            let mut config = self.config();
+            for session in sessions {
+                config.wanted_by.remove(session);
+            }
+            if !config.wanted_by.is_empty() {
+                return Vec::new();
+            }
+        }
+        self.disable(u64::MAX, "")
     }
 
     /// Every currently paused id, leaving them paused.
@@ -392,9 +469,19 @@ impl InterceptControl {
     /// page briefly on an event bus no one is draining. A page whose driver
     /// merely closed its socket would grind rather than carry on.
     pub fn release_all(&self) {
-        for id in self.disable() {
+        // Unconditional: this is the end of the interceptor, not one session
+        // letting go, so every claim in `wanted_by` goes with it. `u64::MAX`
+        // for the same reason — teardown is not racing a driver command.
+        self.config().wanted_by.clear();
+        for id in self.disable(u64::MAX, "") {
             self.send(InterceptCommand::release(id));
         }
+        // Emulated conditions go with it. They are page-wide state a driver
+        // set and only a driver clears, so a socket that dropped after
+        // `emulateNetworkConditions({offline: true})` used to leave the page
+        // permanently offline — and `serve` keeps the browser across
+        // connections, so the *next* driver inherited a dead page.
+        self.set_conditions(false, Duration::ZERO);
     }
 
     /// `Network.emulateNetworkConditions`' two honest members.
@@ -459,7 +546,7 @@ mod tests {
     #[test]
     fn no_patterns_means_every_request() {
         let (control, _rx) = InterceptControl::new();
-        control.enable(Vec::new(), false);
+        control.enable(0, "s", Vec::new(), false);
         assert!(control.config().matches("http://x/", ResourceType::Other));
     }
 
@@ -487,10 +574,10 @@ mod tests {
         let (control, _rx) = InterceptControl::new();
         let a = RequestId::from_parts(1, oxidepage_base::id::FIRST_GENERATION);
         let b = RequestId::from_parts(2, oxidepage_base::id::FIRST_GENERATION);
-        control.enable(Vec::new(), true);
+        control.enable(0, "s", Vec::new(), true);
         control.config().paused.extend([a, b]);
 
-        let mut released = control.disable();
+        let mut released = control.disable(1, "s");
         released.sort_by_key(|id| id.index());
         assert_eq!(released, vec![a, b]);
         assert!(!control.config().enabled);

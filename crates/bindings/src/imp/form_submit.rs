@@ -68,12 +68,12 @@ pub(crate) fn submit(
         // `onsubmit = e => { e.preventDefault(); validate(); form.submit(); }`,
         // the canonical validate-then-submit idiom, leaving the page looking
         // hung with no warning.
-        if cx.state.firing_submission_events.get() {
+        if cx.state.page.firing_submission_events.get() {
             return Ok(());
         }
-        cx.state.firing_submission_events.set(true);
+        cx.state.page.firing_submission_events.set(true);
         let proceed = fire_submit_event(cx, form, submitter);
-        cx.state.firing_submission_events.set(false);
+        cx.state.page.firing_submission_events.set(false);
         if !proceed? {
             return Ok(());
         }
@@ -88,8 +88,8 @@ fn fire_submit_event(
     form: NodeId,
     submitter: Option<NodeId>,
 ) -> Result<bool, JsThrow> {
-    let (value, data) = crate::imp::submit_event::new_trusted(cx, submitter)?;
-    if !dispatch_event(cx, EventTargetKey::Node(form), &value, &data)? {
+    let data = crate::imp::submit_event::new_trusted_data(cx, submitter)?;
+    if !dispatch_event(cx, EventTargetKey::Node(form), &data)? {
         return Ok(false);
     }
     // A listener may have detached the form or removed the submitter.
@@ -194,7 +194,7 @@ fn encode(
     // upload that drops the file is the worse failure by far (ADR-0032's
     // deliberate limits record it).
     let data = crate::netdata::FormDataData::new(entries);
-    let enctype = if data.has_file() && plan.post {
+    let enctype = if data.has_selected_file() && plan.post {
         if plan.enctype != MULTIPART {
             cx.warn(&format!(
                 "form submission: enctype `{}` cannot carry a file, so \
@@ -226,6 +226,7 @@ fn encode(
             replace: false,
             body: None,
             reload: false,
+            download: None,
         };
     }
 
@@ -264,6 +265,7 @@ fn encode(
             content_type,
         }),
         reload: false,
+        download: None,
     }
 }
 
@@ -359,8 +361,8 @@ pub(crate) fn reset(cx: &BindCx<'_>, form: NodeId) -> Result<(), JsThrow> {
     );
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
-    let (value, data) = cx.new_event_object("Event", data)?;
-    if dispatch_event(cx, EventTargetKey::Node(form), &value, &data)? {
+    let data = cx.new_event_data("Event", data);
+    if dispatch_event(cx, EventTargetKey::Node(form), &data)? {
         cx.state.dom.borrow_mut().reset_form(form);
     }
     Ok(())

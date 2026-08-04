@@ -18,7 +18,7 @@
 //! Browser-level commands share a lane of their own.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
@@ -135,13 +135,6 @@ pub struct SessionState {
     pub target_id: String,
     pub page: PageHandle,
     pub flags: DomainFlags,
-    /// World names this session asked `Page.createIsolatedWorld` for.
-    ///
-    /// Remembered because a new document clears every execution context, and a
-    /// driver's utility realm re-binds by *name*: without re-announcing them
-    /// after each commit, every isolated-realm call — `page.title`, `page.$`,
-    /// `waitForSelector` — blocks until the driver's own timeout.
-    isolated_worlds: Mutex<Vec<String>>,
     /// Binding names this session installed with `Runtime.addBinding`.
     ///
     /// `Runtime.bindingCalled` goes only to the sessions that asked for that
@@ -152,23 +145,6 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    /// The position of `name` in this session's world list, appending it if it
-    /// is new. That position is what gives each world a context id of its own.
-    #[must_use]
-    pub fn isolated_world_index(&self, name: &str) -> usize {
-        let mut worlds = self
-            .isolated_worlds
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match worlds.iter().position(|existing| existing == name) {
-            Some(index) => index,
-            None => {
-                worlds.push(name.to_owned());
-                worlds.len() - 1
-            }
-        }
-    }
-
     /// Records a binding name this session installed.
     pub fn remember_binding(&self, name: &str) {
         let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
@@ -184,14 +160,6 @@ impl SessionState {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .any(|existing| existing == name)
-    }
-
-    #[must_use]
-    pub fn isolated_worlds(&self) -> Vec<String> {
-        self.isolated_worlds
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
     }
 }
 
@@ -209,6 +177,18 @@ pub struct Connection {
     pub shutdown: Arc<Shutdown>,
     /// Set by `Browser.close`, acted on by the lane once the reply is queued.
     shutdown_armed: AtomicBool,
+    /// Set the moment the read loop ends, before any teardown.
+    ///
+    /// Lane threads are detached and keep draining whatever is already queued
+    /// until their senders drop, so a command submitted before the socket died
+    /// can still run *after* `release_all_interception`. A `Fetch.enable` in
+    /// that window re-armed interception on the page with nobody left to answer
+    /// `requestPaused`, and every later request on that page then paused for the
+    /// full intercept timeout — permanently, and for the *next* driver too,
+    /// because `serve` keeps the browser across connections. Gating the job is
+    /// one check; gating each handler that touches page state would be a list
+    /// that silently goes stale.
+    closed: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<SessionState>>>,
     lanes: Mutex<HashMap<String, Sender<Lane>>>,
     /// `Target.setDiscoverTargets`.
@@ -224,10 +204,14 @@ pub struct Connection {
     streams: Mutex<HashMap<String, Stream>>,
 }
 
+/// Stamps every request the endpoint receives, on any connection, with its
+/// receive order (see [`Request::seq`] and [`Connection::submit`]).
+static NEXT_REQUEST_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Lets every request `session` holds paused proceed, unmodified.
 fn release_interception(session: &Arc<SessionState>) {
     session.flags.fetch.store(false, Ordering::Relaxed);
-    session.page.release_paused_requests();
+    session.page.release_interception_for(&session.id);
 }
 
 type Lane = Box<dyn FnOnce() + Send + 'static>;
@@ -252,6 +236,7 @@ impl Connection {
             shutdown_armed: AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
             lanes: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
             discover: AtomicBool::new(false),
             auto_attach: AtomicBool::new(false),
             wait_for_debugger: AtomicBool::new(false),
@@ -262,7 +247,19 @@ impl Connection {
     /// Queues one frame's work onto the lane that owns it.
     ///
     /// Called from the socket read loop, so it must never block on the page.
-    pub fn submit(self: &Arc<Self>, request: Request) {
+    pub fn submit(self: &Arc<Self>, mut request: Request) {
+        // Stamped here, on the read loop, because this is the last point at
+        // which the driver's true ordering is known — from the next line on,
+        // commands are spread across lanes that run concurrently.
+        //
+        // **Endpoint-wide, not per connection.** The stamps are compared inside
+        // page-level state (`InterceptConfig::config_seq`), and a target's
+        // sessions can span connections, so two independent counters would make
+        // a second driver's `Fetch.enable` look "stale" against the first
+        // driver's command count and silently drop its patterns. One counter
+        // still preserves each connection's own order, which is all any
+        // comparison needs.
+        request.seq = NEXT_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
         let session_lane = request.session_id.clone().unwrap_or_default();
         // Kept for the failure paths below, which run after `request` has moved
         // into the job.
@@ -291,6 +288,12 @@ impl Connection {
 
         let connection = Arc::clone(self);
         let job: Lane = Box::new(move || {
+            // The socket is gone and teardown has run: this command can only
+            // mutate state nobody will observe, and some of that state outlives
+            // the connection (see `Connection::closed`).
+            if connection.closed.load(Ordering::Acquire) {
+                return;
+            }
             let session_id = request.session_id.clone();
             let result = connection.dispatch(&request);
             connection.send(Response::from_result(request.id, session_id, result));
@@ -474,7 +477,6 @@ impl Connection {
             target_id: target_id.to_owned(),
             page,
             flags: DomainFlags::default(),
-            isolated_worlds: Mutex::new(Vec::new()),
             bindings: Mutex::new(Vec::new()),
         });
         self.lock_sessions()
@@ -531,6 +533,9 @@ impl Connection {
     /// D7): the page owns a sender, so the decision channel never disconnects
     /// and there is no automatic signal to hang this off.
     pub fn release_all_interception(&self) {
+        // Ordered before the release, not after: a job already queued on a lane
+        // must not be able to re-arm what this is about to let go.
+        self.closed.store(true, Ordering::Release);
         for session in self.lock_sessions().values() {
             if session.flags.fetch.load(Ordering::Relaxed) {
                 release_interception(session);

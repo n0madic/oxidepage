@@ -175,11 +175,6 @@ impl FormDataValue {
             FormDataValue::File { filename, .. } => filename.clone(),
         }
     }
-
-    #[must_use]
-    pub fn is_file(&self) -> bool {
-        matches!(self, FormDataValue::File { .. })
-    }
 }
 
 /// A `FormData` entry list (the "entry list" of the XHR spec).
@@ -206,10 +201,19 @@ impl FormDataData {
             .collect()
     }
 
-    /// Whether any entry is a file, which is what forces a form to
-    /// `multipart/form-data`.
-    pub fn has_file(&self) -> bool {
-        self.list.borrow().iter().any(|(_, value)| value.is_file())
+    /// Whether any entry is a file that was actually chosen — which is what
+    /// forces a form to `multipart/form-data`.
+    ///
+    /// The empty-selection placeholder an unset `<input type=file>` contributes
+    /// (filename `""`, zero bytes, per HTML, so a server can tell "no file
+    /// chosen" from "field absent") does **not** count. It carries no bytes for
+    /// the author's enctype to lose, and upgrading over it would silently
+    /// change the wire format of an ordinary urlencoded post that merely
+    /// contains a file input nobody filled in.
+    pub fn has_selected_file(&self) -> bool {
+        self.list.borrow().iter().any(|(_, value)| {
+            matches!(value, FormDataValue::File { filename, .. } if !filename.is_empty())
+        })
     }
 
     /// Serializes as `multipart/form-data` with the given boundary — the wire

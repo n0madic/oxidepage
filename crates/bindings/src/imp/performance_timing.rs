@@ -1,11 +1,11 @@
 //! `PerformanceTiming` (Navigation Timing Level 1) attribute getters.
 //!
-//! Each getter reads the milestone recorded on [`PageState::timing`] and
+//! Each getter reads the milestone recorded on [`WorldState::timing`] and
 //! rounds it to whole milliseconds (the IDL type is `unsigned long long`).
 //! `unload*`/`redirect*`/`secureConnectionStart` are always `0` (v1: no
 //! distinct network phases for synchronously injected HTML).
 //!
-//! [`PageState::timing`]: crate::state::PageState::timing
+//! [`WorldState::timing`]: crate::state::WorldState::timing
 
 use oxidepage_js::JsThrow;
 
@@ -19,7 +19,7 @@ fn ms(value: f64) -> f64 {
 macro_rules! timing_getter {
     ($name:ident, $field:ident) => {
         pub(crate) fn $name(cx: &BindCx<'_>, _this: u64) -> Result<f64, JsThrow> {
-            Ok(ms(cx.state.timing.borrow().$field))
+            Ok(ms(cx.state.page.timing.borrow().$field))
         }
     };
 }

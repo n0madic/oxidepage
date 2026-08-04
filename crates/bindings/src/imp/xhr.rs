@@ -318,6 +318,8 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
         Credentials::SameOrigin
     };
     let request = NetRequest {
+        // Script-initiated: no driver override.
+        header_overrides: None,
         method,
         url,
         headers,
@@ -333,6 +335,9 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
         auth: None,
     };
     let id = cx.state.hooks.start_fetch(request);
+    // Tag the request with this world, so its completion is delivered here
+    // and not to whichever world happens to be current (ADR-0033 D10).
+    cx.state.page.note_net_world(id, cx.state.id);
     {
         let mut x = this.borrow_mut();
         x.request_id = Some(id);
@@ -673,7 +678,7 @@ fn arm_timeout(cx: &BindCx<'_>, this: &XhrRef) -> Result<(), JsThrow> {
     let host: HostFn = Rc::new(move |scope, _call| {
         let cx = BindCx {
             scope,
-            state: crate::cx::page_state(scope)?,
+            state: crate::cx::world_state(scope)?,
         };
         if let Some(data) = weak.upgrade() {
             timeout_fired(&cx, &data);
@@ -684,10 +689,13 @@ fn arm_timeout(cx: &BindCx<'_>, this: &XhrRef) -> Result<(), JsThrow> {
         .scope
         .new_function("XMLHttpRequest timeout", 0, host)
         .map_err(JsThrow::from)?;
-    let id = cx
-        .state
-        .hooks
-        .schedule_timer(JsValue::Object(func), Vec::new(), remaining, false);
+    let id = cx.state.hooks.schedule_timer(
+        cx.state.id,
+        JsValue::Object(func),
+        Vec::new(),
+        remaining,
+        false,
+    );
     this.borrow_mut().timeout_timer = Some(id);
     Ok(())
 }
@@ -852,17 +860,21 @@ fn target_of(this: &XhrRef, target: Target) -> Option<(EventTargetKey, JsValue)>
 /// `isTrusted` and `instanceof Event` all work, and every listener option
 /// (`capture`, `once`, `passive`) is honoured because the shared registry is
 /// doing the work.
-fn fire_at(cx: &BindCx<'_>, this: &XhrRef, target: Target, interface: &str, mut data: EventData) {
+fn fire_at(
+    cx: &BindCx<'_>,
+    this: &XhrRef,
+    target: Target,
+    interface: &'static str,
+    mut data: EventData,
+) {
     let Some((key, _wrapper)) = target_of(this, target) else {
         return;
     };
     let event_type = data.event_type.clone();
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
-    let Ok((value, data)) = cx.new_event_object(interface, data) else {
-        return;
-    };
-    if let Err(e) = crate::events::dispatch_event(cx, key, &value, &data) {
+    let data = cx.new_event_data(interface, data);
+    if let Err(e) = crate::events::dispatch_event(cx, key, &data) {
         cx.warn(&format!(
             "XMLHttpRequest `{event_type}` dispatch failed: {e:?}"
         ));

@@ -189,7 +189,7 @@ fn the_node_surface_round_trips_across_the_boundary() {
 
     // The same node named as a remote object resolves to the same handle.
     let object = page
-        .resolve_node(NodeRef::Handle(one[0]), Some("g".to_owned()))
+        .resolve_node(NodeRef::Handle(one[0]), None, Some("g".to_owned()))
         .unwrap()
         .unwrap();
     assert_eq!(object.subtype, Some(RemoteSubtype::Node));

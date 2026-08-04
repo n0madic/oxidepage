@@ -88,10 +88,9 @@ fn mouse_payload(
     pointer: bool,
 ) -> Result<UiPayload, JsThrow> {
     let offset = offset_in(cx, target, input.x, input.y);
-    let related = match related {
-        Some(id) => Some(cx.node_to_js(id)?),
-        None => None,
-    };
+    // Pinned, not wrapped: the payload is shared with every world that wraps
+    // the event, and a wrapper belongs to one of them (ADR-0033 D5).
+    let related = related.map(|id| crate::events::PinnedNode::new(&cx.state.dom, id));
     let mut payload = UiPayload::new(UiKind::Mouse(Box::new(MouseFields {
         // A headless page has no screen origin, so screen == client.
         screen_x: f64::from(input.x),
@@ -119,7 +118,7 @@ fn mouse_payload(
 fn fire_at(
     cx: &BindCx<'_>,
     target: NodeId,
-    interface: &str,
+    interface: &'static str,
     event_type: &str,
     bubbles: bool,
     cancelable: bool,
@@ -143,8 +142,8 @@ fn fire_at(
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
     data.ui = Some(Box::new(payload));
-    let (value, data) = cx.new_event_object(interface, data)?;
-    let proceed = crate::events::dispatch_event(cx, EventTargetKey::Node(target), &value, &data)?;
+    let data = cx.new_event_data(interface, data);
+    let proceed = crate::events::dispatch_event(cx, EventTargetKey::Node(target), &data)?;
     crate::microtask_checkpoint(cx);
     Ok(proceed)
 }

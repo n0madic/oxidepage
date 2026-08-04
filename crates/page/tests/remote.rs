@@ -223,6 +223,7 @@ fn call_function_on_binds_this_to_a_handle() {
         .call_function_on(
             "function () { return this.n * 2; }",
             Some(id),
+            None,
             &[],
             &by_value(),
         )
@@ -239,6 +240,7 @@ fn call_function_on_accepts_arrow_functions_and_literal_arguments() {
     let outcome = page
         .call_function_on(
             "(a, b) => a + b",
+            None,
             None,
             &[
                 CallArgument {
@@ -268,6 +270,7 @@ fn call_function_on_accepts_a_handle_as_an_argument() {
         .call_function_on(
             "(o) => o.v",
             None,
+            None,
             &[CallArgument {
                 object_id: Some(id),
                 ..CallArgument::default()
@@ -282,7 +285,7 @@ fn call_function_on_accepts_a_handle_as_an_argument() {
 fn call_function_on_reports_a_stale_handle() {
     let page = page();
     let err = page
-        .call_function_on("() => 1", Some(9999), &[], &by_value())
+        .call_function_on("() => 1", Some(9999), None, &[], &by_value())
         .unwrap_err();
     assert_eq!(err, RemoteError::NoSuchObject(9999));
 }
@@ -293,6 +296,7 @@ fn a_function_that_throws_reports_the_exception() {
     let outcome = page
         .call_function_on(
             "() => { throw new Error('inner'); }",
+            None,
             None,
             &[],
             &by_value(),
@@ -385,13 +389,15 @@ fn a_binding_delivers_its_payload_to_the_embedder() {
         &EvaluateOptions::default(),
     );
     let calls = page.drain_binding_calls();
-    assert_eq!(
-        calls,
-        vec![
-            (String::from("__probe"), String::from("hello")),
-            (String::from("__probe"), String::from("again")),
-        ]
-    );
+    let seen: Vec<(&str, &str)> = calls
+        .iter()
+        .map(|c| (c.name.as_str(), c.payload.as_str()))
+        .collect();
+    assert_eq!(seen, vec![("__probe", "hello"), ("__probe", "again")]);
+    // Every payload is attributed to the world that produced it; this binding
+    // lives in the main world, so they all carry its context id.
+    let main = page.execution_context_id();
+    assert!(calls.iter().all(|c| c.context_id == main));
     // Draining is destructive: the same payload must not be reported twice.
     assert!(page.drain_binding_calls().is_empty());
 }

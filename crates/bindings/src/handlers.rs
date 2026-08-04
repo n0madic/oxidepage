@@ -2,14 +2,14 @@
 //!
 //! HTML installs an event handler two ways: the IDL attribute (`el.onclick = fn`)
 //! and the content attribute, whose value is author source compiled into a
-//! function. Both feed the same slot — `PageState::event_handlers`, which
+//! function. Both feed the same slot — `WorldState::event_handlers`, which
 //! dispatch already consults — so this module is only the content-attribute
 //! half: it decides when a slot is stale with respect to the attribute, and
 //! compiles the source when it is.
 //!
 //! Compilation is lazy (spec: the handler is an "internal raw uncompiled
 //! handler" until first use) and cached against the source it came from:
-//! `PageState::handler_attr_seen` records the attribute value each slot
+//! `WorldState::handler_attr_seen` records the attribute value each slot
 //! currently reflects. A dispatch therefore recompiles only when the attribute
 //! actually changed, and that same record is what lets an IDL assignment win
 //! over an unchanged content attribute — while a *later* edit of the attribute
@@ -111,6 +111,16 @@ pub(crate) fn resolve(cx: &BindCx<'_>, key: EventTargetKey, event_type: &str) ->
     let slot = (key, event_type.to_owned());
     let installed = cx.state.event_handlers.borrow().get(&slot).cloned();
     if !HANDLER_EVENT_TYPES.contains(&event_type) {
+        return installed;
+    }
+    // The content-attribute half is main-world only (ADR-0033 D6). An inline
+    // `onclick="…"` is *page* script: it is compiled once, in the page's own
+    // world, against the page's globals. Compiling it again per world would
+    // give a driver's utility world its own copy of the page's handler —
+    // running author code the driver never asked for, with a different
+    // `this` chain. Chrome does the same. An IDL assignment made *from* this
+    // world is a different thing and stays visible above.
+    if !cx.state.is_main() {
         return installed;
     }
     let Some(element) = source_element(cx, key, event_type) else {

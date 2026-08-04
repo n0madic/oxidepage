@@ -206,11 +206,16 @@ impl BrowserContext {
         // Context in the high half, page counter in the low half, so a page id
         // names its context and no two contexts can mint the same one.
         let id = PageId((inner.id.0 << 32) | inner.next_page.fetch_add(1, Ordering::Relaxed));
+        // Read **before** `merge`, which fills `download_path` from the
+        // context's *construction-time* option — after it, this is always
+        // `Some` for a context built with a path and the live value below could
+        // never win. That made `Browser.setDownloadBehavior({behavior:"deny"})`
+        // a silent no-op for every page created afterwards.
+        let per_page = options.download_path.clone();
         let mut options = inner.options.merge(options);
-        // The *live* download path wins over the one the context was built
-        // with: a driver's `Browser.setDownloadBehavior` before this page
-        // existed has to reach it.
-        options.download_path = options.download_path.or_else(|| {
+        // Precedence: an explicit per-page path, else the context's **live**
+        // one — `None` included, because that is what "deny" is.
+        options.download_path = per_page.or_else(|| {
             inner
                 .download_path
                 .lock()
@@ -271,7 +276,7 @@ impl BrowserContext {
     /// not yet: a driver routinely sets the behavior before it creates a page,
     /// and applying it only to the current list would make that call a no-op it
     /// had every reason to believe worked.
-    pub fn set_download_path(&self, path: Option<std::path::PathBuf>) {
+    pub fn set_download_path(&self, path: Option<std::path::PathBuf>) -> EngineResult<()> {
         *self
             .0
             .download_path
@@ -281,12 +286,23 @@ impl BrowserContext {
             Some(path) => oxidepage_page::DownloadBehavior::Allow(path),
             None => oxidepage_page::DownloadBehavior::Deny,
         };
+        let mut unreached = Vec::new();
         for page in self.pages() {
             let behavior = behavior.clone();
-            // Best effort: a page whose thread has already gone is not an
-            // error here — `Browser.close` races this by design.
-            let _ = page.with(move |p| p.set_download_behavior(behavior));
+            match page.with(move |p| p.set_download_behavior(behavior)) {
+                Ok(()) => {}
+                // A page whose thread has gone is not an error: `Browser.close`
+                // races this by design, and the context-level value above is
+                // what any replacement page will read.
+                Err(EngineError::Closed | EngineError::Crashed(_)) => {}
+                // A **timeout** is different, and used to be swallowed with the
+                // rest: the page is alive and simply busy (parked in a dialog,
+                // or inside a synchronous document fetch), so it never got the
+                // new behaviour and the caller was told the command succeeded.
+                Err(error) => unreached.push(error),
+            }
         }
+        unreached.pop().map_or(Ok(()), Err)
     }
 
     /// Every page of this context that has not exited.

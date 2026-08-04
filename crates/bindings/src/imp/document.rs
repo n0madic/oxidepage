@@ -472,7 +472,7 @@ pub(crate) fn current_script(cx: &BindCx<'_>, this: NodeId) -> Result<Option<Nod
         // No script ever runs in a document without a browsing context.
         return Ok(None);
     }
-    Ok(cx.state.current_script.get())
+    Ok(cx.state.page.current_script.get())
 }
 
 fn title_element(cx: &BindCx<'_>, document: NodeId) -> Option<NodeId> {
@@ -627,7 +627,7 @@ pub(crate) fn scrolling_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<
 
 /// `[SameObject] readonly attribute any fonts;` (CSS Font Loading). The page
 /// document's `FontFaceSet` is the engine's one real font state, cached in a
-/// `PageState` cell so `document.fonts === document.fonts` holds.
+/// `WorldState` cell so `document.fonts === document.fonts` holds.
 ///
 /// A second document gets its own `[SameObject]` wrapper (so identity still
 /// holds per document) over that same state — font loading is a property of

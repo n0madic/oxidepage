@@ -174,8 +174,13 @@ fn create_target_answers_promptly_for_a_page_that_waits_for_the_debugger() {
     let elapsed = started.elapsed();
 
     assert!(!created["targetId"].as_str().unwrap().is_empty());
+    // Well under the 30 s command timeout, which is the deadlock this guards:
+    // the bug made `createTarget` wait it out in full. A tighter wall-clock
+    // bound is not a stronger test, only a flakier one — this runs alongside
+    // the rest of the suite on a machine that may be building at the same time,
+    // and 5 s was reachable by load alone.
     assert!(
-        elapsed < Duration::from_secs(5),
+        elapsed < Duration::from_secs(20),
         "createTarget took {elapsed:?}; it must not block on the suspended page"
     );
 
@@ -336,13 +341,107 @@ fn each_isolated_world_gets_a_context_id_of_its_own() {
     );
     assert_ne!(first["executionContextId"], second["executionContextId"]);
 
-    // Asking twice for the same world is idempotent.
+    // Asking twice for the same world is idempotent within a document
+    // (ADR-0033 D9): Chrome mints a fresh context per call, but a driver calls
+    // this once per navigation and the protocol offers no way to destroy the
+    // surplus, so minting would leak a context per navigation.
     let again = client.call_on(
         &session,
         "Page.createIsolatedWorld",
         json!({ "worldName": "one" }),
     );
     assert_eq!(first["executionContextId"], again["executionContextId"]);
+
+    // Neither collides with the main world's context.
+    let main = client.call_on(&session, "Runtime.evaluate", json!({ "expression": "1" }));
+    let _ = main;
+    let contexts = [
+        first["executionContextId"].as_i64().unwrap(),
+        second["executionContextId"].as_i64().unwrap(),
+    ];
+    assert!(
+        contexts.iter().all(|id| *id > 1),
+        "an isolated world must not report the main context's id: {contexts:?}"
+    );
+}
+
+/// A commit destroys every isolated world and rebuilds it under the same name
+/// against a fresh global — so the same name yields a **new** id (ADR-0033 D9).
+#[test]
+fn a_world_gets_a_new_context_id_after_a_navigation() {
+    let fixtures = Fixtures::start(vec![("/a", "<!doctype html><title>A</title>")]);
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    let before = client.call_on(
+        &session,
+        "Page.createIsolatedWorld",
+        json!({ "worldName": "utility" }),
+    );
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "globalThis.__stale = 1",
+            "contextId": before["executionContextId"],
+        }),
+    );
+
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+
+    let after = client.call_on(
+        &session,
+        "Page.createIsolatedWorld",
+        json!({ "worldName": "utility" }),
+    );
+    assert_ne!(
+        before["executionContextId"], after["executionContextId"],
+        "a rebuilt world must report a new id, or a driver keeps using a dead one"
+    );
+
+    // The global really is fresh — not the old one under a new number.
+    let stale = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "typeof globalThis.__stale",
+            "contextId": after["executionContextId"],
+        }),
+    );
+    assert_eq!(stale["result"]["value"], "undefined");
+}
+
+/// The world registry is the **page's**, not the session's, so a second session
+/// attached to the same target sees the worlds the first one created.
+#[test]
+fn two_sessions_on_one_target_see_the_same_worlds() {
+    let harness = Harness::start();
+    let (mut client, first_session, target) = harness.attached();
+
+    let created = client.call_on(
+        &first_session,
+        "Page.createIsolatedWorld",
+        json!({ "worldName": "shared" }),
+    );
+    let context_id = created["executionContextId"].clone();
+
+    // A separate connection and session onto the same target.
+    let (mut other, second_session) = harness.attach_existing(&target);
+    other.call_on(
+        &second_session,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__seen = 'yes'", "contextId": context_id }),
+    );
+    let read_back = client.call_on(
+        &first_session,
+        "Runtime.evaluate",
+        json!({ "expression": "__seen", "contextId": context_id }),
+    );
+    assert_eq!(read_back["result"]["value"], "yes");
 }
 
 #[test]

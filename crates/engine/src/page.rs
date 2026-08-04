@@ -341,7 +341,10 @@ impl PageHandle {
     /// The inner `Result` is the page's own: a navigation that fails (DNS,
     /// HTTP, a blocked address) is not an engine error. `JsError` is `!Send`
     /// — it can carry a `JsValue` — so it is rendered on the page thread,
-    /// where the realm that owns those values still exists.
+    /// where the realm that owns those values still exists. The page raises
+    /// such a failure as `JsError::Host`, whose `Display` is the network
+    /// layer's text verbatim: this string becomes `Page.navigate.errorText`,
+    /// which a driver compares against Chrome's exact `net::ERR_…` names.
     pub fn navigate(&self, url: &str, wait: WaitUntil) -> EngineResult<Result<(), String>> {
         let url = url.to_owned();
         self.with(move |page| page.navigate(&url, wait).map_err(|e| e.to_string()))
@@ -402,10 +405,13 @@ impl PageHandle {
         &self,
         declaration: String,
         object_id: Option<u64>,
+        context_id: Option<u64>,
         args: Vec<CallArgument>,
         options: EvaluateOptions,
     ) -> EngineResult<Result<EvaluationResult, RemoteError>> {
-        self.with(move |page| page.call_function_on(&declaration, object_id, &args, &options))
+        self.with(move |page| {
+            page.call_function_on(&declaration, object_id, context_id, &args, &options)
+        })
     }
 
     /// The own enumerable properties of a handle.
@@ -442,7 +448,7 @@ impl PageHandle {
     }
 
     /// Takes the binding payloads produced since the last call.
-    pub fn drain_binding_calls(&self) -> EngineResult<Vec<(String, String)>> {
+    pub fn drain_binding_calls(&self) -> EngineResult<Vec<oxidepage_page::BindingCall>> {
         self.with(Page::drain_binding_calls)
     }
 
@@ -456,6 +462,51 @@ impl PageHandle {
     /// target, for up to the command timeout.
     pub fn execution_context_id(&self) -> EngineResult<u64> {
         self.with_control(Page::execution_context_id)
+    }
+
+    /// Every live execution world of this page, main world first.
+    ///
+    /// A **control** call, for exactly the reason `execution_context_id` is:
+    /// the CDP event thread reads it to re-announce contexts after a commit,
+    /// and must never block behind a navigating page. It reads a `RefCell` and
+    /// clones names and ids — no JS, no DOM, no layout — which stretches the
+    /// "`Cell`s and channels only" convention for control jobs far enough that
+    /// ADR-0033 D10 names it explicitly rather than leaving it to be
+    /// rediscovered.
+    pub fn worlds(&self) -> EngineResult<Vec<oxidepage_page::WorldInfo>> {
+        self.with_control(Page::worlds)
+    }
+
+    /// Creates — or returns — the isolated world named `name`.
+    pub fn create_isolated_world(
+        &self,
+        name: String,
+    ) -> EngineResult<Result<oxidepage_page::WorldInfo, String>> {
+        self.with(move |page| page.create_isolated_world(&name))
+    }
+
+    /// Evaluates in the world a context id names (main world when `None`).
+    pub fn evaluate_in(
+        &self,
+        context_id: Option<u64>,
+        source: String,
+        options: EvaluateOptions,
+    ) -> EngineResult<Result<EvaluationResult, String>> {
+        self.with(move |page| page.evaluate_in(context_id, &source, &options))
+    }
+
+    /// Installs a binding in one named world, or in every world when `None`.
+    pub fn add_binding_in(
+        &self,
+        name: String,
+        world: Option<String>,
+    ) -> EngineResult<Result<(), String>> {
+        self.with(move |page| page.add_binding_in(&name, world.as_deref()))
+    }
+
+    /// Registers an init script for one named world, or the main world.
+    pub fn add_init_script_for(&self, source: String, world: Option<String>) -> EngineResult<u64> {
+        self.with(move |page| page.add_init_script_for(&source, world.as_deref()))
     }
 
     /// Registers a script to run at the start of every new document.
@@ -609,11 +660,12 @@ impl PageHandle {
     pub fn resolve_node(
         &self,
         node: NodeRef,
+        context_id: Option<u64>,
         group: Option<String>,
     ) -> EngineResult<Result<RemoteObject, RemoteError>> {
         self.with(move |page| {
             let id = page.resolve_node_ref(node)?;
-            page.node_object(id, group.as_deref())
+            page.node_object_in(id, context_id, group.as_deref())
         })
     }
 
@@ -786,6 +838,16 @@ impl PageHandle {
         }
     }
 
+    /// Drops one protocol session's claim on interception, ending it only if
+    /// that was the last claim (see `InterceptConfig::wanted_by`).
+    pub fn release_interception_for(&self, session: &str) {
+        if let Some(intercept) = &self.0.intercept {
+            for id in intercept.release_sessions(&[session.to_owned()]) {
+                intercept.send(oxidepage_page::InterceptCommand::release(id));
+            }
+        }
+    }
+
     /// Whether a dialog is open on this page right now.
     ///
     /// Read from a shared atomic, so it stays truthful for a page that is
@@ -852,6 +914,16 @@ impl PageHandle {
     /// notice and exit on its own — and the handle is marked closed, so a
     /// wedged page can never hold up a [`Browser::close`](crate::Browser::close).
     pub fn close(&self) {
+        // Release first (ADR-0032 D7). A page parked on a *blocking* pause —
+        // the top-level document's — services no job at all, not even a control
+        // one: it is inside `run_blocking`'s `await_decision`, not at a wait
+        // point. So a close arriving while the driver still holds that pause
+        // would be answered only when the intercept timeout expired, and
+        // `join_bounded` would give up first and *detach* the thread, leaking it
+        // and its `Page`. Here rather than at each call site because every close
+        // path has the problem — `Target.closeTarget`, `Browser.close`,
+        // `BrowserContext::close` and the `Drop` that stands in for them.
+        self.release_paused_requests();
         // A control job: it sets a `Cell`, so it runs even mid-navigation.
         let _ = self.post_control(Page::request_close);
         self.join_bounded();

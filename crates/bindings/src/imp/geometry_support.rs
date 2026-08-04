@@ -6,7 +6,7 @@
 //! cheap).
 //!
 //! Invariant: the closures run while `dom`, `style`, and `layout` are all
-//! borrowed from `PageState` — reflow and the geometry queries must never
+//! borrowed from `WorldState` — reflow and the geometry queries must never
 //! call back into JS bindings.
 
 use oxidepage_base::NodeId;
@@ -57,7 +57,11 @@ pub(crate) fn rect_data(rect: oxidepage_base::Rect) -> RectData {
 /// queue and dispatches the events as tasks.
 pub(crate) fn note_scroll(cx: &BindCx<'_>, target: Option<NodeId>, changed: bool) {
     if changed {
-        cx.state.pending_scroll_targets.borrow_mut().push(target);
+        cx.state
+            .page
+            .pending_scroll_targets
+            .borrow_mut()
+            .push(target);
     }
 }
 

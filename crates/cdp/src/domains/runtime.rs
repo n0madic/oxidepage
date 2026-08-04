@@ -53,49 +53,25 @@ pub fn execution_context_created(
     connection: &Arc<Connection>,
     session: &Arc<SessionState>,
 ) -> crate::message::Event {
-    execution_context_created_named(connection, session, "", true)
+    let id = session.page.execution_context_id().unwrap_or(1);
+    execution_context_created_named(connection, session, "", true, id)
 }
 
 /// Offset that gives a named "isolated" world an id of its own.
+/// The same event for a named world.
 ///
-/// Load-bearing despite there being one real world. A driver keys its context
-/// map **by id**, so reporting the same id twice makes the second registration
-/// overwrite the first: the main world then has no context, and every event
-/// attributed to it — `consoleAPICalled`, `bindingCalled` — is dropped by the
-/// driver as belonging to an unknown context. Two ids, both resolving to the
-/// same world, is what keeps that map coherent.
-pub const ISOLATED_WORLD_ID_OFFSET: u64 = 1_000_000;
-
-/// The context id a named world reports.
-///
-/// The offset alone is not enough: two worlds sharing one id collide in the
-/// driver's map exactly as a world colliding with the main one does, and the
-/// second registration wins. The world's position in the session's list is what
-/// separates them.
-#[must_use]
-pub fn world_context_id(base: u64, world_index: usize) -> u64 {
-    base + ISOLATED_WORLD_ID_OFFSET + world_index as u64
-}
-
-/// The same event under a world name.
-///
-/// There is one execution context, so a named "isolated" world evaluates
-/// against the main world — the documented one-world compromise (ADR-0030) —
-/// but reports a *distinct* id, for the reason
-/// [`ISOLATED_WORLD_ID_OFFSET`] gives. The name and `isDefault: false` are what
-/// a driver matches on to bind its utility realm.
+/// Worlds are real now (ADR-0033): `id` is the world's own monotonic
+/// `Runtime.ExecutionContextId`, minted page-side and unique across documents
+/// *and* worlds, so the `ISOLATED_WORLD_ID_OFFSET` arithmetic this used to do
+/// is gone. The name and `isDefault: false` are still what a driver matches on
+/// to bind its utility realm.
 pub fn execution_context_created_named(
     connection: &Arc<Connection>,
     session: &Arc<SessionState>,
     name: &str,
     is_default: bool,
+    id: u64,
 ) -> crate::message::Event {
-    let base = session.page.execution_context_id().unwrap_or(1);
-    let id = if is_default {
-        base
-    } else {
-        world_context_id(base, session.isolated_world_index(name))
-    };
     let url = connection
         .registry
         .info(&session.target_id)
@@ -158,14 +134,28 @@ fn options_from(
 fn evaluate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let session = connection.require_session(request)?;
     let params: EvaluateParams = request.parse()?;
-    let _ = (params.context_id, params.user_gesture, params.silent);
+    let _ = (params.user_gesture, params.silent);
 
+    // Routed by context id (ADR-0033 D10). Absent means the main world; an id
+    // no live world carries is an error rather than a silent evaluation in the
+    // wrong one — which is exactly what a driver's utility-world call would
+    // have been under the one-world compromise.
+    let context_id = match params.context_id {
+        None => None,
+        Some(raw) => Some(
+            u64::try_from(raw)
+                .map_err(|_| ProtocolError::server("Cannot find context with specified id"))?,
+        ),
+    };
     let options = options_from(
         params.return_by_value,
         params.await_promise,
         params.object_group,
     );
-    let outcome = session.page.evaluate(&params.expression, options)?;
+    let outcome = session
+        .page
+        .evaluate_in(context_id, params.expression.clone(), options)?
+        .map_err(ProtocolError::server)?;
     Ok(evaluation_json(&outcome))
 }
 
@@ -212,7 +202,15 @@ fn parse_object_id(id: &str) -> Result<u64, ProtocolError> {
 fn call_function_on(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let session = connection.require_session(request)?;
     let params: CallFunctionOnParams = request.parse()?;
-    let _ = params.execution_context_id;
+    // Selects the world when no `objectId` is given; checked against the
+    // handle's world when one is (ADR-0033 D10).
+    let context_id = match params.execution_context_id {
+        None => None,
+        Some(raw) => Some(
+            u64::try_from(raw)
+                .map_err(|_| ProtocolError::server("Cannot find context with specified id"))?,
+        ),
+    };
 
     let object_id = params
         .object_id
@@ -247,7 +245,13 @@ fn call_function_on(connection: &Arc<Connection>, request: &Request) -> CommandR
     );
     let outcome = session
         .page
-        .call_function_on(params.function_declaration, object_id, arguments, options)?
+        .call_function_on(
+            params.function_declaration,
+            object_id,
+            context_id,
+            arguments,
+            options,
+        )?
         .map_err(remote_error)?;
     Ok(evaluation_json(&outcome))
 }
@@ -338,19 +342,17 @@ fn add_binding(connection: &Arc<Connection>, request: &Request) -> CommandResult
     #[serde(rename_all = "camelCase")]
     struct Params {
         name: String,
-        /// Accepted, and mapped to the main world: there is only one. The same
-        /// documented compromise as `Page.addScriptToEvaluateOnNewDocument`
-        /// (ADR-0030) — the binding is really installed, it is simply not
-        /// hidden from page script.
+        /// The world to install the binding in, created if it does not exist
+        /// yet. Absent installs it in every world (ADR-0033 D9), which is what
+        /// a driver expecting the main world gets.
         #[serde(default)]
         execution_context_name: Option<String>,
     }
     let session = connection.require_session(request)?;
     let params: Params = request.parse()?;
-    let _ = params.execution_context_name;
     session
         .page
-        .add_binding(params.name.clone())?
+        .add_binding_in(params.name.clone(), params.execution_context_name.clone())?
         .map_err(ProtocolError::invalid_params)?;
     session.remember_binding(&params.name);
     Ok(json!({}))

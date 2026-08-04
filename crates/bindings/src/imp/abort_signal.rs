@@ -113,7 +113,7 @@ pub(crate) fn signal_abort(
 
     let mut ev_data = EventData::new("abort".to_owned(), false, false, false);
     ev_data.is_trusted = true;
-    let (value, event) = cx.new_event_object("Event", ev_data)?;
-    events::dispatch_event(cx, key, &value, &event)?;
+    let event = cx.new_event_data("Event", ev_data);
+    events::dispatch_event(cx, key, &event)?;
     Ok(())
 }

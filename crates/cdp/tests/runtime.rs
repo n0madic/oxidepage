@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{Fixtures, Harness};
+use common::{Fixtures, Harness, isolated_world};
 use serde_json::json;
 
 #[test]
@@ -402,28 +402,154 @@ fn a_binding_reports_its_payload() {
     assert_eq!(event["params"]["payload"], "from the page");
 }
 
+/// The inverse of what ADR-0030 D8 shipped: a binding asked for by world name
+/// lands in **that** world, and is not on the page's global at all.
 #[test]
-fn a_binding_asked_for_an_isolated_world_lands_in_the_main_one() {
+fn a_binding_asked_for_an_isolated_world_lands_in_that_world() {
     let harness = Harness::start();
     let (mut client, session, _) = harness.attached();
+    client.call_on(&session, "Runtime.enable", json!({}));
 
-    // There is one world. `executionContextName` is accepted and mapped to it:
-    // a documented divergence (ADR-0030), not a stub — the binding really is
-    // installed, it is simply not hidden from page script. Refusing instead
-    // makes `browser.newPage()` throw, because both drivers ask for a utility
-    // world while setting a page up.
     client.call_on(
         &session,
         "Runtime.addBinding",
         json!({ "name": "__world", "executionContextName": "utility" }),
     );
+
+    // Not visible to page script — the whole point of the stage.
+    let on_page = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "typeof globalThis.__world" }),
+    );
+    assert_eq!(on_page["result"]["value"], "undefined");
+
+    // Reachable from the world it was installed in, and the call is attributed
+    // to that world's context rather than to the main one.
+    let utility = isolated_world(&mut client, &session, "utility");
     client.call_on(
         &session,
         "Runtime.evaluate",
-        json!({ "expression": "__world('reachable')" }),
+        json!({ "expression": "__world('reachable')", "contextId": utility }),
     );
     let event = client.await_event("Runtime.bindingCalled");
     assert_eq!(event["params"]["payload"], "reachable");
+    assert_eq!(event["params"]["executionContextId"], utility);
+}
+
+/// The isolation itself: separate globals, both ways.
+#[test]
+fn an_isolated_world_cannot_see_page_globals_and_vice_versa() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+    let utility = isolated_world(&mut client, &session, "utility");
+
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__fromPage = 1" }),
+    );
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__fromUtility = 2", "contextId": utility }),
+    );
+
+    let in_utility = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "typeof globalThis.__fromPage", "contextId": utility }),
+    );
+    assert_eq!(in_utility["result"]["value"], "undefined");
+
+    let in_page = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "typeof globalThis.__fromUtility" }),
+    );
+    assert_eq!(in_page["result"]["value"], "undefined");
+
+    // …and each still sees its own.
+    let own = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "__fromUtility", "contextId": utility }),
+    );
+    assert_eq!(own["result"]["value"], 2);
+}
+
+/// One shared DOM under the separate globals — the other half of the contract.
+#[test]
+fn isolated_worlds_share_one_dom() {
+    let fixtures = Fixtures::start(vec![("/a", "<!doctype html><title>A</title><body></body>")]);
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+    let utility = isolated_world(&mut client, &session, "utility");
+
+    let wrote = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.body.innerHTML = '<p id=x>hi</p>'" }),
+    );
+    assert!(wrote.get("exceptionDetails").is_none(), "{wrote}");
+    let seen = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "document.getElementById('x').textContent",
+            "contextId": utility,
+        }),
+    );
+    assert_eq!(seen["result"]["value"], "hi");
+}
+
+#[test]
+fn evaluate_with_an_unknown_context_id_is_an_error() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+    let error = client
+        .try_call_on(
+            &session,
+            "Runtime.evaluate",
+            json!({ "expression": "1", "contextId": 999_999 }),
+        )
+        .expect_err("a bogus context id must be refused");
+    assert_eq!(error["code"], -32000);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cannot find context"),
+        "the message must name the cause: {error}"
+    );
+}
+
+/// `customElements` is deliberately absent in an isolated world (ADR-0033 D8),
+/// so feature detection works instead of an always-throwing stub.
+#[test]
+fn custom_elements_is_absent_in_an_isolated_world() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+    let utility = isolated_world(&mut client, &session, "utility");
+
+    let in_utility = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "typeof customElements", "contextId": utility }),
+    );
+    assert_eq!(in_utility["result"]["value"], "undefined");
+
+    let in_page = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "typeof customElements" }),
+    );
+    assert_eq!(in_page["result"]["value"], "object");
 }
 
 #[test]

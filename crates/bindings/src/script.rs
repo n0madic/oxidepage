@@ -9,7 +9,7 @@
 //! restored native `write` instead of the shim.
 //!
 //! External and module scripts stay asynchronous and are left queued for the
-//! event loop ([`crate::state::PageState`]'s owner drains them).
+//! event loop ([`crate::state::WorldState`]'s owner drains them).
 
 use oxidepage_dom::NodeId;
 
@@ -97,9 +97,9 @@ fn claim_next_inline_script(cx: &BindCx<'_>) -> Option<(NodeId, String)> {
 pub(crate) fn run_pending_inline_scripts(cx: &BindCx<'_>) {
     while let Some((node, source)) = claim_next_inline_script(cx) {
         let url = cx.state.dom.borrow().document_url().to_owned();
-        let previous = cx.state.current_script.replace(Some(node));
+        let previous = cx.state.page.current_script.replace(Some(node));
         let result = cx.scope.eval(&source, &url);
-        cx.state.current_script.set(previous);
+        cx.state.page.current_script.set(previous);
         if let Err(error) = result {
             cx.state
                 .hooks

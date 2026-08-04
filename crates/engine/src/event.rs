@@ -31,6 +31,8 @@ pub enum PageEvent {
     Binding {
         name: String,
         payload: String,
+        /// The execution context the call came from (ADR-0033 D10).
+        context_id: u64,
     },
     /// One step of a network request's life (ADR-0030).
     Network(oxidepage_page::NetworkEvent),
@@ -79,7 +81,15 @@ impl PageEvent {
             PageRecord::Error(error) => Self::Error(error),
             PageRecord::DialogOpening(request) => Self::DialogOpening(request),
             PageRecord::Dialog(event) => Self::Dialog(event),
-            PageRecord::Binding { name, payload } => Self::Binding { name, payload },
+            PageRecord::Binding {
+                name,
+                payload,
+                context_id,
+            } => Self::Binding {
+                name,
+                payload,
+                context_id,
+            },
             PageRecord::Network(event) => Self::Network(event),
             PageRecord::FileChooser(event) => Self::FileChooser(event),
             PageRecord::Download(event) => Self::Download(event),

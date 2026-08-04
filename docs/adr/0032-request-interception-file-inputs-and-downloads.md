@@ -346,6 +346,21 @@ only occurrence in the tree was the multipart *writer*). When it names
 refused and recorded, not parsed as HTML. `<a download>` routes through the same
 path instead of warning and skipping.
 
+The attribute is a download request in its **own right**, not a hint the
+response may veto. Requiring `Content-Disposition: attachment` as well is the
+reading that fails in the exact case the attribute exists for: a static file
+server answers `/report.pdf` with the bytes and no disposition header at all, so
+the click committed the response as a document and replaced the live page with a
+PDF read by the HTML parser. Honouring it is not the page overruling the
+operator either — the attribute decides *that this is a download*, and
+`DownloadBehavior` still decides whether anything is written, denying by
+default. The attribute's value is the suggested filename, sanitized like every
+other attacker-influenced name.
+
+Same-origin only, as in Chrome: a cross-origin `download` is ignored and the
+link navigates, so a page cannot make another site's response land on disk under
+a name of its choosing.
+
 `oxidepage serve` grows `--download-path <dir>`; no directory *is* deny, which is
 what `Browser.setDownloadBehavior` already said. The filename is derived from
 `Content-Disposition` with path separators stripped, a traversing `downloadPath`
@@ -367,10 +382,14 @@ both explicit release paths — a session detaching and a socket closing while a
 navigation is paused, each driven from a *second* connection because the first
 is blocked inside its own `Page.navigate`.
 **`crates/page/tests/navigation.rs`** pins the multipart wire format with a file
-part, and that an *empty* file input still contributes an empty part.
+part; that an *empty* file input still contributes an empty part when the form
+is genuinely multipart; and that it does **not** upgrade the enctype of a form
+that declared none, since there are no bytes for urlencoded to lose.
 **`crates/page/tests/downloads.rs`** pins that an attachment does not commit,
-that a traversing filename cannot escape the directory, and that an existing
-file is never overwritten. **`crates/cdp/tests/dom.rs`**'s `setFileInputFiles`
+that a traversing filename cannot escape the directory, that an existing file is
+never overwritten, that `<a download>` downloads a response carrying no
+`Content-Disposition` while a cross-origin one navigates instead, and that two
+pages never mint the same download guid. **`crates/cdp/tests/dom.rs`**'s `setFileInputFiles`
 refusal assertion flips to a success assertion, plus the chooser being silent
 until intercepted. **`crates/cdp/tests/page.rs`** pins D6a's two loader ids:
 each navigation announces a fresh loader on `init`, and a failed one does not
@@ -389,6 +408,64 @@ and the chooser's `backendNodeId` (D12) — which is what the gate is for.
 prefix to support them: it served static files and never read a request body, so
 it could express neither an upload target, nor an attachment, nor a 401
 challenge.
+
+## Corrections found in review (2026-08-04)
+
+Ten defects in the decisions above, found by review of the landed commit and
+fixed together. Each was a rule this ADR states and the code then broke, so they
+are recorded here rather than in a new ADR:
+
+- **D7's release raced its own lanes.** `release_all_interception` runs the
+  moment the read loop ends, but lane threads keep draining queued commands
+  until their senders drop — so a `Fetch.enable` behind a slow `Page.navigate`
+  landed *after* the release and re-armed interception with nobody left to
+  answer. Every later request on that page then paused for the full timeout,
+  permanently, and `serve` hands that page to the next driver.
+  `Connection::closed` gates the job.
+- **D8's retry named the wrong URL.** The retry snapshot is taken before
+  `FetchEngine::fetch` follows redirects, while the challenge comes from
+  `final_url` — so credentials went on the *first* hop's URL and
+  `strip_auth_on_cross_origin` then removed them. The challenging server never
+  saw them however correct they were.
+- **D6's overrides were filtered as if they were script.** `continueRequest`
+  headers went into the script slot, which `no-cors` — every subresource —
+  filters by the CORS safelist. They worked on documents and silently vanished
+  on `<img>`/`<script>`/`<link>`. They now have their own slot beside `auth`,
+  for the same reason `auth` has one, and win over the engine's own
+  `user-agent`/`referer`/`origin`/`cookie`. The *framing* headers are still
+  refused: a driver-set `Content-Length` is request smuggling, not automation.
+- **D2's load-bearing set was half a bracket.** `Requested` was load-bearing and
+  `Finished`/`Failed` were droppable, so a slow driver could get an opening with
+  no closing and `networkidle0` would never resolve. Either both halves survive
+  a full bus or neither does.
+- **The `Fetch` domain is per session; the config is per page.** One session's
+  `Fetch.disable` turned interception off for every other session attached to
+  the target, leaving their flags `true` and no way to notice.
+  `InterceptConfig::wanted_by` ends interception when the last session lets go.
+- **`Fetch.disable` on the priority lane could overtake `Fetch.enable`** on a
+  session lane, so an unawaited `setRequestInterception(true)` then `(false)`
+  left interception on. Requests now carry their receive order and the config
+  applies the driver's, not the lanes'.
+- **Offline was checked above the pause point**, so `setOfflineMode(true)` +
+  `request.respond()` — the standard offline-page test — failed every request
+  including the ones the driver meant to stub. The gate moved to
+  `spawn_fetch_with`, the one place a request actually leaves for the network.
+- **D9's conditions were never cleared.** A driver that went offline and then
+  dropped its socket left the page permanently offline for the next one.
+- **A fulfilled `302` was delivered as a bodyless 302** rather than followed —
+  for a document, a blank page with no error. `deliver_fulfilled` follows it,
+  capped, and applies the same method rewrite a real redirect does.
+- **The intercept timeout was measured per pause, not per operation**, so one
+  request parking twice (request pause, then auth pause) exceeded the engine's
+  command timeout and reported a navigation as timed out while it was still
+  loading.
+
+One more, unrelated to interception: `ContextOptions::merge` filled
+`download_path` from the context's *construction-time* option, so the "live path
+wins" line below it could never fire and
+`Browser.setDownloadBehavior({behavior:"deny"})` was a silent no-op for every
+page created afterwards. The per-page option is now read before the merge, and a
+page that is alive but too busy to answer is reported rather than swallowed.
 
 ## Deliberate limits (P6 — absent beats fake)
 

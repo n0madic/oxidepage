@@ -34,6 +34,13 @@
     const objectEntries = Object.entries;
     const objectFreeze = Object.freeze;
 
+    // Pristine `JSON`, captured before page script runs. `history.state` is
+    // serialized so it can be materialized separately in each world (ADR-0033
+    // D3/D5); a page that replaces `JSON.stringify` must not be able to see —
+    // or corrupt — that round trip.
+    const jsonStringify = JSON.stringify;
+    const jsonParse = JSON.parse;
+
     // Extra pristine references for `structuredClone` (page script may later
     // reassign any of these globals or their prototype methods).
     const ObjectCtor = Object;
@@ -1506,6 +1513,7 @@
         newWrapperMap, cacheGet, cacheSet,
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
         setToStringTag, makeDomException, structuredClone,
+        jsonStringify, jsonParse,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
         freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
         blobParts, blobPartBytes,

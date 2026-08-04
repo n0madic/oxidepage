@@ -1,6 +1,6 @@
 # ADR-0030: CDP transport and the remote object model
 
-- Status: accepted
+- Status: accepted; **D8 superseded by ADR-0033**
 - Date: 2026-08-03
 - Builds on: ADR-0022 (navigation), ADR-0025 (dialogs and structured page events), ADR-0026 (geometry and capture), ADR-0027 (browser, contexts, commands)
 - Constrained by: design §8 (security), §12 (deliberate v1 limits)
@@ -215,6 +215,11 @@ differently configured browser. `BrowserContext::options()` exists for this.
 
 ### D8 — One world, named twice
 
+**Superseded by ADR-0033**: there are N real worlds now, the offset
+machinery below is deleted, and the registry moved from the session to the
+page. The reasoning is kept because the *second* load-bearing detail — every
+world is re-announced after each commit — survives verbatim.
+
 Both drivers create a *utility world* while setting up every page. Isolated
 worlds are a later stage, and refusing was tried: `browser.newPage()` throws and
 nothing works at all.
@@ -284,10 +289,10 @@ contract as WPT — a regression, an unexpected pass and a stale entry all fail.
 
 ## Deliberate limits (P6 — absent beats fake)
 
-- **No isolated worlds.** One world under many names (D8). A driver's injected
-  helpers are visible to page script, and a page that redefines
-  `Array.prototype.map` can perturb them. This is the single largest divergence
-  in the stage.
+- ~~**No isolated worlds.**~~ One world under many names (D8) — the single
+  largest divergence in the stage. **Closed by ADR-0033**: N real execution
+  contexts per page, each with its own global, prototypes, wrapper cache and
+  listener registry, over one shared DOM.
 - **`waitForDebuggerOnStart` is accepted but does not suspend the page.** A
   suspended page defers every ordinary job until `resume()`, and a driver sends
   its whole session setup *before* `Runtime.runIfWaitingForDebugger` — so

@@ -124,11 +124,24 @@ impl NetworkEvent {
     /// in `#networkRequestIdToRequestPausedEvent` to wait for it — forever, on a
     /// request it will therefore never continue. Making only half the pair
     /// survive a full bus is the same wedge with an extra step.
+    ///
+    /// **The terminal events are the other half of that pair**, and leaving them
+    /// droppable was the same bug pointing the other way: a driver increments an
+    /// in-flight counter on `Requested` and decrements it on `loadingFinished`/
+    /// `loadingFailed`, so a dropped terminal leaves the count permanently above
+    /// zero and `networkidle0` / `waitForNetworkIdle` never resolves. Either
+    /// both halves are droppable or neither is; a full bus must not be able to
+    /// deliver an opening without its closing.
+    ///
+    /// `Responded` stays droppable on purpose: it is a *milestone*, not a
+    /// bracket. Losing it costs `response()` metadata and wedges nothing.
     #[must_use]
     pub fn is_load_bearing(&self) -> bool {
         matches!(
             self,
             NetworkEvent::Requested { .. }
+                | NetworkEvent::Finished { .. }
+                | NetworkEvent::Failed { .. }
                 | NetworkEvent::Paused { .. }
                 | NetworkEvent::AuthRequired { .. }
         )

@@ -66,6 +66,9 @@ fn spawn_server() -> u16 {
                             Some("inline; filename=\"page.html\""),
                             String::from("<title>inline</title>"),
                         ),
+                        // The `<a download>` case: a static file server sends
+                        // the bytes with **no** disposition header at all.
+                        "/report.pdf" => (None, String::from("%PDF-1.4 not html")),
                         _ => (None, String::from("<title>doc</title>")),
                     };
                     let mut head = format!(
@@ -182,6 +185,144 @@ fn a_download_reports_a_begin_and_an_end() {
         events[1].path
     );
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Clicks `<a download>` on a page loaded from `port`, having navigated there.
+fn click_download_link(page: &Page, port: u16, href: &str, attribute: &str) {
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/host.html"),
+        WaitUntil::Load,
+    )
+    .expect("host document");
+    page.eval(&format!(
+        "const a = document.createElement('a');
+         a.href = {href:?};
+         a.setAttribute('download', {attribute:?});
+         document.body.appendChild(a);
+         a.click();"
+    ))
+    .expect("click");
+    page.settle(Duration::from_secs(5));
+}
+
+/// `<a download>` makes the response a download even when the server said
+/// nothing about it.
+///
+/// This is the case the attribute exists for and the case that was broken: a
+/// static file server answers `/report.pdf` with the bytes and **no**
+/// `Content-Disposition`, so deferring to the header alone committed the
+/// response as a document — the live page was replaced by a PDF run through the
+/// HTML parser.
+#[test]
+fn the_download_attribute_forces_a_download_without_a_disposition_header() {
+    let port = spawn_server();
+    let directory = temp_dir("attribute");
+    let page = page_with(Some(directory.clone()));
+    let seen = watch(&page);
+
+    click_download_link(&page, port, "/report.pdf", "");
+
+    let events = seen.borrow().clone();
+    assert_eq!(events.len(), 2, "one begin, one end: {events:?}");
+    assert_eq!(events[1].state, DownloadState::Completed);
+    assert_eq!(events[1].suggested_filename, "report.pdf");
+    assert_eq!(
+        std::fs::read_to_string(directory.join("report.pdf")).expect("the download"),
+        "%PDF-1.4 not html"
+    );
+    // And the document it was clicked from is still there — the whole point.
+    assert_eq!(page.eval_to_string("document.title").unwrap(), "doc");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The attribute's *value* is the suggested filename, and it is sanitized.
+#[test]
+fn the_download_attribute_names_the_file_and_cannot_escape_the_directory() {
+    let port = spawn_server();
+    let directory = temp_dir("attribute-name");
+    let page = page_with(Some(directory.clone()));
+
+    click_download_link(&page, port, "/report.pdf", "../../escaped.pdf");
+
+    // The separators are stripped rather than honoured, so the file lands in
+    // the download directory under a flattened name.
+    assert!(
+        !directory.join("../../escaped.pdf").exists(),
+        "the traversal must not have been followed"
+    );
+    let written: Vec<_> = std::fs::read_dir(&directory)
+        .expect("dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written, vec!["....escaped.pdf".to_owned()], "{written:?}");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A **cross-origin** `download` is ignored and the link navigates, as in
+/// Chrome — otherwise a page could make another site's response land on disk
+/// under a filename of its choosing.
+#[test]
+fn a_cross_origin_download_attribute_is_ignored() {
+    let origin = spawn_server();
+    let other = spawn_server();
+    let directory = temp_dir("cross-origin");
+    let page = page_with(Some(directory.clone()));
+    let seen = watch(&page);
+
+    click_download_link(
+        &page,
+        origin,
+        &format!("http://127.0.0.1:{other}/elsewhere.html"),
+        "stolen.html",
+    );
+
+    assert!(
+        seen.borrow().is_empty(),
+        "no download may be taken: {:?}",
+        seen.borrow()
+    );
+    assert_eq!(
+        page.dom().document_url(),
+        format!("http://127.0.0.1:{other}/elsewhere.html"),
+        "the link navigated instead"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Two pages must never mint the same download guid.
+///
+/// A driver keys downloads **browser-wide** — Playwright's
+/// `_onDownloadCreated` stores them on the browser object, not on the page — so
+/// a per-page serial hands it `dl-1` twice, and the second page's terminal
+/// event completes the first page's entry. Chrome's guid is a UUID for exactly
+/// this reason.
+#[test]
+fn download_guids_are_unique_across_pages() {
+    let port = spawn_server();
+    let first_dir = temp_dir("guid-one");
+    let second_dir = temp_dir("guid-two");
+    let first = page_with(Some(first_dir.clone()));
+    let first_seen = watch(&first);
+    let second = page_with(Some(second_dir.clone()));
+    let second_seen = watch(&second);
+
+    for page in [&first, &second] {
+        page.navigate(
+            &format!("http://127.0.0.1:{port}/report.csv"),
+            WaitUntil::Load,
+        )
+        .expect("navigation");
+    }
+
+    let one = first_seen.borrow()[0].guid.clone();
+    let two = second_seen.borrow()[0].guid.clone();
+    assert_ne!(
+        one, two,
+        "each page restarted its own counter: {one} vs {two}"
+    );
+    let _ = std::fs::remove_dir_all(&first_dir);
+    let _ = std::fs::remove_dir_all(&second_dir);
 }
 
 #[test]

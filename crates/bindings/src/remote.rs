@@ -11,7 +11,7 @@
 //! session on another thread would break it: the realm would go down first and
 //! the store's drop would be a use-after-free.
 //!
-//! So the table lives on [`PageState`](crate::PageState), next to
+//! So the table lives on [`WorldState`](crate::WorldState), next to
 //! `custom_wrappers`, and the protocol layer holds nothing but `u64`s.
 //!
 //! # What crosses the thread boundary
@@ -52,7 +52,6 @@ struct Entry {
 /// `objectId` → live value, with object groups and explicit release.
 #[derive(Default)]
 pub struct ObjectStore {
-    next: u64,
     objects: HashMap<u64, Entry>,
 }
 
@@ -60,17 +59,21 @@ impl ObjectStore {
     /// Retains `value`, returning its id.
     ///
     /// Ids are monotonic and never recycled, like
-    /// [`Slab`](crate::PageState)'s: a stale id must name *nothing*, not
+    /// [`Slab`](crate::WorldState)'s: a stale id must name *nothing*, not
     /// whatever now occupies its slot. That is the same reasoning the arena's
     /// generation counters encode for `NodeId`.
-    pub fn insert(&mut self, value: JsValue, group: Option<String>) -> Option<u64> {
+    pub fn insert(&mut self, id: u64, value: JsValue, group: Option<String>) -> Option<u64> {
         if self.objects.len() >= MAX_REMOTE_OBJECTS {
             return None;
         }
-        self.next += 1;
-        let id = self.next;
         self.objects.insert(id, Entry { value, group });
         Some(id)
+    }
+
+    /// The ids this store holds, for the page to drop from its index.
+    #[must_use]
+    pub fn ids(&self) -> Vec<u64> {
+        self.objects.keys().copied().collect()
     }
 
     #[must_use]
@@ -272,11 +275,17 @@ pub fn describe(cx: &BindCx<'_>, value: &JsValue, options: RemoteOptions<'_>) ->
         return object;
     }
 
-    object.object_id = cx
-        .state
-        .remote_objects
-        .borrow_mut()
-        .insert(value.clone(), options.group.map(str::to_owned));
+    // The id is minted page-wide and the handle is filed in **this** world's
+    // store, so `Runtime.callFunctionOn` can route back here (ADR-0033 D10).
+    let id = cx.state.page.next_object_id();
+    object.object_id = cx.state.remote_objects.borrow_mut().insert(
+        id,
+        value.clone(),
+        options.group.map(str::to_owned),
+    );
+    if object.object_id.is_some() {
+        cx.state.page.note_object_world(id, cx.state.id);
+    }
     // `None` here means the table is full. Returning a `RemoteObject` with no
     // `objectId` would hand the caller a handle-shaped answer that names
     // nothing, which is exactly what the cap was added to avoid; the caller
@@ -594,17 +603,21 @@ pub fn describe_exception(
 mod tests {
     use super::*;
 
+    /// Ids come from the page now, so every world's handles share one
+    /// monotonic sequence (ADR-0033 D10) — two worlds must never both mint
+    /// `1`. The store's job is only to honour the id it is handed.
     #[test]
-    fn ids_are_monotonic_and_never_recycled() {
+    fn ids_are_never_recycled() {
         // A stale `objectId` must name nothing, not whatever took its slot —
         // the same rule the arena's generation counters encode for `NodeId`.
         let mut store = ObjectStore::default();
-        let first = store.insert(JsValue::Null, None).unwrap();
-        let second = store.insert(JsValue::Null, None).unwrap();
+        let first = store.insert(1, JsValue::Null, None).unwrap();
+        let second = store.insert(2, JsValue::Null, None).unwrap();
         assert!(second > first);
         assert!(store.release(first));
-        let third = store.insert(JsValue::Null, None).unwrap();
+        let third = store.insert(3, JsValue::Null, None).unwrap();
         assert!(third > second, "a released id must not be handed out again");
+        assert!(store.get(first).is_none());
         assert!(!store.release(first), "releasing twice is not an error");
     }
 
@@ -612,15 +625,15 @@ mod tests {
     fn groups_release_together_and_leave_others_alone() {
         let mut store = ObjectStore::default();
         let a = store
-            .insert(JsValue::Null, Some(String::from("g1")))
+            .insert(11, JsValue::Null, Some(String::from("g1")))
             .unwrap();
         let b = store
-            .insert(JsValue::Null, Some(String::from("g1")))
+            .insert(12, JsValue::Null, Some(String::from("g1")))
             .unwrap();
         let c = store
-            .insert(JsValue::Null, Some(String::from("g2")))
+            .insert(13, JsValue::Null, Some(String::from("g2")))
             .unwrap();
-        let ungrouped = store.insert(JsValue::Null, None).unwrap();
+        let ungrouped = store.insert(14, JsValue::Null, None).unwrap();
 
         assert_eq!(store.release_group("g1"), 2);
         assert!(store.get(a).is_none());
@@ -634,23 +647,24 @@ mod tests {
     fn the_table_is_bounded() {
         // A driver that never releases must hit an error, not an OOM.
         let mut store = ObjectStore::default();
-        for _ in 0..MAX_REMOTE_OBJECTS {
-            assert!(store.insert(JsValue::Null, None).is_some());
+        for id in 1..=MAX_REMOTE_OBJECTS as u64 {
+            assert!(store.insert(id, JsValue::Null, None).is_some());
         }
+        let past_cap = MAX_REMOTE_OBJECTS as u64 + 1;
         assert!(
-            store.insert(JsValue::Null, None).is_none(),
+            store.insert(past_cap, JsValue::Null, None).is_none(),
             "the store must refuse past its cap"
         );
         store.release(1);
-        assert!(store.insert(JsValue::Null, None).is_some());
+        assert!(store.insert(past_cap, JsValue::Null, None).is_some());
     }
 
     #[test]
     fn clearing_drops_everything() {
         let mut store = ObjectStore::default();
-        store.insert(JsValue::Null, None);
+        store.insert(18, JsValue::Null, None);
         store
-            .insert(JsValue::Null, Some(String::from("g")))
+            .insert(19, JsValue::Null, Some(String::from("g")))
             .unwrap();
         assert_eq!(store.clear(), 2);
         assert!(store.is_empty());

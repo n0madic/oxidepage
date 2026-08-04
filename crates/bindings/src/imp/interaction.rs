@@ -46,8 +46,8 @@ fn fire(
 ) -> Result<bool, JsThrow> {
     let mut data = EventData::new(event_type.to_owned(), bubbles, cancelable, false);
     data.is_trusted = true;
-    let (value, data) = cx.new_event_object("Event", data)?;
-    dispatch_event(cx, EventTargetKey::Node(node), &value, &data)
+    let data = cx.new_event_data("Event", data);
+    dispatch_event(cx, EventTargetKey::Node(node), &data)
 }
 
 /// What an element does when activated, once the `click` event has come back
@@ -394,9 +394,8 @@ fn run_activation(
 /// engine can honestly do.
 ///
 /// The v1 limits are warned about rather than silently ignored, because each of
-/// them changes what the page does: `download` suppresses the navigation, a
-/// `javascript:` URL runs script, and `target` opens a second browsing context
-/// — none of which exist here.
+/// them changes what the page does: a `javascript:` URL runs script, and
+/// `target` opens a second browsing context — neither of which exists here.
 fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
     let (download, target) = {
         let dom = cx.state.dom.borrow();
@@ -407,15 +406,8 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
             el.attr(&oxidepage_dom::node::attr_name(name.into()))
                 .map(ToString::to_string)
         };
-        (attr("download").is_some(), attr("target"))
+        (attr("download"), attr("target"))
     };
-    // `<a download>` is a navigation like any other, and the *response* decides
-    // whether it becomes a download: `commit_document` reads
-    // `Content-Disposition` and refuses to commit an attachment (ADR-0032 D13).
-    // The attribute is deliberately not treated as an override — a server that
-    // sends `Content-Disposition: inline` means it, and a page that could force
-    // a write by adding an attribute would be deciding the operator's policy.
-    let _ = download;
     // `reflect_url` resolves the `href` attribute against the base URL and
     // yields `""` when it is absent or will not parse — the spec's "if url is
     // failure, then return".
@@ -423,6 +415,32 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
     if resolved.is_empty() {
         return;
     }
+    // `<a download>` makes the response a download regardless of what the
+    // server said, which is HTML's rule and Chrome's behaviour (ADR-0032 D13).
+    //
+    // Deferring to `Content-Disposition` alone was the earlier reading, and it
+    // is wrong in the case the attribute exists for: a static file server sends
+    // `application/pdf` with no disposition header at all, so `<a download>`
+    // committed the response *as a document* and the current page was replaced
+    // by a PDF parsed as HTML. Honouring the attribute is not the page deciding
+    // the operator's policy either — a download still only reaches disk if the
+    // operator set a download directory, and `DownloadBehavior` denies by
+    // default.
+    //
+    // Same-origin only, as in Chrome: a cross-origin `download` is ignored and
+    // the link navigates, so a page cannot use the attribute to make another
+    // site's response land on disk under a filename of its choosing.
+    let download = download.filter(|_| {
+        let current = cx.state.dom.borrow().document_url().to_owned();
+        if crate::imp::history::same_origin(&resolved, &current) {
+            return true;
+        }
+        cx.warn(&format!(
+            "link activation: `download` on the cross-origin `{resolved}` is ignored; \
+             navigating instead"
+        ));
+        false
+    });
     // HTML "navigate to a javascript: URL": the payload is evaluated as a
     // classic script, and only a *string* result replaces the document —
     // `javascript:void 0` and every `javascript:doSomething()` handler return
@@ -471,6 +489,7 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
         replace: false,
         body: None,
         reload: false,
+        download,
     });
 }
 
@@ -569,22 +588,14 @@ fn fire_focus(
     );
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
-    // The payload holds the related node's *wrapper*, which is what pins it for
-    // as long as the event lives (see `MouseFields::related`).
-    let related = match related {
-        Some(id) => Some(cx.node_to_js(id)?),
-        None => None,
-    };
+    // The payload pins the related node for as long as the event lives, and
+    // stores no wrapper — see `MouseFields::related`.
+    let related = related.map(|id| crate::events::PinnedNode::new(&cx.state.dom, id));
     let mut payload = crate::events::UiPayload::new(crate::events::UiKind::Focus { related });
     payload.has_view = true;
     data.ui = Some(Box::new(payload));
-    let (value, data) = cx.new_event_object("FocusEvent", data)?;
-    crate::events::dispatch_event(
-        cx,
-        crate::events::EventTargetKey::Node(target),
-        &value,
-        &data,
-    )?;
+    let data = cx.new_event_data("FocusEvent", data);
+    crate::events::dispatch_event(cx, crate::events::EventTargetKey::Node(target), &data)?;
     Ok(())
 }
 

@@ -117,7 +117,7 @@ fn a_blocking_import_pause_survives_the_borrows_it_is_taken_under() {
     // not as a race.
     let port = spawn_server();
     let page = loopback_page();
-    page.intercept().enable(Vec::new(), false);
+    page.intercept().enable(0, "s", Vec::new(), false);
     let seen = auto_resolve(&page, |control, id| {
         control.send(InterceptCommand::release(id));
     });
@@ -153,7 +153,7 @@ fn the_document_request_itself_pauses() {
     // one request a driver most wants to intercept is the one it misses.
     let port = spawn_server();
     let page = loopback_page();
-    page.intercept().enable(Vec::new(), false);
+    page.intercept().enable(0, "s", Vec::new(), false);
     let seen = auto_resolve(&page, |control, id| {
         control.send(InterceptCommand::release(id));
     });
@@ -181,7 +181,7 @@ fn navigating_away_from_a_paused_subresource_leaves_nothing_behind() {
     // resolves (or times out) before the navigation can start.
     let port = spawn_server();
     let page = loopback_page();
-    page.intercept().enable(Vec::new(), false);
+    page.intercept().enable(0, "s", Vec::new(), false);
 
     // Only the *document* is answered; the image is abandoned mid-pause.
     let control = page.intercept();
@@ -222,7 +222,7 @@ fn navigating_away_from_a_paused_subresource_leaves_nothing_behind() {
 fn a_fulfilled_document_never_reaches_the_network() {
     let port = spawn_server();
     let page = loopback_page();
-    page.intercept().enable(Vec::new(), false);
+    page.intercept().enable(0, "s", Vec::new(), false);
 
     let control = page.intercept();
     page.set_event_sink(Some(Rc::new(move |record: PageRecord| {
@@ -268,7 +268,7 @@ fn resolving_pauses_costs_the_loop_no_extra_parks() {
     let baseline = plain.loop_stats().blocking_waits;
 
     let page = loopback_page();
-    page.intercept().enable(Vec::new(), false);
+    page.intercept().enable(0, "s", Vec::new(), false);
     let _seen = auto_resolve(&page, |control, id| {
         control.send(InterceptCommand::release(id));
     });
@@ -312,7 +312,7 @@ fn a_suspended_page_resolves_nothing() {
     // suspended in the first place.
     let port = spawn_server();
     let page = loopback_page();
-    page.intercept().enable(Vec::new(), false);
+    page.intercept().enable(0, "s", Vec::new(), false);
 
     let control = page.intercept();
     page.set_event_sink(Some(Rc::new(move |record: PageRecord| {

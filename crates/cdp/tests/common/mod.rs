@@ -471,3 +471,19 @@ impl Client {
         }
     }
 }
+
+/// Creates an isolated world and returns its `Runtime.ExecutionContextId`.
+///
+/// The id comes from the command's own answer rather than from the
+/// `Runtime.executionContextCreated` event, so a test can use it without
+/// enabling the `Runtime` domain first.
+pub fn isolated_world(client: &mut Client, session: &str, name: &str) -> i64 {
+    let created = client.call_on(
+        session,
+        "Page.createIsolatedWorld",
+        serde_json::json!({ "worldName": name }),
+    );
+    created["executionContextId"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("createIsolatedWorld returned no id: {created}"))
+}

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use oxidepage_base::{RequestId, id::FIRST_GENERATION};
 use oxidepage_bindings::{
     BindCx, ConsoleLevel, ConsoleMessage, DialogEvent, DialogRequest, DialogResponse, HostHooks,
-    PageState, ScriptError, install,
+    ScriptError, WorldState, install,
 };
 use oxidepage_bindings::{PrivateStorageAreas, SharedStorage, StorageAreaKind};
 use oxidepage_dom::{ParseOptions, parse_document};
@@ -74,6 +74,7 @@ impl HostHooks for TestHooks {
 
     fn schedule_timer(
         &self,
+        _world: oxidepage_bindings::WorldId,
         _callback: JsValue,
         _args: Vec<JsValue>,
         _delay_ms: f64,
@@ -84,7 +85,11 @@ impl HostHooks for TestHooks {
 
     fn clear_timer(&self, _id: f64) {}
 
-    fn request_animation_frame(&self, _callback: JsValue) -> f64 {
+    fn request_animation_frame(
+        &self,
+        _world: oxidepage_bindings::WorldId,
+        _callback: JsValue,
+    ) -> f64 {
         0.0
     }
 
@@ -122,7 +127,7 @@ impl HostHooks for TestHooks {
 struct Harness {
     // Field order = drop order: the state (which owns persistent JS
     // references) must drop before the realm.
-    state: Rc<PageState>,
+    state: Rc<WorldState>,
     hooks: Rc<TestHooks>,
     realm: oxidepage_js::QuickJsRealm,
 }

@@ -20,8 +20,8 @@ use crate::netdata::{
 };
 use crate::state::{
     AbortSignalData, AttrData, HostData, InterfaceEntry, IntersectionObserverData, IoEntryView,
-    JsRefs, MediaQueryListData, NavigatorData, PageState, RecordView, RectData, ResizeObserverData,
-    RoEntryView, ScreenData, TAG_NODE, TAG_SLAB,
+    JsRefs, MediaQueryListData, NavigatorData, RecordView, RectData, ResizeObserverData,
+    RoEntryView, ScreenData, TAG_NODE, TAG_SLAB, WorldState,
 };
 use crate::storage::StorageHandle;
 use crate::window_open::WindowProxyData;
@@ -40,15 +40,15 @@ pub(crate) enum CtorSpec {
 /// The bindings context: an entered scope plus the page state.
 pub struct BindCx<'a> {
     pub scope: &'a dyn JsScope,
-    pub state: Rc<PageState>,
+    pub state: Rc<WorldState>,
 }
 
 /// The page state installed in `scope`'s realm. Host callbacks recover it here
 /// rather than capturing it, which keeps JS→Rust reference cycles impossible.
-pub fn page_state(scope: &dyn JsScope) -> Result<Rc<PageState>, JsThrow> {
+pub fn world_state(scope: &dyn JsScope) -> Result<Rc<WorldState>, JsThrow> {
     scope
         .state()
-        .and_then(|s| s.downcast::<PageState>().ok())
+        .and_then(|s| s.downcast::<WorldState>().ok())
         .ok_or_else(|| JsThrow::Type("no page state installed in this realm".into()))
 }
 
@@ -71,7 +71,7 @@ fn native_inner(f: NativeFn, ce: bool) -> HostFn {
     Rc::new(move |scope, call| {
         let cx = BindCx {
             scope,
-            state: page_state(scope)?,
+            state: world_state(scope)?,
         };
         // "Push a new element queue": a mark into the DOM's FIFO. A nested
         // `[CEReactions]` call marks above ours, so the slices cannot interleave.
@@ -87,7 +87,15 @@ fn native_inner(f: NativeFn, ce: bool) -> HostFn {
             // it mutates, so a throwing one enqueued nothing — and were that
             // ever untrue, the reactions are not lost, they fall through to the
             // enclosing operation's drain or to the microtask checkpoint.
-            if let Some(mark) = mark {
+            // Main world only (ADR-0033 D8): a definition's constructor is a
+            // main-world function, so reactions cannot run anywhere else. From
+            // another world they stay on the DOM's backup queue and the event
+            // loop's own step drains them, in the main world — losing the
+            // spec's "before the operation returns to script" timing for
+            // utility-world mutations, which is a documented divergence.
+            if let Some(mark) = mark
+                && cx.state.is_main()
+            {
                 crate::invoke_custom_element_reactions(&cx, mark);
             }
             // …and if it queued a MutationObserver record, the spec queues the
@@ -108,7 +116,15 @@ fn native_inner(f: NativeFn, ce: bool) -> HostFn {
         // calling script has not resumed: the point at which a script-inserted
         // inline classic script must run. A throwing operation connected
         // nothing, so nothing can be pending.
-        if result.is_ok() && !cx.state.dom.borrow().script_updates().is_empty() {
+        // Main world only: a `<script>` element is *page* script whichever
+        // world inserted it, and running it against a utility world's globals
+        // would be both wrong and invisible to the page. Inserted from another
+        // world it stays in `dom.script_updates()` for the event loop's own
+        // step, which runs in the main world.
+        if result.is_ok()
+            && cx.state.is_main()
+            && !cx.state.dom.borrow().script_updates().is_empty()
+        {
             crate::script::run_pending_inline_scripts(&cx);
         }
         result
@@ -414,6 +430,21 @@ impl BindCx<'_> {
         {
             self.state
                 .connected_wrappers
+                .borrow_mut()
+                .insert(id, wrapper.clone());
+        } else {
+            // **Provisional retention** (ADR-0033 D7). The node is detached
+            // *now*, so it gets no strong hold — but between here and this
+            // world's next connectivity drain something else may connect it:
+            // another world's script, or the parser. Either way the connect
+            // transition lands in the shared log rather than running here, and
+            // an allocation in the meantime could collect this wrapper and its
+            // expandos first. Holding it until the next drain closes that
+            // window; the drain then either promotes it into
+            // `connected_wrappers` or drops it. Bounded by "detached nodes this
+            // world has wrapped since its last drain".
+            self.state
+                .pending_conn
                 .borrow_mut()
                 .insert(id, wrapper.clone());
         }
@@ -821,7 +852,7 @@ impl BindCx<'_> {
     }
 
     /// Brand-checks the `history` receiver (state lives in
-    /// [`crate::state::PageState::history`]).
+    /// [`crate::state::WorldState::history`]).
     pub(crate) fn this_history(&self, value: &JsValue) -> Result<u64, JsThrow> {
         let Some((TAG_SLAB, key)) = self.payload(value) else {
             return Err(JsThrow::Type("receiver is not a History".into()));
@@ -865,7 +896,7 @@ impl BindCx<'_> {
     }
 
     /// Brand-checks the `customElements` receiver. The registry state lives in
-    /// [`PageState::custom_elements`], so the slab key is returned only as a
+    /// [`WorldState::custom_elements`], so the slab key is returned only as a
     /// brand token (the imp functions ignore it).
     pub(crate) fn this_custom_element_registry(&self, value: &JsValue) -> Result<u64, JsThrow> {
         let Some((TAG_SLAB, key)) = self.payload(value) else {
@@ -1995,9 +2026,12 @@ impl BindCx<'_> {
     /// Creates an event host object with the given interface prototype.
     pub(crate) fn new_event_object(
         &self,
-        interface: &str,
-        data: EventData,
+        interface: &'static str,
+        mut data: EventData,
     ) -> Result<(JsValue, Rc<std::cell::RefCell<EventData>>), JsThrow> {
+        // Recorded on the shared payload so any *other* world can mint its own
+        // wrapper over the same `EventData` with the same prototype.
+        data.iface = interface;
         let data = Rc::new(std::cell::RefCell::new(data));
         let key = self
             .state
@@ -2010,6 +2044,59 @@ impl BindCx<'_> {
             .new_host_object(Some(&proto), TAG_SLAB, key)
             .map_err(JsThrow::from)?;
         Ok((JsValue::Object(wrapper), data))
+    }
+
+    /// Creates a shared `EventData` **without** minting a wrapper.
+    ///
+    /// For events the engine fires and dispatches itself: since ADR-0033 D6
+    /// every world's wrapper is minted lazily by the dispatch, so eagerly
+    /// building one here would allocate a slab entry per dispatch that nothing
+    /// reads. `new_event_object` remains for the paths where the wrapper *is*
+    /// the result — `new CustomEvent(...)` and friends.
+    pub(crate) fn new_event_data(
+        &self,
+        interface: &'static str,
+        mut data: EventData,
+    ) -> Rc<std::cell::RefCell<EventData>> {
+        data.iface = interface;
+        Rc::new(std::cell::RefCell::new(data))
+    }
+
+    /// Records that `data` carries a `JsValue` of this world, so this world's
+    /// teardown can release it before its runtime dies (ADR-0033 D5).
+    pub(crate) fn own_event_value(&self, data: &Rc<std::cell::RefCell<EventData>>) {
+        let mut owned = self.state.owned_event_values.borrow_mut();
+        // Amortised prune: entries are weak, so a page dispatching many
+        // `CustomEvent`s with a detail would otherwise grow this by one dead
+        // pointer each until navigation.
+        if owned.len() >= 64 && owned.len().is_power_of_two() {
+            owned.retain(|weak| weak.strong_count() > 0);
+        }
+        owned.push(Rc::downgrade(data));
+    }
+
+    /// Wraps an **existing** shared `EventData` in this world.
+    ///
+    /// One event, N wrappers (ADR-0033 D6): the propagation flags, target and
+    /// path live in the one `RefCell<EventData>` behind every world's wrapper,
+    /// so a `preventDefault()` in any world cancels for all of them — which is
+    /// the spec behaviour, and free.
+    pub(crate) fn wrap_event(
+        &self,
+        data: &Rc<std::cell::RefCell<EventData>>,
+    ) -> Result<JsValue, JsThrow> {
+        let iface = data.borrow().iface;
+        let key = self
+            .state
+            .slab
+            .borrow_mut()
+            .insert(HostData::Event(Rc::clone(data)));
+        let proto = self.interface_proto(iface)?;
+        let wrapper = self
+            .scope
+            .new_host_object(Some(&proto), TAG_SLAB, key)
+            .map_err(JsThrow::from)?;
+        Ok(JsValue::Object(wrapper))
     }
 
     /// Creates a collection host object wrapped in the indexing proxy.
@@ -2434,7 +2521,7 @@ impl BindCx<'_> {
 
     /// Milliseconds since the page's time origin.
     pub fn now_ms(&self) -> f64 {
-        self.state.start.elapsed().as_secs_f64() * 1000.0
+        self.state.page.start.elapsed().as_secs_f64() * 1000.0
     }
 
     /// Creates a slab-backed host object with the given interface prototype.
@@ -2455,7 +2542,7 @@ impl BindCx<'_> {
     /// Frees detached, unpinned trees left behind by a mutation, unless the
     /// parser is active or mutation records may still reference them.
     pub(crate) fn free_detached(&self, nodes: &[NodeId]) {
-        if self.state.parsing.get() {
+        if self.state.page.parsing.get() {
             return;
         }
         let mut dom = self.state.dom.borrow_mut();

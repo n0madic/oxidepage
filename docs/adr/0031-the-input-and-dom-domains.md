@@ -1,6 +1,6 @@
 # ADR-0031: The `Input` and `DOM` domains
 
-- Status: accepted
+- Status: accepted; **D3 superseded by ADR-0033**
 - Date: 2026-08-03
 - Builds on: ADR-0023 (trusted input), ADR-0026 (transform-aware geometry), ADR-0027 (browser, contexts, commands), ADR-0030 (CDP transport and the remote object model)
 - Constrained by: design §2 (P6 "absent beats fake", P7 "conformance is automated"), §5.2 (generation-checked node ids)
@@ -155,6 +155,11 @@ rather than on `getDocument` + `querySelector`, this is the decision to revisit
 — then, with a real driver in front of it, not now on speculation.
 
 ### D3 — `DOM.resolveNode`'s `executionContextId` is validated, then ignored
+
+**Superseded by ADR-0033**: the id now selects the world the handle is minted
+in, so the asymmetry with `Runtime.evaluate` described below is gone — both
+route by context id. The validation argument survives unchanged and is why a
+stale id is still an error rather than a silent alias.
 
 ADR-0030 D8 keeps one world named twice: a named world reports `base +
 ISOLATED_WORLD_ID_OFFSET + index` but acts on the main world. `resolveNode`

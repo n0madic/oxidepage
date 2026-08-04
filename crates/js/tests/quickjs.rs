@@ -5,8 +5,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use oxidepage_js::{
-    HostFn, JsEngine, JsRealm, JsThrow, JsValue, PropertyDef, QuickJsEngine, RealmOptions,
-    ValueKind,
+    HostFn, JsEngine, JsRealm, JsThrow, JsValue, PropertyDef, QuickJsEngine, QuickJsRealm,
+    RealmOptions, ValueKind,
 };
 
 fn realm() -> impl JsRealm {
@@ -286,6 +286,56 @@ fn interrupt_stops_runaway_script() {
     realm.with_scope(|s| {
         assert!(matches!(s.eval("1", "t").unwrap(), JsValue::Number(n) if n == 1.0));
     });
+}
+
+/// A realm's native-stack budget must be anchored where it is *entered*, not
+/// where it happened to be *created*.
+///
+/// QuickJS snapshots the stack ceiling in `JS_NewRuntime`, and rquickjs's
+/// `update_stack_top` is compiled out without the `parallel` feature — so
+/// before `QuickJsRealm::anchor_stack` a realm created deep in the stack ran
+/// with `max_stack_size + (creation_depth - entry_depth)`, an unbounded
+/// budget. With one runtime per world (ADR-0033) worlds are routinely created
+/// deep, and the overshoot is what would turn nested cross-world delivery into
+/// a native stack overflow instead of a clean `RangeError`.
+#[test]
+fn a_realm_created_deep_in_the_stack_runs_with_its_own_budget() {
+    fn recursion_depth(realm: &QuickJsRealm) -> f64 {
+        realm.with_scope(|s| {
+            let v = s
+                .eval(
+                    "globalThis.d = 0; function f() { d++; return f(); } \
+                     try { f() } catch (e) {} d",
+                    "probe",
+                )
+                .unwrap();
+            s.coerce_number(&v).unwrap()
+        })
+    }
+
+    // Recurse to push the stack pointer down, then build the realm there.
+    #[inline(never)]
+    fn create_at_depth(frames: usize) -> QuickJsRealm {
+        let mut pad = [0u8; 8192];
+        std::hint::black_box(&mut pad);
+        if frames == 0 {
+            QuickJsEngine.new_realm(RealmOptions::default()).unwrap()
+        } else {
+            create_at_depth(frames - 1)
+        }
+    }
+
+    let shallow = recursion_depth(&QuickJsEngine.new_realm(RealmOptions::default()).unwrap());
+    // ~64 * 8 KiB = 512 KiB below the shallow realm's creation point.
+    let deep = recursion_depth(&create_at_depth(64));
+
+    // Unfixed this measured 1.53x. Allow a little slack for frame-layout
+    // differences between builds, but nothing like half a megabyte's worth.
+    let ratio = deep / shallow;
+    assert!(
+        (0.9..=1.1).contains(&ratio),
+        "stack budget must not track creation depth (shallow {shallow}, deep {deep}, ratio {ratio:.2})"
+    );
 }
 
 #[test]

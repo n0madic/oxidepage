@@ -15,6 +15,7 @@ use oxidepage_base::{DomExceptionKind, NodeId};
 use oxidepage_js::{JsThrow, JsValue};
 
 use crate::cx::BindCx;
+use crate::state::WorldId;
 
 /// Event phases as observed by `Event.eventPhase`.
 pub const PHASE_NONE: u16 = 0;
@@ -86,14 +87,16 @@ pub struct MouseFields {
     pub offset: Option<(f64, f64)>,
     pub button: i16,
     pub buttons: u16,
-    /// The `relatedTarget` as the node's **wrapper**, not a bare id — the same
-    /// choice `SubmitEvent.submitter` makes, and for the same reason: a wrapper
-    /// pins its node, so an event parked in a listener's closure can never be
-    /// left naming a freed arena slot. A bare id could, and the shadow-DOM
-    /// retargeting walk in [`dispatch_event`] reads it through
-    /// `DomTree::containing_shadow_root`, which **panics** on a stale id.
-    /// The id is recovered, generation-checked, at every read.
-    pub related: Option<JsValue>,
+    /// The `relatedTarget`, pinned by id rather than held as a wrapper.
+    ///
+    /// A wrapper belongs to **one world** (ADR-0033 D5), and `EventData` is
+    /// shared by every world that wraps the event — so storing the wrapper here
+    /// kept a foreign `Persistent` alive past that world's teardown and aborted
+    /// the process in `JS_FreeRuntime`. The wrapper was only ever a way to pin
+    /// the node; [`PinnedNode`] says that directly, survives across worlds, and
+    /// lets each world resolve its own wrapper through `node_to_js` — a cache
+    /// lookup, so `e.relatedTarget === node` still holds *within* a world.
+    pub related: Option<PinnedNode>,
     pub wheel: Option<WheelFields>,
     pub pointer: Option<PointerFields>,
 }
@@ -145,10 +148,10 @@ pub enum UiKind {
     Plain,
     Mouse(Box<MouseFields>),
     Keyboard(Box<KeyboardFields>),
-    /// `FocusEvent`, whose only extra member is `relatedTarget` — held as a
-    /// wrapper for the reason [`MouseFields::related`] documents.
+    /// `FocusEvent`, whose only extra member is `relatedTarget` — pinned for
+    /// the reason [`MouseFields::related`] documents.
     Focus {
-        related: Option<JsValue>,
+        related: Option<PinnedNode>,
     },
     Input(Box<InputFields>),
     Composition {
@@ -195,7 +198,99 @@ impl UiPayload {
 }
 
 /// State behind an `Event` wrapper.
+/// A `NodeId` held alive by an explicit [`DomTree`] pin, released on drop.
+///
+/// The pin used to be a side effect of storing the node's *wrapper*: a wrapper
+/// pins, so keeping one kept the node. That made the stored value belong to one
+/// world, and it is also what the "a stale id panics in
+/// `containing_shadow_root`" comment was working around. Pinning directly says
+/// what is meant, survives across worlds, and lets each world resolve its own
+/// wrapper through `node_to_js` — which is a cache hit, so
+/// `e.relatedTarget === node` still holds *within* a world.
+pub struct PinnedNode {
+    id: NodeId,
+    dom: Rc<RefCell<oxidepage_dom::DomTree>>,
+}
+
+impl PinnedNode {
+    #[must_use]
+    pub fn new(dom: &Rc<RefCell<oxidepage_dom::DomTree>>, id: NodeId) -> Self {
+        dom.borrow_mut().pin(id);
+        Self {
+            id,
+            dom: Rc::clone(dom),
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+}
+
+impl Clone for PinnedNode {
+    /// Cloning takes a **second** pin, because `DomTree::pin` is a refcount and
+    /// each `PinnedNode` releases exactly one on drop. `UiPayload` derives
+    /// `Clone`, so this is on the ordinary path, not an edge case.
+    fn clone(&self) -> Self {
+        Self::new(&self.dom, self.id)
+    }
+}
+
+impl Drop for PinnedNode {
+    fn drop(&mut self) {
+        // `try_borrow_mut` because an event payload can be dropped from inside
+        // a DOM operation. Failing to unpin holds the node until the next
+        // navigation drops the arena — a bounded leak, where panicking here
+        // would abort a page mid-mutation.
+        if let Ok(mut dom) = self.dom.try_borrow_mut() {
+            dom.unpin(self.id);
+        }
+    }
+}
+
+/// The subinterface-specific payload of an event, in the one form each of the
+/// three carriers can be read from **any** world (ADR-0033 D5).
+pub enum EventDetail {
+    None,
+    /// `SubmitEvent.submitter`. A node id plus an explicit pin, not a wrapper:
+    /// storing the wrapper was only ever a way to pin the node, and it made the
+    /// value world-specific *and* leaked the id's staleness into the getter.
+    /// Every world resolves it through its own `node_to_js`.
+    Node(PinnedNode),
+    /// `CustomEvent.detail` — a live value belonging to one world, which reads
+    /// as `null` everywhere else. That is the isolation boundary working, and
+    /// it is what Chrome does.
+    Value {
+        world: WorldId,
+        value: JsValue,
+    },
+    /// `PopStateEvent.state`, serialized, so every world materializes its own
+    /// copy rather than one world seeing it and the rest seeing `null`.
+    Serialized(String),
+}
+
+impl EventDetail {
+    /// The value as `world` may see it: `null` when it belongs to another one.
+    #[must_use]
+    pub fn value_in(&self, world: WorldId) -> JsValue {
+        match self {
+            Self::Value {
+                world: owner,
+                value,
+            } if *owner == world => value.clone(),
+            _ => JsValue::Null,
+        }
+    }
+}
+
 pub struct EventData {
+    /// The interface this event was created as (`"MouseEvent"`, `"CustomEvent"`,
+    /// …), so a world that has no wrapper for it yet can mint one with the
+    /// right prototype (ADR-0033 D6). `&'static str` because every event
+    /// interface name in the engine is a literal, which also stops a caller
+    /// inventing one at runtime.
+    pub iface: &'static str,
     pub event_type: String,
     pub bubbles: bool,
     pub cancelable: bool,
@@ -212,10 +307,9 @@ pub struct EventData {
     pub time_stamp: f64,
     /// The one extra value an event subinterface carries, read under a
     /// different name by each of them: `CustomEvent.detail`,
-    /// `PopStateEvent.state`, and `SubmitEvent.submitter` (as the submitter's
-    /// wrapper — the node id is recovered from it). Three interfaces, one
-    /// slot, because no event is more than one of them.
-    pub detail: JsValue,
+    /// `PopStateEvent.state`, and `SubmitEvent.submitter`. Three interfaces,
+    /// one slot, because no event is more than one of them.
+    pub detail: EventDetail,
     /// The typed payload of the UI event family, boxed and optional so that
     /// every non-UI event — `DOMContentLoaded`, `load`, every mutation-driven
     /// dispatch — pays one null pointer and no allocation for it.
@@ -230,8 +324,23 @@ pub struct EventData {
 }
 
 impl EventData {
+    /// Drops any payload value belonging to `world`, leaving the event valid.
+    ///
+    /// Called by that world's teardown while its runtime is still alive
+    /// (ADR-0033 D4). The event stays usable afterwards — a foreign `detail`
+    /// already read as `null` from every other world, so clearing it changes
+    /// nothing any world could observe.
+    pub(crate) fn release_values_of(&mut self, world: WorldId) {
+        if matches!(&self.detail, EventDetail::Value { world: owner, .. } if *owner == world) {
+            self.detail = EventDetail::None;
+        }
+    }
+
     pub fn new(event_type: String, bubbles: bool, cancelable: bool, composed: bool) -> Self {
         Self {
+            // Overwritten by `BindCx::new_event_object`, which is the only
+            // thing that knows the interface a given payload is wrapped as.
+            iface: "Event",
             event_type,
             bubbles,
             cancelable,
@@ -246,7 +355,7 @@ impl EventData {
             dispatching: false,
             is_trusted: false,
             time_stamp: 0.0,
-            detail: JsValue::Null,
+            detail: EventDetail::None,
             ui: None,
             path: Vec::new(),
             in_passive_listener: false,
@@ -294,6 +403,13 @@ pub(crate) struct ListenerRegistry {
 }
 
 impl ListenerRegistry {
+    /// Drops every registered listener. Called only by
+    /// [`crate::WorldState::release_js`], at page teardown, while this world's
+    /// runtime is still alive.
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
     /// The `(id, callback)` pairs registered for `target` matching `event_type`
     /// and `capture`. Callers compare callbacks with JS `===` *after* dropping
     /// the registry borrow, since `strict_equals` re-enters JS.
@@ -547,9 +663,69 @@ fn flat_event_parent(
 pub fn dispatch_event(
     cx: &BindCx<'_>,
     target: EventTargetKey,
-    event_value: &JsValue,
     event: &Rc<RefCell<EventData>>,
 ) -> Result<bool, JsThrow> {
+    dispatch_event_with(cx, target, event, None)
+}
+
+/// As [`dispatch_event`], but reusing a wrapper the caller already holds.
+///
+/// `EventTarget.dispatchEvent(event)` must deliver **that** object to its
+/// listeners — `e === event` is observable and widely relied on — so the
+/// initiating world's wrapper is seeded rather than minted. Every other world
+/// still gets its own, lazily.
+pub fn dispatch_event_with(
+    cx: &BindCx<'_>,
+    target: EventTargetKey,
+    event: &Rc<RefCell<EventData>>,
+    seed: Option<&JsValue>,
+) -> Result<bool, JsThrow> {
+    dispatch_inner(cx, target, event, seed, DispatchScope::EveryWorld)
+}
+
+/// Dispatches in **this world only**, with a wrapper the caller built.
+///
+/// For engine-fired events whose object is constructed *per world* because its
+/// members live on the wrapper rather than in the shared `EventData` — the
+/// `storage` event, built by `bootstrap.js`'s `newStorageEvent`, and
+/// `popstate`, whose state is materialized per world. The page loops over
+/// worlds and calls this once each; letting the ordinary dispatch fan out as
+/// well would deliver to the other worlds twice, the second time with a bare
+/// wrapper missing every member the event exists to carry.
+pub fn dispatch_event_in_this_world(
+    cx: &BindCx<'_>,
+    target: EventTargetKey,
+    event: &Rc<RefCell<EventData>>,
+    seed: Option<&JsValue>,
+) -> Result<bool, JsThrow> {
+    dispatch_inner(cx, target, event, seed, DispatchScope::ThisWorld)
+}
+
+/// Which worlds a dispatch delivers to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DispatchScope {
+    /// The default: every world, main first (ADR-0033 D6).
+    EveryWorld,
+    /// Only the initiating world, because the caller fans out itself.
+    ThisWorld,
+}
+
+fn dispatch_inner(
+    cx: &BindCx<'_>,
+    target: EventTargetKey,
+    event: &Rc<RefCell<EventData>>,
+    seed: Option<&JsValue>,
+    scope: DispatchScope,
+) -> Result<bool, JsThrow> {
+    // Per-dispatch scratch: each world's wrapper over the one shared
+    // `EventData`, minted only when that world turns out to have a listener on
+    // the node being visited (ADR-0033 D6). A page with no utility-world
+    // listeners pays one hash probe per node per world and never enters a
+    // second scope.
+    let wrappers: RefCell<Vec<(WorldId, JsValue)>> = RefCell::new(Vec::new());
+    if let Some(seed) = seed {
+        wrappers.borrow_mut().push((cx.state.id, seed.clone()));
+    }
     {
         let ev = event.borrow();
         if ev.dispatching || !ev.initialized {
@@ -581,8 +757,10 @@ pub fn dispatch_event(
             retarget(&dom, related, target_node)
         };
         if retargeted != related {
-            let wrapper = cx.node_to_js(retargeted)?;
-            set_ui_related_target(&mut event.borrow_mut(), Some(wrapper));
+            set_ui_related_target(
+                &mut event.borrow_mut(),
+                Some(PinnedNode::new(&cx.state.dom, retargeted)),
+            );
         }
     }
 
@@ -652,11 +830,11 @@ pub fn dispatch_event(
         if event.borrow().stop_propagation {
             break;
         }
-        invoke_listeners(cx, key, event_value, event, PHASE_CAPTURING)?;
+        invoke_listeners_in_every_world(cx, key, event, PHASE_CAPTURING, &wrappers, scope)?;
     }
     // Target phase.
     if !event.borrow().stop_propagation {
-        invoke_listeners(cx, path[0], event_value, event, PHASE_AT_TARGET)?;
+        invoke_listeners_in_every_world(cx, path[0], event, PHASE_AT_TARGET, &wrappers, scope)?;
     }
     // Bubble phase.
     if event.borrow().bubbles {
@@ -664,7 +842,7 @@ pub fn dispatch_event(
             if event.borrow().stop_propagation {
                 break;
             }
-            invoke_listeners(cx, key, event_value, event, PHASE_BUBBLING)?;
+            invoke_listeners_in_every_world(cx, key, event, PHASE_BUBBLING, &wrappers, scope)?;
         }
     }
 
@@ -706,21 +884,23 @@ pub fn dispatch_event(
 /// navigation replaced the arena), so the callers below never hand a stale id
 /// to the panicking `DomTree::node` family.
 pub(crate) fn ui_related_target(cx: &BindCx<'_>, payload: &UiPayload) -> Option<NodeId> {
-    let value = related_target_value(payload)?;
-    cx.this_node(value).ok()
+    let id = related_target_id(payload)?;
+    // The pin keeps the node alive, so this can only miss after a navigation
+    // replaced the arena — where "no related target" is the honest answer, and
+    // is what keeps a stale id away from the panicking `DomTree::node` family.
+    cx.state.dom.borrow().get(id).is_some().then_some(id)
 }
 
-/// The stored `relatedTarget` wrapper, unvalidated — for the getters, which
-/// hand back the very object script passed in so `e.relatedTarget === node`.
-pub(crate) fn related_target_value(payload: &UiPayload) -> Option<&JsValue> {
+/// The pinned `relatedTarget` node id, unvalidated.
+pub(crate) fn related_target_id(payload: &UiPayload) -> Option<NodeId> {
     match &payload.kind {
-        UiKind::Mouse(m) => m.related.as_ref(),
-        UiKind::Focus { related } => related.as_ref(),
+        UiKind::Mouse(m) => m.related.as_ref().map(PinnedNode::id),
+        UiKind::Focus { related } => related.as_ref().map(PinnedNode::id),
         _ => None,
     }
 }
 
-fn set_ui_related_target(event: &mut EventData, related: Option<JsValue>) {
+fn set_ui_related_target(event: &mut EventData, related: Option<PinnedNode>) {
     if let Some(payload) = event.ui.as_deref_mut() {
         match &mut payload.kind {
             UiKind::Mouse(m) => m.related = related,
@@ -757,6 +937,76 @@ impl Drop for PassiveListenerGuard<'_> {
     fn drop(&mut self) {
         self.event.borrow_mut().in_passive_listener = self.previous;
     }
+}
+
+/// Runs one propagation step in **every** world, main world first then
+/// creation order (ADR-0033 D6).
+///
+/// Ordering rationale, because it is a deliberate divergence: registration
+/// order *within* a world is the only order the spec and Chrome guarantee, and
+/// Blink keys its listener map by world too, so cross-world order is
+/// unspecified. Main-first is the useful choice — it lets a utility-world
+/// listener observe the page's own `defaultPrevented`, which is exactly what a
+/// driver reading the outcome of synthesized input wants.
+///
+/// The hop must not straddle a `RefCell` borrow on dom/style/layout ("reflow
+/// must never re-enter JS"); the path is built and cloned before any listener
+/// runs, and the debug assertion below says so.
+fn invoke_listeners_in_every_world(
+    cx: &BindCx<'_>,
+    key: EventTargetKey,
+    event: &Rc<RefCell<EventData>>,
+    phase: u16,
+    wrappers: &RefCell<Vec<(WorldId, JsValue)>>,
+    scope: DispatchScope,
+) -> Result<(), JsThrow> {
+    debug_assert!(
+        cx.state.dom.try_borrow_mut().is_ok(),
+        "cross-world event delivery must not run under a DOM borrow",
+    );
+    let event_type = event.borrow().event_type.clone();
+    let worlds = match scope {
+        DispatchScope::EveryWorld => cx.state.page.world_ids(),
+        DispatchScope::ThisWorld => vec![cx.state.id],
+    };
+    for world in worlds {
+        if event.borrow().stop_immediate_propagation {
+            break;
+        }
+        if world == cx.state.id {
+            let value = world_event_wrapper(cx, event, wrappers)?;
+            invoke_listeners(cx, key, &value, event, phase)?;
+            continue;
+        }
+        // A cheap probe before entering: nothing is minted, no scope is
+        // entered, and a page whose utility worlds are idle pays only this.
+        if !cx.state.page.world_has_listener(world, key, &event_type) {
+            continue;
+        }
+        // Another world's listener throwing is that world's script error, and
+        // is reported there by `invoke_listeners`. It must not abort the
+        // dispatch for the world that started it.
+        cx.state.page.in_world(world, |wcx| {
+            if let Ok(value) = world_event_wrapper(wcx, event, wrappers) {
+                let _ = invoke_listeners(wcx, key, &value, event, phase);
+            }
+        });
+    }
+    Ok(())
+}
+
+/// This world's wrapper for the shared payload, minted on first need.
+fn world_event_wrapper(
+    cx: &BindCx<'_>,
+    event: &Rc<RefCell<EventData>>,
+    wrappers: &RefCell<Vec<(WorldId, JsValue)>>,
+) -> Result<JsValue, JsThrow> {
+    if let Some((_, value)) = wrappers.borrow().iter().find(|(w, _)| *w == cx.state.id) {
+        return Ok(value.clone());
+    }
+    let value = cx.wrap_event(event)?;
+    wrappers.borrow_mut().push((cx.state.id, value.clone()));
+    Ok(value)
 }
 
 fn invoke_listeners(
@@ -895,12 +1145,16 @@ fn invoke_listeners(
 ///
 /// Not `fire_simple_event`: `popstate` is a `PopStateEvent`, and its `state`
 /// is the only way script learns *which* entry it landed on.
-pub fn fire_pop_state(cx: &BindCx<'_>, state: JsValue) -> Result<(), JsThrow> {
+/// `state` is the entry's **serialized** state; each world materializes its
+/// own copy (ADR-0033 D5), so a `popstate` reaches every world with a readable
+/// state rather than one world with a value and the rest with `null`.
+pub fn fire_pop_state(cx: &BindCx<'_>, state: Option<&str>) -> Result<(), JsThrow> {
     let mut data = EventData::new("popstate".to_owned(), false, false, false);
     data.is_trusted = true;
-    data.detail = state;
-    let (value, data) = cx.new_event_object("PopStateEvent", data)?;
-    dispatch_event(cx, EventTargetKey::Window, &value, &data)?;
+    data.detail = state.map_or(EventDetail::None, |s| EventDetail::Serialized(s.to_owned()));
+    let data = cx.new_event_data("PopStateEvent", data);
+    // The page calls this once per world, so this dispatch stays local.
+    dispatch_event_in_this_world(cx, EventTargetKey::Window, &data, None)?;
     crate::microtask_checkpoint(cx);
     Ok(())
 }
@@ -915,8 +1169,8 @@ pub fn fire_simple_event(
 ) -> Result<(), JsThrow> {
     let mut data = EventData::new(event_type.to_owned(), bubbles, false, false);
     data.is_trusted = true;
-    let (value, data) = cx.new_event_object("Event", data)?;
-    dispatch_event(cx, target, &value, &data)?;
+    let data = cx.new_event_data("Event", data);
+    dispatch_event(cx, target, &data)?;
     // This is a Rust-driven dispatch at a task boundary (the JS stack is now
     // empty), so run the microtask checkpoint that `invoke_listeners` no
     // longer performs per-listener.

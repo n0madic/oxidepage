@@ -199,6 +199,21 @@ pub struct NetRequest {
     /// the filter, and a general one would be a way to smuggle any header at
     /// all onto a cross-origin `no-cors` load.
     pub auth: Option<(String, String)>,
+    /// Headers a **driver** set through `Fetch.continueRequest`, replacing the
+    /// script-supplied ones.
+    ///
+    /// A slot of its own, beside `auth` and for the same reason: `headers` is
+    /// the *script* slot and is filtered by `is_forbidden_request_header` plus
+    /// the `no-cors` CORS safelist. Both of those are rules about what a *page*
+    /// may set. A driver override went in there, so on a subresource — which is
+    /// `RequestMode::NoCors` — every non-safelisted header was silently
+    /// dropped: `request.continue({headers: {...r.headers(), 'x-trace': '1'}})`
+    /// worked on documents and did nothing on `<img>`/`<script>`/`<link>`.
+    ///
+    /// Still validated, and still refused for the transport-critical names
+    /// (`content-length`, `transfer-encoding`, …): letting a driver desync
+    /// those is request smuggling, not automation.
+    pub header_overrides: Option<Vec<(String, String)>>,
 }
 
 impl Default for NetRequest {
@@ -207,6 +222,7 @@ impl Default for NetRequest {
             method: "GET".to_owned(),
             url: String::new(),
             headers: Vec::new(),
+            header_overrides: None,
             body: None,
             credentials: Credentials::default(),
             mode: RequestMode::default(),
@@ -227,6 +243,7 @@ impl NetRequest {
             method: "GET".to_owned(),
             url: url.into(),
             headers: Vec::new(),
+            header_overrides: None,
             body: None,
             credentials: Credentials::Include,
             mode: RequestMode::Navigate,
@@ -301,6 +318,7 @@ impl NetRequest {
             method: "GET".to_owned(),
             url: url.into(),
             headers: Vec::new(),
+            header_overrides: None,
             body: None,
             credentials: Credentials::Include,
             mode: RequestMode::NoCors,
@@ -327,6 +345,7 @@ impl NetRequest {
             method: "GET".to_owned(),
             url: url.into(),
             headers: Vec::new(),
+            header_overrides: None,
             body: None,
             credentials: Credentials::SameOrigin,
             mode: RequestMode::Cors,
@@ -685,6 +704,7 @@ impl FetchEngine {
                 &url,
                 &body,
                 &headers,
+                request.header_overrides.as_ref(),
                 // Dropped the moment a redirect crosses origin, exactly as the
                 // credential-bearing script headers above are: credentials
                 // answered to one origin's challenge must not follow a redirect
@@ -879,6 +899,7 @@ impl FetchEngine {
         url: &Url,
         body: &[u8],
         user_headers: &[(String, String)],
+        header_overrides: Option<&Vec<(String, String)>>,
         auth: Option<&(String, String)>,
         mode: RequestMode,
         referrer_source: Option<&Url>,
@@ -900,15 +921,33 @@ impl FetchEngine {
         // dropping the rest keeps `Authorization` and other sensitive script
         // headers off cross-origin no-cors loads (the Fetch no-cors safelist).
         let no_cors = mode == RequestMode::NoCors;
-        for (name, value) in user_headers {
-            let (name, value) = validate_header(name, value)?;
-            if is_forbidden_header(&name) {
-                continue;
+        match header_overrides {
+            // A driver's `continueRequest` headers **replace** the script ones,
+            // as they do in Chrome, and skip the CORS safelist — that rule
+            // governs what a page may put on a no-cors load, and this is not a
+            // page. `validate_header` still runs (header injection) and the
+            // transport-critical names are still refused.
+            Some(overrides) => {
+                for (name, value) in overrides {
+                    let (name, value) = validate_header(name, value)?;
+                    if is_transport_header(&name) {
+                        continue;
+                    }
+                    headers.append(name, value);
+                }
             }
-            if no_cors && !is_cors_safelisted_request_header(&name, &value) {
-                continue;
+            None => {
+                for (name, value) in user_headers {
+                    let (name, value) = validate_header(name, value)?;
+                    if is_forbidden_header(&name) {
+                        continue;
+                    }
+                    if no_cors && !is_cors_safelisted_request_header(&name, &value) {
+                        continue;
+                    }
+                    headers.append(name, value);
+                }
             }
-            headers.append(name, value);
         }
         // The user agent's own credentials, applied **after** the loop and
         // outside both filters. `Authorization` and every `Proxy-*` name are
@@ -927,27 +966,35 @@ impl FetchEngine {
         if !headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         }
-        headers.insert(USER_AGENT, self.request_defaults.user_agent.clone());
+        // A driver override wins over the engine's own identity; script never
+        // could (`user-agent` is a forbidden request header), so this is
+        // unconditional in the ordinary case.
+        if !headers.contains_key(USER_AGENT) {
+            headers.insert(USER_AGENT, self.request_defaults.user_agent.clone());
+        }
         if !headers.contains_key(ACCEPT_LANGUAGE) {
             headers.insert(
                 ACCEPT_LANGUAGE,
                 self.request_defaults.accept_language.clone(),
             );
         }
-        if let Some(source) = referrer_source
+        if !headers.contains_key(REFERER)
+            && let Some(source) = referrer_source
             && let Some(referer) = compute_referrer(source, url)
             && let Ok(value) = HeaderValue::from_str(&referer)
         {
             headers.insert(REFERER, value);
         }
-        // `origin` is on the forbidden-header list, so script can never set or
-        // override it; the value the caller computed is authoritative.
-        if let Some(origin) = origin
+        // `origin` is on the forbidden-header list, so *script* can never set or
+        // override it and the computed value is authoritative. A driver's
+        // `continueRequest` may, for the same reason it may set `user-agent`.
+        if !headers.contains_key(ORIGIN)
+            && let Some(origin) = origin
             && let Ok(value) = HeaderValue::from_str(origin)
         {
             headers.insert(ORIGIN, value);
         }
-        if send_cookies {
+        if send_cookies && !headers.contains_key(COOKIE) {
             let cookie = lock_recovering(&self.cookies).cookie_header(
                 url,
                 same_site,
@@ -1685,6 +1732,27 @@ pub fn decode_with_charset(bytes: &[u8], label: &str) -> String {
     let encoding = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8);
     let (text, _, _) = encoding.decode(bytes);
     text.into_owned()
+}
+
+/// Headers that govern the *framing* of the message rather than its content.
+///
+/// Refused even for a driver override: a `Content-Length` that disagrees with
+/// the body, or a hand-set `Transfer-Encoding`, is request smuggling — a class
+/// of bug that does not become acceptable because the person asking owns the
+/// process. Everything else a driver names (`user-agent`, `referer`, `cookie`,
+/// `origin`, `authorization`, `x-*`) is sent.
+fn is_transport_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "content-length"
+            | "expect"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 /// Whether a script-supplied request header name is on Fetch's **forbidden

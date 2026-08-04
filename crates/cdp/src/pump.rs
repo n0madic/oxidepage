@@ -130,14 +130,20 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
             // every session on the target fires a driver's callback once per
             // attached session for a single page call, and delivers the event to
             // a session that never asked for the binding at all.
-            PageEvent::Binding { name, payload } if session.wants_binding(name) => {
+            PageEvent::Binding {
+                name,
+                payload,
+                context_id,
+            } if session.wants_binding(name) => {
                 connection.emit(Event::session(
                     &session.id,
                     "Runtime.bindingCalled",
                     json!({
                         "name": name,
                         "payload": payload,
-                        "executionContextId": session.page.execution_context_id().unwrap_or(1),
+                        // The world the binding was called from, carried on
+                        // the event — not a guess at the main context.
+                        "executionContextId": context_id,
                     }),
                 ));
             }
@@ -449,11 +455,21 @@ fn navigation_events(
                 connection.emit(crate::domains::runtime::execution_context_created(
                     connection, session,
                 ));
-                // The named worlds go back up too, for the reason
-                // `SessionState::isolated_worlds` documents.
-                for world in session.isolated_worlds() {
+                // The isolated worlds go back up with their **new** ids: a
+                // commit tears each one down and rebuilds it against a fresh
+                // global (ADR-0033 D9), so the ids a driver holds are dead. The
+                // registry is the page's, not the session's, which is what
+                // makes two sessions on one target see the same worlds.
+                for world in session.page.worlds().unwrap_or_default() {
+                    if world.is_default {
+                        continue;
+                    }
                     connection.emit(crate::domains::runtime::execution_context_created_named(
-                        connection, session, &world, false,
+                        connection,
+                        session,
+                        &world.name,
+                        false,
+                        world.context_id,
                     ));
                 }
             }

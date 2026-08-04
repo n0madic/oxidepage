@@ -664,7 +664,76 @@ the engine), service workers.
 
 ---
 
-## Stage 9 — Isolated worlds
+## Stage 9 — Isolated worlds — **landed (ADR-0033)**
+
+**Milestone: the gate to Playwright.** Met: `cargo xtask playwright` exists and
+is **13/17**, with `chromium.connectOverCDP` → `newPage` → `goto` → `title` →
+`evaluate` → `locator().click()` → `addInitScript` → `goBack` → `screenshot` →
+`console` all working through a real utility world. `cargo xtask puppeteer` went
+from 45/45 to **48/48**, the three new checks being the isolation itself.
+
+**What landed beyond the plan, and what the plan got wrong.**
+
+- **The roadmap's "a second `JSContext` on the same `Runtime`" is not viable, and
+  the reason is the opposite of the obvious one.** `Context::with` takes a
+  `RefCell::borrow_mut` on the runtime, so entering world B from inside world A
+  — which is exactly what synchronous cross-world event delivery *is* — would
+  panic; and `Persistent::restore` compares only the runtime pointer, so a
+  shared runtime would let a world-A wrapper restore silently into world B, the
+  one failure the stage exists to prevent. One runtime per world makes nesting
+  legal and turns that leak into a typed error for free (ADR-0033 D1).
+- **A latent stack bug had to be fixed first.** rquickjs's `update_stack_top` is
+  compiled out without the `parallel` feature, so a realm measured its native
+  stack budget from wherever it was *created* — measured at **1.53x** the
+  intended depth for a realm created 512 KiB down. Harmless with one realm
+  created at startup; with worlds created deep inside jobs and callbacks, it is
+  a stack overflow. `QuickJsRealm::anchor_stack` (D2).
+- **The drop order is the real hazard, and counting `Rc`s does not work.**
+  `Page` deliberately keeps its own `Rc<WorldState>` and the realm holds a third
+  as `Rc<dyn Any>`, so dropping one handle frees nothing;
+  `WorldState::release_js` empties the containers instead, and
+  `WorldTable::teardown` does it for **every** world before freeing **any**
+  runtime. Found by `dropping_a_page_with_live_worlds_is_clean`, which caught a
+  real `JS_FreeRuntime` abort twice — once from `history.state` still being a
+  live `JsValue` on page-level state, once from a remote handle filed in the
+  wrong world's store.
+- **`objectId`s had to become page-unique.** The plan said `callFunctionOn`
+  takes the world from the handle; it also has to take it from
+  `executionContextId` when there is no handle, which is what Puppeteer sends.
+  Both present and disagreeing is an error.
+- **Three things the plan did not list as per-world were.** `navigator.languages`
+  / `plugins` / `mimeTypes` cached their wrappers on the *shared* `NavigatorData`
+  (a cross-world leak and a teardown hazard); promise settling read the value in
+  the main world, so a utility-world `await` reported `undefined`; and the event
+  loop pumped only the main world's job queue, so a promise created in a utility
+  world never settled at all — which is where a driver's entire injected surface
+  lives.
+- **`MutationObserver` needed a task source of its own.** A mutation queues the
+  compound microtask on the queue of the world that *made* it, so every other
+  world's observers were never told. Per-world delivery at the task boundary.
+- **Two protocol gaps were in the way of Playwright and are unrelated to worlds:**
+  `Target.getTargetInfo` did not exist (Playwright sends it first, so nothing
+  worked), and every page target omitted `browserContextId` for the default
+  context — Playwright asserts on it. Chrome reports both; hiding the default
+  context from `Target.getBrowserContexts` is what actually protects it.
+- **`Emulation.setEmulatedMedia` now accepts each feature's default.** Playwright
+  sends `prefers-color-scheme`, `prefers-reduced-motion`, `prefers-contrast` and
+  `forced-colors` while creating **every** page. Accepting the value that already
+  holds is ADR-0030 D9's own rule; any other value is still refused.
+
+**Known flake.** `context.newPage` occasionally times out when the runner is
+started immediately after WPT's 10-way-parallel sweep on a loaded machine, and
+because every other check needs a page, one timeout reports as sixteen. The
+connect/newPage/goto budgets are 60 s for that reason. It is a harness
+sensitivity, not an engine fault — the checks pass in isolation on every run.
+
+**Still failing, and why** (`tests/playwright/expectations.tsv`): `page.fill`
+appends instead of replacing (the `Input` domain does not honour a selection),
+`page.setContent`, `page.waitForSelector` and `page.exposeBinding` need
+Playwright's injected-script plumbing that stage 10's frame work brings. Those
+four lines are the two-sided contract working as designed.
+
+The original scope follows, for the record.
 
 **The gate to Playwright.** Playwright always runs its injected script in a
 utility world created with `Page.createIsolatedWorld`; `addInitScript` and

@@ -108,7 +108,7 @@ oxidepage dump-layout page.html                    # box tree with computed posi
 oxidepage dump-display-list page.html -o list.json  # paint display list as JSON
 ```
 
-### Drive it with Puppeteer
+### Drive it with Puppeteer or Playwright
 
 `serve` starts a Chrome DevTools Protocol endpoint and prints its WebSocket URL
 on stdout:
@@ -129,12 +129,23 @@ await page.screenshot({ path: 'shot.png' });
 await browser.disconnect();
 ```
 
-Working today: `goto`, `evaluate`, `evaluateHandle`, `screenshot`, `pdf`,
-`cookies`, `exposeFunction`, `goBack`/`reload`, `setViewport`, console and
-`pageerror` events, and browser contexts. Not yet: anything that needs the `DOM`
-or `Input` domains — `page.$`, `waitForSelector`, `click`, `type` — plus request
-interception and isolated worlds. See ADR-0030 for the full list of deliberate
-limits.
+Playwright connects the same way, with `chromium.connectOverCDP(url)`.
+
+Working today with Puppeteer: `goto`, `evaluate`, `evaluateHandle`, `$`, `$$`,
+`$eval`, `waitForSelector`, `click`, `type`, `hover`, `select`, `screenshot`,
+`pdf`, `cookies`, `exposeFunction`, `evaluateOnNewDocument`, `goBack`/`reload`,
+`setViewport`, request interception, file uploads, downloads, isolated worlds,
+console and `pageerror` events, and browser contexts.
+
+With Playwright: `newPage`, `goto`, `title`, `evaluate`, `textContent`,
+`locator().click()`, `locator().count()`, `addInitScript`, `goBack`,
+`setContent`'s siblings, `screenshot` and console events. Not yet: `fill`
+(it appends rather than replacing), `setContent`, `waitForSelector` and
+`exposeBinding`, which need frame plumbing that is the next stage.
+
+Not yet for either: user-agent and timezone overrides, nested browsing contexts
+(real iframes), and the inspector-facing domains. See `docs/status.md` for the
+full list of deliberate limits.
 
 > **Security.** The endpoint is unauthenticated control of a process that runs
 > attacker-supplied web content. It binds `127.0.0.1` only, requires a loopback

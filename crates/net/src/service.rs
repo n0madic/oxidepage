@@ -306,6 +306,12 @@ pub struct NetService {
     /// the window where the request is *not* parked — it is in flight on a
     /// tokio worker, having been resumed by `continueWithAuth`.
     retry_auth: RefCell<HashMap<RequestId, u32>>,
+    /// Redirect hops a *fulfilled* response has produced, per request.
+    ///
+    /// The engine follows real redirects itself and caps them; a driver
+    /// stubbing `302 Location:` is outside that loop, so a pair of stubs that
+    /// point at each other would recurse without one.
+    fulfilled_hops: RefCell<HashMap<RequestId, u32>>,
 }
 
 /// A request held at the pause point.
@@ -429,6 +435,7 @@ impl NetService {
                 paused: RefCell::new(HashMap::new()),
                 deferred: RefCell::new(VecDeque::new()),
                 retry_auth: RefCell::new(HashMap::new()),
+                fulfilled_hops: RefCell::new(HashMap::new()),
             },
             rx,
         )
@@ -703,16 +710,13 @@ impl NetService {
     fn spawn_fetch(&self, request: NetRequest) -> RequestId {
         let id = self.next_request_id();
         self.note_request(id, &request);
-        if self.is_offline_for(&request) {
-            // Reported asynchronously, like any other failure: the caller has
-            // already stored its `pending_*` state under this id and expects
-            // exactly one terminal `NetEvent` for it.
-            let _ = self.tx.send(NetEvent::Error {
-                id,
-                error: offline_error(),
-            });
-            return id;
-        }
+        // The pause point sits **above** the offline gate, as Chrome's `Fetch`
+        // domain sits above the network stack: `setOfflineMode(true)` +
+        // `setRequestInterception(true)` + `request.respond()` is the standard
+        // way to test an offline page, and failing before the announcement
+        // meant the driver never saw the request it meant to stub. The gate is
+        // applied where the request would actually reach the network — in
+        // `spawn_fetch_with`, which is also where a *continued* one arrives.
         if self.intercepts(&request) {
             self.announce_pause(id, &request);
             self.park(id, PauseKind::Request(Box::new(request)));
@@ -738,7 +742,60 @@ impl NetService {
     /// Split out of [`NetService::spawn_fetch`] so a *resumed* request does not
     /// re-`note_request` and hand the observer a second `requestWillBeSent` for
     /// one request — which a driver reads as two, and never balances.
+    /// Delivers a `fulfillRequest`, **following it** when it is a redirect.
+    ///
+    /// A driver stubbing `302` + `Location` is the ordinary way to test one, and
+    /// the fulfilled outcome used to be handed straight to the consumer with
+    /// `redirected: false` — a bodyless 302, which for a document is a blank
+    /// page with no error anywhere. The engine's own redirect loop is inside
+    /// `FetchEngine::fetch` and never sees a fulfilled response, so the follow
+    /// happens here.
+    fn deliver_fulfilled(
+        &self,
+        id: RequestId,
+        mut request: NetRequest,
+        response: FulfilledResponse,
+    ) {
+        if let Some(target) = fulfilled_redirect_target(&request.url, &response) {
+            let hops = self.fulfilled_hops.borrow().get(&id).copied().unwrap_or(0);
+            if hops < MAX_FULFILLED_REDIRECTS {
+                self.fulfilled_hops.borrow_mut().insert(id, hops + 1);
+                request.url = target;
+                // A stubbed redirect changes the method exactly as a real one
+                // does, or a stubbed `303` would re-POST to the target.
+                if matches!(response.status, 301..=303) && request.method != "HEAD" {
+                    request.method = String::from("GET");
+                    request.body = None;
+                }
+                self.spawn_fetch_with(id, request);
+                return;
+            }
+            let _ = self.tx.send(NetEvent::Error {
+                id,
+                error: NetError::new(
+                    oxidepage_base::NetErrorKind::Protocol,
+                    format!("exceeded {MAX_FULFILLED_REDIRECTS} fulfilled redirects"),
+                ),
+            });
+            return;
+        }
+        emit_outcome(&self.tx, id, fulfilled_outcome(&request.url, response));
+    }
+
     fn spawn_fetch_with(&self, id: RequestId, request: NetRequest) {
+        // The single point at which a request leaves for the network — reached
+        // both by one that was never intercepted and by one a driver continued
+        // — so it is the one place the offline gate belongs.
+        if self.is_offline_for(&request) {
+            // Reported asynchronously, like any other failure: the caller has
+            // already stored its `pending_*` state under this id and expects
+            // exactly one terminal `NetEvent` for it.
+            let _ = self.tx.send(NetEvent::Error {
+                id,
+                error: offline_error(),
+            });
+            return;
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.borrow_mut().insert(id, Arc::clone(&cancel));
         let engine = self.engine.clone();
@@ -778,13 +835,15 @@ impl NetService {
             let retry = handle_auth.then(|| request.clone());
             match engine.fetch(request).await {
                 Ok(out) if !cancel.load(Ordering::Relaxed) => {
-                    if let Some(retry) = retry
+                    if let Some(mut retry) = retry
                         && let Some(challenge) = parse_auth_challenge(
                             &out.head.headers,
                             out.head.status,
                             &out.head.final_url,
                         )
                     {
+                        // The snapshot was taken before the redirect loop ran.
+                        retarget_to_challenger(&mut retry, &out.head.final_url);
                         let _ = tx.send(NetEvent::AuthRequired {
                             id,
                             challenge: Box::new(challenge),
@@ -968,10 +1027,14 @@ impl NetService {
             return;
         };
         self.intercept.config().paused.remove(&id);
+        // `wire`, not `new`: the driver handed us `errorReason`, the protocol
+        // side turned it into Chrome's exact `net::ERR_…` name, and the driver
+        // reads that same name back off `loadingFailed.errorText`. A category
+        // prefix would break the round-trip.
         let fail = |error: String| {
             let _ = self.tx.send(NetEvent::Error {
                 id,
-                error: NetError::new(oxidepage_base::NetErrorKind::Blocked, error),
+                error: NetError::wire(oxidepage_base::NetErrorKind::Blocked, error),
             });
         };
         match (parked.kind, command) {
@@ -980,7 +1043,7 @@ impl NetService {
                 self.spawn_fetch_with(id, *request);
             }
             (PauseKind::Request(request), InterceptCommand::Fulfill { response, .. }) => {
-                emit_outcome(&self.tx, id, fulfilled_outcome(&request.url, *response));
+                self.deliver_fulfilled(id, *request, *response);
             }
             (PauseKind::Request(_), InterceptCommand::Fail { error, .. }) => fail(error),
             // An auth answer for a request that is not at an auth pause: the
@@ -1015,7 +1078,7 @@ impl NetService {
             }
             (PauseKind::Auth { .. }, InterceptCommand::Fail { error, .. }) => fail(error),
             (PauseKind::Auth { request, .. }, InterceptCommand::Fulfill { response, .. }) => {
-                emit_outcome(&self.tx, id, fulfilled_outcome(&request.url, *response));
+                self.deliver_fulfilled(id, *request, *response);
             }
             // `Default`, `CancelAuth`, or a bare continue: the 401/407 the
             // driver never saw goes through to the page unchanged.
@@ -1034,11 +1097,12 @@ impl NetService {
     ///
     /// `recv_deadline`, not `recv_timeout` in a loop: a decision for another id
     /// would otherwise restart the clock and extend the park without bound.
-    fn await_decision(&self, id: RequestId) -> Option<InterceptCommand> {
+    /// `deadline` is shared by every pause of one blocking operation — see
+    /// [`NetService::run_blocking`].
+    fn await_decision(&self, id: RequestId, deadline: Instant) -> Option<InterceptCommand> {
         if let Some(command) = self.take_deferred(id) {
             return Some(command);
         }
-        let deadline = Instant::now() + DEFAULT_INTERCEPT_TIMEOUT;
         loop {
             match self.decisions.recv_deadline(deadline) {
                 Ok(command) if command.request_id() == id => {
@@ -1114,6 +1178,7 @@ impl NetService {
     pub fn finish(&self, id: RequestId) {
         self.cancels.borrow_mut().remove(&id);
         self.retry_auth.borrow_mut().remove(&id);
+        self.fulfilled_hops.borrow_mut().remove(&id);
     }
 
     /// Runs a fetch to completion synchronously, blocking the page thread
@@ -1143,26 +1208,49 @@ impl NetService {
     /// rather than on a `NetEvent`. This is the path the top-level document
     /// takes, which is the one request a driver most wants to intercept.
     fn run_blocking(&self, id: RequestId, mut request: NetRequest) -> NetResult<FetchOutcome> {
-        if self.is_offline_for(&request) {
-            return Err(offline_error());
-        }
+        // **One budget for the whole operation**, not one per pause. A single
+        // request can park twice — at the request pause and again at the auth
+        // pause — and two independent 20 s waits exceed the engine's 30 s
+        // command timeout, so the driver was told its `Page.navigate` had timed
+        // out while the load was still going. The bound this constant documents
+        // is only true if it is measured once.
+        let deadline = Instant::now() + DEFAULT_INTERCEPT_TIMEOUT;
         let intercepted = self.intercepts(&request);
         if intercepted {
             self.announce_pause(id, &request);
-            match self.await_decision(id) {
+            match self.await_decision(id, deadline) {
                 Some(InterceptCommand::Continue { overrides, .. }) => {
                     apply_overrides(&mut request, &overrides);
                 }
                 Some(InterceptCommand::Fulfill { response, .. }) => {
-                    return Ok(fulfilled_outcome(&request.url, *response));
+                    // A stubbed redirect is followed here too — this is the
+                    // document path, where a bodyless 302 is a blank page.
+                    match fulfilled_redirect_target(&request.url, &response) {
+                        Some(target) => {
+                            if matches!(response.status, 301..=303) && request.method != "HEAD" {
+                                request.method = String::from("GET");
+                                request.body = None;
+                            }
+                            request.url = target;
+                        }
+                        None => return Ok(fulfilled_outcome(&request.url, *response)),
+                    }
                 }
                 Some(InterceptCommand::Fail { error, .. }) => {
-                    return Err(NetError::new(oxidepage_base::NetErrorKind::Blocked, error));
+                    // `wire`, as on the async path: this is the driver's own
+                    // `errorReason` rendered as Chrome's `net::ERR_…` name, and
+                    // it comes back to the driver as `Page.navigate.errorText`.
+                    return Err(NetError::wire(oxidepage_base::NetErrorKind::Blocked, error));
                 }
                 // An auth answer at a request pause, or the timeout: proceed
                 // unmodified, which is the release answer (D7).
                 Some(InterceptCommand::Auth { .. }) | None => {}
             }
+        }
+        // The offline gate, applied after the pause so a driver could fulfil or
+        // fail the request itself (both return above).
+        if self.is_offline_for(&request) {
+            return Err(offline_error());
         }
         let mut outcome = self.block_on_fetch(&request)?;
         // The retry is a *second pause* under the same id, not a new mechanism.
@@ -1177,12 +1265,13 @@ impl NetService {
                 if let Some(InterceptCommand::Auth {
                     response: AuthResponse::Provide { username, password },
                     ..
-                }) = self.await_decision(id)
+                }) = self.await_decision(id, deadline)
                 {
                     // Exactly one retry, as on the async path: a server that
                     // refuses the credentials re-challenges, and looping here
                     // would hold the page thread for as long as it kept saying
                     // no. The second 401 is what the page then sees.
+                    retarget_to_challenger(&mut request, &outcome.head.final_url);
                     apply_basic_auth(&mut request, challenge.source, &username, &password);
                     outcome = self.block_on_fetch(&request)?;
                 }
@@ -1235,6 +1324,28 @@ fn emit_outcome(tx: &Sender<NetEvent>, id: RequestId, outcome: FetchOutcome) {
     let _ = tx.send(NetEvent::Done { id });
 }
 
+/// Most redirects a driver may stub before the chain is refused.
+const MAX_FULFILLED_REDIRECTS: u32 = 20;
+
+/// The `Location` a fulfilled redirect names, resolved against the request URL.
+///
+/// `None` when the response is not a redirect, or names no usable target — in
+/// which case the fulfilled response is delivered as-is, which is what a driver
+/// stubbing a bare 3xx asked for.
+fn fulfilled_redirect_target(request_url: &str, response: &FulfilledResponse) -> Option<String> {
+    if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let location = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+        .map(|(_, value)| value.as_str())?;
+    let base = url::Url::parse(request_url).ok()?;
+    let target = base.join(location).ok()?;
+    (target.as_str() != request_url).then(|| target.to_string())
+}
+
 /// Builds the response a driver fabricated.
 ///
 /// **`ResponseType::Basic`**, deliberately (ADR-0032 D5): it lets script read a
@@ -1275,10 +1386,32 @@ fn apply_overrides(request: &mut NetRequest, overrides: &RequestOverrides) {
         request.method.clone_from(method);
     }
     if let Some(headers) = &overrides.headers {
-        request.headers.clone_from(headers);
+        // Into `header_overrides`, **not** `headers`. The latter is the script
+        // slot and is filtered by the forbidden list and the `no-cors` CORS
+        // safelist — rules about what a *page* may set. A subresource is
+        // `RequestMode::NoCors`, so a driver's `x-trace`, `user-agent` or
+        // `referer` override silently vanished on every `<img>`/`<script>`
+        // while working on documents (the same reasoning as `auth`, ADR-0032 D8).
+        request.header_overrides = Some(headers.clone());
     }
     if let Some(body) = &overrides.post_data {
         request.body = Some(body.clone());
+    }
+}
+
+/// Re-points a retry at the URL that actually issued the challenge.
+///
+/// `FetchEngine::fetch` follows redirects internally, so the request handed to
+/// it names the *first* hop while the 401/407 comes from `final_url`. Retrying
+/// the original URL sends the credentials to the wrong origin — and
+/// `fetch::strip_auth_on_cross_origin` then removes them at the redirect, so the
+/// challenging server never sees them at all and the page gets the 401 back
+/// however correct the credentials were.
+///
+/// A no-op when nothing redirected, which is the common case.
+fn retarget_to_challenger(request: &mut NetRequest, final_url: &str) {
+    if request.url != final_url {
+        request.url = final_url.to_owned();
     }
 }
 
@@ -1312,7 +1445,7 @@ fn is_http_scheme(url: &str) -> bool {
 
 /// Chrome's error for a request made while network emulation says offline.
 fn offline_error() -> NetError {
-    NetError::new(
+    NetError::wire(
         oxidepage_base::NetErrorKind::Io,
         "net::ERR_INTERNET_DISCONNECTED",
     )

@@ -156,17 +156,26 @@ impl Page {
     /// A live value that is not a node wrapper is a [`RemoteError::WrongType`],
     /// never a panic — the id comes off the wire.
     pub fn node_for_object(&self, object_id: u64) -> Result<NodeId, RemoteError> {
-        let value = self
-            .state
-            .remote_objects
-            .borrow()
-            .get(object_id)
+        // Routed to the world that minted the handle: the value is a
+        // `Persistent` of that runtime, and reading it anywhere else fails the
+        // brand check (ADR-0033 D1).
+        let world = self
+            .shared
+            .object_world(object_id)
             .ok_or(RemoteError::NoSuchObject(object_id))?;
-        self.with_cx(|cx| cx.this_node(&value)).map_err(|_| {
-            RemoteError::WrongType(String::from(
-                "Node with given id does not belong to the document",
-            ))
-        })
+        let value = self
+            .worlds
+            .get(world)
+            .and_then(|w| w.state())
+            .and_then(|state| state.remote_objects.borrow().get(object_id))
+            .ok_or(RemoteError::NoSuchObject(object_id))?;
+        self.with_cx_in(world, |cx| cx.this_node(&value))
+            .unwrap_or(Err(oxidepage_js::JsThrow::Type("no such world".into())))
+            .map_err(|_| {
+                RemoteError::WrongType(String::from(
+                    "Node with given id does not belong to the document",
+                ))
+            })
     }
 
     /// Mints a remote object handle for `node` — CDP's `DOM.resolveNode`.
@@ -179,21 +188,49 @@ impl Page {
         node: NodeId,
         group: Option<&str>,
     ) -> Result<RemoteObject, RemoteError> {
-        let object = self.with_cx(|cx| {
-            let value = cx.node_to_js(node).map_err(|_| {
-                RemoteError::WrongType(String::from(
-                    "Node with given id does not belong to the document",
+        self.node_object_in(node, None, group)
+    }
+
+    /// Mints the handle in the world a `Runtime.ExecutionContextId` names.
+    ///
+    /// ADR-0031 D3 validated this id and then ignored it, because there was one
+    /// world under many names. ADR-0033 supersedes that: `DOM.resolveNode`'s
+    /// `executionContextId` now selects the world, which is what makes
+    /// Puppeteer's and Playwright's `adoptBackendNode` hand back a handle their
+    /// utility world can actually call.
+    pub fn node_object_in(
+        &self,
+        node: NodeId,
+        context_id: Option<u64>,
+        group: Option<&str>,
+    ) -> Result<RemoteObject, RemoteError> {
+        let world = match context_id {
+            None => oxidepage_bindings::MAIN_WORLD,
+            Some(id) => self.world_id_by_context(id).ok_or_else(|| {
+                RemoteError::WrongType(String::from("Cannot find context with specified id"))
+            })?,
+        };
+        let object = self
+            .with_cx_in(world, |cx| {
+                let value = cx.node_to_js(node).map_err(|_| {
+                    RemoteError::WrongType(String::from(
+                        "Node with given id does not belong to the document",
+                    ))
+                })?;
+                Ok(describe(
+                    cx,
+                    &value,
+                    RemoteOptions {
+                        by_value: false,
+                        group,
+                    },
                 ))
+            })
+            .unwrap_or_else(|| {
+                Err(RemoteError::WrongType(String::from(
+                    "the execution context could not be entered",
+                )))
             })?;
-            Ok(describe(
-                cx,
-                &value,
-                RemoteOptions {
-                    by_value: false,
-                    group,
-                },
-            ))
-        })?;
         // A node wrapper is an object, so an absent `objectId` can only mean the
         // handle table is full — the same read `remote::describe` does.
         if object.object_id.is_none() {

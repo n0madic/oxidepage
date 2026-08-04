@@ -71,7 +71,7 @@ impl Default for ScreenshotOptions {
 }
 
 /// Cached display list plus the paint stamp it was built for. Lives on the
-/// [`Page`] (not the bindings' `PageState`) so it survives realm teardown.
+/// [`Page`] (not the bindings' `WorldState`) so it survives realm teardown.
 #[derive(Default)]
 pub(crate) struct RenderState {
     cache: RefCell<Option<Arc<DisplayList>>>,
@@ -264,14 +264,22 @@ impl Page {
         let callbacks = self.hooks.take_raf_callbacks();
         if !callbacks.is_empty() {
             let timestamp = self.start_time.get().elapsed().as_secs_f64() * 1000.0;
-            self.with_cx(|cx| {
-                for (id, callback) in &callbacks {
-                    if self.hooks.take_raf_cancelled(*id) {
-                        continue;
-                    }
-                    oxidepage_bindings::fire_raf_callback(cx, callback, timestamp);
+            // Grouped by world so each is entered once, main world first.
+            // A callback is a `JsValue` of the world that registered it and can
+            // be invoked nowhere else (ADR-0033 D5).
+            for world in self.worlds.all() {
+                if !callbacks.iter().any(|(_, w, _)| *w == world.id) {
+                    continue;
                 }
-            });
+                self.with_cx_in(world.id, |cx| {
+                    for (id, w, callback) in &callbacks {
+                        if *w != world.id || self.hooks.take_raf_cancelled(*id) {
+                            continue;
+                        }
+                        oxidepage_bindings::fire_raf_callback(cx, callback, timestamp);
+                    }
+                });
+            }
         }
         self.flush_layout();
         if self.render.consumer.get() {

@@ -1,13 +1,13 @@
 //! Per-page bindings state: the DOM tree, the host-object table, wrapper
 //! bookkeeping, listener and observer registries, and embedder hooks.
 //!
-//! `PageState` is installed into the realm as its host state; host callbacks
+//! `WorldState` is installed into the realm as its host state; host callbacks
 //! retrieve it through the scope instead of capturing it, so no JS object
 //! ever holds a strong reference back to the page (see `oxidepage-js` docs).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use oxidepage_base::{NodeId, RequestId};
 use oxidepage_dom::observer::MutationObserverId;
@@ -53,9 +53,14 @@ pub trait HostHooks {
     /// where HTML's "pause the page" comes from — the event loop never
     /// regains control while the dialog is open.
     fn run_dialog(&self, request: DialogRequest) -> DialogResponse;
-    /// Schedules a timer; returns its id.
+    /// Schedules a timer in `world`; returns its id.
+    ///
+    /// The world is carried because the callback is a `JsValue` of that world
+    /// and can be invoked nowhere else (ADR-0033 D5). Ids stay page-global, so
+    /// `clearTimeout` needs no world.
     fn schedule_timer(
         &self,
+        world: WorldId,
         callback: JsValue,
         args: Vec<JsValue>,
         delay_ms: f64,
@@ -63,9 +68,9 @@ pub trait HostHooks {
     ) -> f64;
     fn clear_timer(&self, id: f64);
 
-    /// `requestAnimationFrame`: registers `callback` to run at the next
-    /// rendering opportunity; returns its id.
-    fn request_animation_frame(&self, callback: JsValue) -> f64;
+    /// `requestAnimationFrame`: registers `callback` to run in `world` at the
+    /// next rendering opportunity; returns its id.
+    fn request_animation_frame(&self, world: WorldId, callback: JsValue) -> f64;
     /// `cancelAnimationFrame`: cancels a pending animation-frame callback.
     fn cancel_animation_frame(&self, id: f64);
 
@@ -131,13 +136,13 @@ pub(crate) enum HostData {
     Navigator(Rc<NavigatorData>),
     Screen(Rc<ScreenData>),
     Performance,
-    /// `performance.timing` (state lives in [`PageState::timing`]).
+    /// `performance.timing` (state lives in [`WorldState::timing`]).
     PerformanceTiming,
     /// `document.fonts` (one per document; state lives in
-    /// [`PageState::fonts_loading`]/[`PageState::font_ready_resolvers`]).
+    /// [`WorldState::fonts_loading`]/[`WorldState::font_ready_resolvers`]).
     FontFaceSet,
     /// The single `window.customElements` registry brand (state lives in
-    /// [`PageState::custom_elements`]).
+    /// [`WorldState::custom_elements`]).
     CustomElementRegistry,
     MediaQueryList(Rc<MediaQueryListData>),
     /// A handle on a sibling browsing context (`window.open`'s return value).
@@ -211,7 +216,7 @@ pub(crate) enum HostData {
     /// the document URL, which lives in the DOM tree.
     Location,
     /// `window.history`: a brand; the entry list lives in
-    /// [`PageState::history`].
+    /// [`WorldState::history`].
     History,
 }
 
@@ -220,7 +225,7 @@ pub(crate) enum HostData {
 /// Navigation cannot happen inline: a `location.href` write runs under live
 /// `RefCell` borrows on the DOM, style and layout engines, and committing a
 /// document replaces all three. So it is a task source, drained by the page's
-/// event loop exactly like [`PageState::pending_scroll_targets`].
+/// event loop exactly like [`WorldState::pending_scroll_targets`].
 pub enum PendingNavigation {
     /// A load of `url`, which is already absolute. `replace` overwrites the
     /// current session-history entry instead of pushing a new one.
@@ -230,6 +235,16 @@ pub enum PendingNavigation {
         body: Option<NavigationBody>,
         /// `location.reload()`: skip the HTTP cache.
         reload: bool,
+        /// `<a download>`: this navigation is a download request, and the
+        /// payload is the attribute's value — the author's suggested filename,
+        /// empty when the attribute was bare.
+        ///
+        /// `Some` makes the response a download **whatever** its
+        /// `Content-Disposition` says, which is what the attribute means and
+        /// what Chrome does for a same-origin link. It does not decide whether
+        /// anything is *written*: that is still the operator's
+        /// `DownloadBehavior`, which denies by default.
+        download: Option<String>,
     },
     /// `history.go(delta)`. The entry list lives here in the bindings, but a
     /// traversal may need a document load, so the page performs the move.
@@ -251,9 +266,16 @@ pub struct NavigationBody {
 /// One session-history entry.
 pub struct HistoryEntry {
     pub url: String,
-    /// The `history.state` for this entry (a structured clone taken at
-    /// `pushState`/`replaceState` time).
-    pub state: JsValue,
+    /// The `history.state` for this entry, as JSON text; `None` reads back as
+    /// `null`.
+    ///
+    /// **Not a `JsValue`** (ADR-0033 D3). The session history is page-level and
+    /// outlives any one world, so holding a live handle would both pin one
+    /// world's object graph from `PageShared` — the invariant that keeps
+    /// teardown from aborting in `JS_FreeRuntime` — and make `history.state`
+    /// readable in exactly one world. Serialized, every world materializes its
+    /// own copy, which is also what the spec's structured clone implies.
+    pub state: Option<String>,
     /// Which loaded document this entry belongs to. Traversing to an entry
     /// whose sequence differs from the current one needs a document load.
     pub document_seq: u64,
@@ -261,8 +283,8 @@ pub struct HistoryEntry {
 
 /// The session history of the page's one browsing context.
 ///
-/// Bounded on purpose: an entry holds a live `JsValue` state across
-/// navigations, so an unbounded list is an unbounded JS retention.
+/// Bounded on purpose: an entry holds a serialized state across navigations, so
+/// an unbounded list is unbounded retention.
 pub struct SessionHistory {
     entries: Vec<HistoryEntry>,
     index: usize,
@@ -279,7 +301,7 @@ pub struct SessionHistory {
 /// front (the index moves with them), which is what a browser's own cap does.
 pub const MAX_HISTORY_ENTRIES: usize = 50;
 
-/// The deepest [`PageState::pending_navigation`] queue. Requests past it are
+/// The deepest [`WorldState::pending_navigation`] queue. Requests past it are
 /// dropped: the page performs at most `MAX_CHAINED_NAVIGATIONS` off one entry
 /// point regardless, so anything queueing more than this in a single task is a
 /// runaway loop rather than a page with intent.
@@ -290,7 +312,7 @@ impl SessionHistory {
         Self {
             entries: vec![HistoryEntry {
                 url,
-                state: JsValue::Null,
+                state: None,
                 document_seq: 0,
             }],
             index: 0,
@@ -359,7 +381,7 @@ impl SessionHistory {
 
     /// Pushes a new entry after truncating everything forward of the current
     /// one, and returns the new index.
-    pub fn push(&mut self, url: String, state: JsValue, document_seq: u64) {
+    pub fn push(&mut self, url: String, state: Option<String>, document_seq: u64) {
         self.entries.truncate(self.index + 1);
         self.entries.push(HistoryEntry {
             url,
@@ -371,7 +393,7 @@ impl SessionHistory {
     }
 
     /// Overwrites the current entry (`replaceState`, `location.replace()`).
-    pub fn replace(&mut self, url: String, state: JsValue, document_seq: u64) {
+    pub fn replace(&mut self, url: String, state: Option<String>, document_seq: u64) {
         if let Some(entry) = self.entries.get_mut(self.index) {
             entry.url = url;
             entry.state = state;
@@ -414,9 +436,6 @@ pub struct NavigatorData {
     pub hardware_concurrency: u64,
     pub webdriver: bool,
     pub max_touch_points: u32,
-    pub(crate) languages_js: RefCell<Option<JsValue>>,
-    pub(crate) plugins_js: RefCell<Option<JsValue>>,
-    pub(crate) mime_types_js: RefCell<Option<JsValue>>,
 }
 
 impl NavigatorData {
@@ -438,9 +457,6 @@ impl NavigatorData {
             hardware_concurrency,
             webdriver,
             max_touch_points,
-            languages_js: RefCell::new(None),
-            plugins_js: RefCell::new(None),
-            mime_types_js: RefCell::new(None),
         }
     }
 }
@@ -553,7 +569,7 @@ pub struct DocumentTiming {
     pub load_event_end: f64,
 }
 
-/// A document-lifecycle milestone the page records on [`PageState::timing`].
+/// A document-lifecycle milestone the page records on [`WorldState::timing`].
 #[derive(Clone, Copy, Debug)]
 pub enum TimingMilestone {
     /// Navigation began: collapses `navigationStart` through `responseStart`
@@ -637,6 +653,10 @@ pub(crate) struct JsRefs {
     /// Pristine `structuredClone` (page script may replace the global one),
     /// used to clone `history.pushState`/`replaceState` state values.
     pub structured_clone: JsValue,
+    /// Pristine `JSON.stringify` / `JSON.parse`, for the serialized
+    /// `history.state` round trip (ADR-0033 D3).
+    pub json_stringify: JsValue,
+    pub json_parse: JsValue,
     /// `() => {promise, resolve, reject}` (deferred-promise construction).
     pub make_promise: JsValue,
     /// `(value) => Promise.resolve(value)`.
@@ -710,7 +730,7 @@ pub(crate) struct RoTarget {
 
 /// A registered `ResizeObserver`. The callback and wrapper are held for the
 /// page's lifetime (the accepted `MediaQueryListData` wrapper-cycle leak class);
-/// the registry in [`PageState::resize_observers`] is cleared on navigation so
+/// the registry in [`WorldState::resize_observers`] is cleared on navigation so
 /// stale `NodeId`s are never delivered against the new document.
 pub(crate) struct ResizeObserverData {
     pub callback: JsValue,
@@ -817,14 +837,252 @@ pub(crate) struct ObserverEntry {
     pub callback: JsValue,
 }
 
-/// All bindings state for one page/realm pair.
-pub struct PageState {
+/// Dense index of an execution world within a page; `MAIN_WORLD` is the page's
+/// own world (ADR-0033).
+///
+/// Deliberately **not** part of any embedder-facing API. A `WorldId` is reused
+/// when a world is rebuilt at a commit, so a stale one would silently name a
+/// live world; the monotonic `context_id` is what crosses the thread boundary
+/// (D10), where a stale value is a clean error.
+pub type WorldId = usize;
+
+/// The main world: page script, inline event handlers, custom elements, and
+/// every task source the DOM drives (script updates, custom-element reactions,
+/// activation behaviour) run here.
+pub const MAIN_WORLD: WorldId = 0;
+
+/// A script run at the start of every new document
+/// (CDP `Page.addScriptToEvaluateOnNewDocument`).
+///
+/// Page-level, and deliberately **not** cleared on navigation: surviving a
+/// navigation is the whole point. Each carries the world it belongs to, so a
+/// driver's `worldName` script runs in its utility world and nowhere else.
+#[derive(Clone, Debug)]
+pub struct InitScript {
+    pub id: u64,
+    pub source: String,
+    /// `None` — or `Some("")` — is the main world.
+    pub world: Option<String>,
+}
+
+/// A payload an `addBinding` function handed back, tagged with the context id
+/// of the world it was called from so `Runtime.bindingCalled` attributes it
+/// correctly instead of guessing the main world.
+#[derive(Clone, Debug)]
+pub struct BindingCall {
+    pub name: String,
+    pub payload: String,
+    pub context_id: u64,
+}
+
+/// Enters another world from a host callback (ADR-0033 D4).
+///
+/// `bindings` must not depend on `page`, so the page's world table implements
+/// this and [`PageShared`] holds a [`Weak`] to it. The `Weak` is load-bearing:
+/// a strong edge would close the `Page` → `WorldTable` → realm → `WorldState`
+/// → `PageShared` cycle, leak every runtime, and turn a dropped page into the
+/// `JS_FreeRuntime` abort.
+pub trait WorldEnter {
+    /// Runs `f` with a [`crate::cx::BindCx`] bound to `world`.
+    ///
+    /// Returns `false` — the call skipped, never retried — when the world is
+    /// gone, is **already on the stack** (entering a live `Context` twice is a
+    /// `BorrowMutError`), or the nesting cap is hit.
+    fn enter(&self, world: WorldId, f: &mut dyn FnMut(&crate::cx::BindCx<'_>)) -> bool;
+    /// Live world ids, **main first**, then creation order — the cross-world
+    /// listener order rule (D6).
+    fn world_ids(&self) -> Vec<WorldId>;
+    /// Whether `world` has any listener for `event_type` on `target`.
+    ///
+    /// A plain map read on the page thread: **no scope is entered**, which is
+    /// what keeps cross-world dispatch free for a page whose utility worlds are
+    /// idle. Entering a world to discover it had nothing to do would cost a
+    /// realm entry per node per phase.
+    fn has_listener(
+        &self,
+        world: WorldId,
+        target: crate::events::EventTargetKey,
+        event_type: &str,
+    ) -> bool;
+}
+
+/// Page-level bindings state: everything that is one-per-*document* rather
+/// than one-per-*world* (ADR-0033 D3).
+///
+/// **Holds no `JsValue`.** That is the invariant that makes teardown tractable
+/// with one `Runtime` per world: a `Persistent` outliving its runtime aborts
+/// the process in `JS_FreeRuntime`, and a page-level container could otherwise
+/// hold values from several worlds at once. `SessionHistory` was the one
+/// violator and now stores serialized state (D3/D5); the only page-level owner
+/// of JS values left is `LoopHooks`, whose timer and rAF callbacks each carry
+/// the world that created them.
+pub struct PageShared {
     /// The document tree, shared with the parser during loads.
     pub dom: Rc<RefCell<DomTree>>,
     /// The style engine (stylo): document stylesheet set + computed values.
     pub style: Rc<RefCell<StyleEngine>>,
     /// The layout engine (box tree + taffy/parley): backs the geometry APIs.
     pub layout: Rc<RefCell<LayoutEngine>>,
+    pub(crate) hooks: Rc<dyn HostHooks>,
+    /// Immutable Navigator profile associated with this realm.
+    pub(crate) navigator: Rc<NavigatorData>,
+    /// Immutable Screen profile and its realm-stable wrapper.
+    pub(crate) screen: Rc<ScreenData>,
+    /// This document's identity among the subscribers of its storage areas, so
+    /// a `storage` event is delivered to the *other* documents and never back
+    /// to the one that wrote (HTML).
+    pub(crate) storage_subscriber: crate::storage::StorageSubscriber,
+    /// Scroll containers whose position changed from script (`None` = the
+    /// viewport); the page's event loop drains this and dispatches `scroll`
+    /// events as tasks.
+    pub(crate) pending_scroll_targets: RefCell<Vec<Option<oxidepage_base::NodeId>>>,
+    /// The navigations script has asked for and the page has not yet performed,
+    /// in the order they were requested.
+    ///
+    /// A **queue**, not a single slot. Only a `Load` superseding a queued `Load`
+    /// collapses (`location.href = a; location.href = b` navigates once, to `b`,
+    /// as a browser does); a traversal is *cumulative* — `history.back();
+    /// history.back()` must move two entries — and a `javascript:` URL is a
+    /// script to run, so neither may be swallowed by whatever was queued next.
+    pub(crate) pending_navigation: RefCell<VecDeque<PendingNavigation>>,
+    /// The session history of this browsing context, shared by
+    /// `history.pushState`/`go()` and the page's navigation driver.
+    pub(crate) history: RefCell<SessionHistory>,
+    /// `document.referrer`: the URL of the document this one was navigated
+    /// from, written by the page at commit time.
+    pub(crate) referrer: RefCell<String>,
+    /// HTML's **firing submission events** flag: set only while the `submit`
+    /// event of a submission is being dispatched, so a `requestSubmit()` or a
+    /// submit-button activation raised from inside `onsubmit` cannot recurse
+    /// forever. `form.submit()` fires no event and is not blocked by it, which
+    /// is what makes validate-then-submit work.
+    pub(crate) firing_submission_events: Cell<bool>,
+    /// While the parser holds handles into the tree, detached subtrees must
+    /// not be freed under it.
+    pub(crate) parsing: Cell<bool>,
+    /// `document.readyState`, driven by [`WorldState::mark_timing`].
+    pub(crate) ready_state: Cell<ReadyState>,
+    /// True only while a parser-inserted classic script is evaluating.
+    pub(crate) parser_script_active: Cell<bool>,
+    /// Text produced by `document.write` during the current parser script.
+    pub(crate) pending_parser_write: RefCell<String>,
+    /// Per-document bounds for parser writes.
+    pub(crate) parser_write_calls: Cell<usize>,
+    pub(crate) parser_write_bytes: Cell<usize>,
+    /// `console.group` nesting depth. Grouping has no other observable effect
+    /// in a headless console, so the depth *is* the feature — it rides on
+    /// every `ConsoleMessage` and the CLI indents by it.
+    pub(crate) console_group_depth: Cell<u32>,
+    /// The classic `<script>` element whose source is currently evaluating.
+    /// Modules and callbacks outside direct script evaluation observe `None`.
+    pub current_script: Cell<Option<NodeId>>,
+    /// Mirrors `Page::pending_fonts.is_empty()` (the page owns the actual
+    /// in-flight `@font-face` loads; it writes this directly through its
+    /// `Rc<WorldState>` whenever that set changes — `pub`, unlike this
+    /// struct's other bindings-internal cells, because the page crate sets
+    /// it). Backs `FontFaceSet.status` and the synchronous-resolve check in
+    /// `ready`.
+    pub fonts_loading: Cell<bool>,
+    /// Document navigation/timing milestones behind `performance.timing`.
+    pub(crate) timing: RefCell<DocumentTiming>,
+    /// Time origin for `Event.timeStamp` (and later `performance.now`).
+    pub(crate) start: std::time::Instant,
+    /// Wall-clock timestamp paired with `start`, in Unix milliseconds.
+    pub(crate) time_origin_epoch_ms: f64,
+    /// Whether the whole document counts as the visible region for an
+    /// `IntersectionObserver` with the implicit (viewport) root, instead of
+    /// just the viewport rectangle.
+    ///
+    /// Off by default — the viewport is the root, as the spec says. An embedder
+    /// rendering the *whole document* (a full-page screenshot, a PDF) turns it
+    /// on, because there the page below the fold is not "not yet seen": it is
+    /// in the output. Script gates real content on this (a sponsor grid that
+    /// only renders once observed), so with the viewport root that content is
+    /// simply missing from the capture — the same failure `lazy_images` +
+    /// `Page::load_deferred_images` already solve for `<img>`.
+    pub(crate) whole_document_visible: Cell<bool>,
+    /// Scripts run at the start of every new document, in insertion order.
+    ///
+    /// Deliberately **not** cleared by `reset_for_navigation`: the whole point
+    /// is that they survive navigation. That is what makes a driver's
+    /// `exposeFunction` and `evaluateOnNewDocument` still be there on the next
+    /// page (CDP `Page.addScriptToEvaluateOnNewDocument`).
+    pub init_scripts: RefCell<Vec<InitScript>>,
+    pub next_init_script: Cell<u64>,
+    /// Payloads delivered by `Runtime.addBinding` functions, drained by the
+    /// page into `Runtime.bindingCalled`.
+    pub binding_calls: RefCell<VecDeque<BindingCall>>,
+    /// The page's world registry, main world first then creation order.
+    ///
+    /// Ids only, deliberately: a world's name and `context_id` live on the
+    /// world table and on the live [`WorldState::context_id`], and mirroring
+    /// them here bought nothing but drift — `reset_for_navigation` mints a new
+    /// context id on the `Cell` and a copy stored here would keep answering
+    /// with the dead one.
+    pub(crate) worlds: RefCell<Vec<WorldId>>,
+    /// Mints `Runtime.ExecutionContextId`s. Monotonic across documents *and*
+    /// worlds, which is what `ISOLATED_WORLD_ID_OFFSET` was faking (D10).
+    pub(crate) next_context_id: Cell<u64>,
+    /// `Runtime.addBinding` registrations, `(name, world name)`. Re-applied to
+    /// every world at every commit, because a commit rebuilds the worlds.
+    pub(crate) bindings: RefCell<Vec<(String, Option<String>)>>,
+    /// Which world started each in-flight `fetch`/XHR, so a `NetEvent` is
+    /// delivered to the world whose promise is waiting on it.
+    pub(crate) net_world: RefCell<HashMap<RequestId, WorldId>>,
+    /// Append-only connectivity log behind ADR-0018's retention guarantee.
+    ///
+    /// `DomTree::take_pinned_connectivity` is destructive, so with N worlds the
+    /// first to drain would starve every other and the expando guarantee would
+    /// silently break for the rest (ADR-0033 D7). Each entry is
+    /// `(sequence, node, connected)`; a world consumes from its own cursor and
+    /// the log is trimmed below the minimum live cursor.
+    pub(crate) connectivity: RefCell<VecDeque<(u64, NodeId, bool)>>,
+    pub(crate) connectivity_seq: Cell<u64>,
+    /// How far each live world has consumed the log. Kept here rather than on
+    /// `WorldState` because trimming needs the *minimum* across worlds, and a
+    /// world cannot read another world's state. A torn-down world's entry is
+    /// removed, so it never holds the trim back.
+    pub(crate) conn_cursors: RefCell<HashMap<WorldId, u64>>,
+    /// Mints page-unique `objectId`s (see `next_object_id`).
+    pub(crate) next_object_id: Cell<u64>,
+    /// Which world's object store holds each live `objectId`, so a handle is
+    /// always called in the world that owns it (ADR-0033 D10).
+    pub(crate) object_worlds: RefCell<HashMap<u64, WorldId>>,
+    /// Reaches another world's realm from a host callback. **Weak**: a strong
+    /// edge would close the `Page -> WorldTable -> realm -> WorldState ->
+    /// PageShared` cycle and leak every runtime (D4).
+    pub(crate) enter: RefCell<Weak<dyn WorldEnter>>,
+}
+
+/// All bindings state for one *world* — one `Runtime`, one `Context`, one
+/// global (ADR-0033 D1). This is what `realm.set_state` installs and what
+/// `BindCx.state` points at.
+///
+/// It keeps `Rc`-clones of `dom`, `style`, `layout` and `hooks` so the ~334
+/// `cx.state.dom` / `.style` / `.layout` / `.hooks` sites across `imp/` read
+/// identically whichever world they run in; page-level state is one hop away
+/// through [`WorldState::page`].
+pub struct WorldState {
+    /// State shared with every other world of this page.
+    pub page: Rc<PageShared>,
+    /// This world's dense index; `MAIN_WORLD` for the page's own world.
+    pub id: WorldId,
+    /// `""` for the main world, else the name a driver created it under.
+    pub name: String,
+    /// CDP's `Runtime.ExecutionContextId` for this world, re-minted on every
+    /// commit because a commit rebuilds the world against a fresh global.
+    pub context_id: Cell<u64>,
+    /// The document tree, shared with the parser during loads.
+    pub dom: Rc<RefCell<DomTree>>,
+    /// The style engine (stylo): document stylesheet set + computed values.
+    pub style: Rc<RefCell<StyleEngine>>,
+    /// The layout engine (box tree + taffy/parley): backs the geometry APIs.
+    pub layout: Rc<RefCell<LayoutEngine>>,
+    pub(crate) hooks: Rc<dyn HostHooks>,
+    /// Immutable Navigator profile associated with this realm.
+    pub(crate) navigator: Rc<NavigatorData>,
+    /// Immutable Screen profile and its realm-stable wrapper.
+    pub(crate) screen: Rc<ScreenData>,
     pub(crate) slab: RefCell<Slab>,
     pub(crate) js: RefCell<Option<JsRefs>>,
     pub(crate) listeners: RefCell<ListenerRegistry>,
@@ -846,75 +1104,22 @@ pub struct PageState {
     /// wrapper. The generation guards against a freed node's index being reused
     /// by a different node inheriting a stale cached wrapper.
     pub(crate) same_object: RefCell<HashMap<(u32, u32, &'static str), JsValue>>,
-    pub(crate) hooks: Rc<dyn HostHooks>,
-    /// This document's identity among the subscribers of its storage areas, so
-    /// a `storage` event is delivered to the *other* documents and never back
-    /// to the one that wrote (HTML).
-    pub(crate) storage_subscriber: crate::storage::StorageSubscriber,
     /// Every `Storage` handle installed in this realm, so a navigation can
     /// re-point them all at the new origin's areas (see `refresh_storage`).
     pub(crate) storage_handles: RefCell<Vec<Rc<StorageHandle>>>,
     /// In-flight `fetch`/XHR requests awaiting completion, keyed by id.
     pub(crate) pending_net: RefCell<HashMap<RequestId, PendingNet>>,
-    /// Scroll containers whose position changed from script (`None` = the
-    /// viewport); the page's event loop drains this and dispatches `scroll`
-    /// events as tasks.
-    pub(crate) pending_scroll_targets: RefCell<Vec<Option<oxidepage_base::NodeId>>>,
-    /// The navigations script has asked for and the page has not yet performed,
-    /// in the order they were requested.
-    ///
-    /// A **queue**, not a single slot. Only a `Load` superseding a queued `Load`
-    /// collapses (`location.href = a; location.href = b` navigates once, to `b`,
-    /// as a browser does); a traversal is *cumulative* — `history.back();
-    /// history.back()` must move two entries — and a `javascript:` URL is a
-    /// script to run, so neither may be swallowed by whatever was queued next.
-    pub(crate) pending_navigation: RefCell<VecDeque<PendingNavigation>>,
-    /// The session history of this browsing context, shared by
-    /// `history.pushState`/`go()` and the page's navigation driver.
-    pub(crate) history: RefCell<SessionHistory>,
-    /// `document.referrer`: the URL of the document this one was navigated
-    /// from, written by the page at commit time.
-    pub(crate) referrer: RefCell<String>,
     /// Realm-stable `location` / `history` wrappers (the `navigator_js`
     /// pattern: one object per realm, surviving navigation).
     pub(crate) location_js: RefCell<Option<JsValue>>,
     pub(crate) history_js: RefCell<Option<JsValue>>,
-    /// HTML's **firing submission events** flag: set only while the `submit`
-    /// event of a submission is being dispatched, so a `requestSubmit()` or a
-    /// submit-button activation raised from inside `onsubmit` cannot recurse
-    /// forever. `form.submit()` fires no event and is not blocked by it, which
-    /// is what makes validate-then-submit work.
-    pub(crate) firing_submission_events: Cell<bool>,
-    /// While the parser holds handles into the tree, detached subtrees must
-    /// not be freed under it.
-    pub(crate) parsing: Cell<bool>,
-    /// `document.readyState`, driven by [`PageState::mark_timing`].
-    pub(crate) ready_state: Cell<ReadyState>,
-    /// True only while a parser-inserted classic script is evaluating.
-    pub(crate) parser_script_active: Cell<bool>,
     /// The DOM spec's "mutation observer microtask queued" flag. Set when a
     /// record is queued and the compound microtask is enqueued; cleared when
     /// that microtask runs, so at most one is outstanding.
     pub(crate) mutation_microtask_queued: Cell<bool>,
-    /// Text produced by `document.write` during the current parser script.
-    pub(crate) pending_parser_write: RefCell<String>,
-    /// Per-document bounds for parser writes.
-    pub(crate) parser_write_calls: Cell<usize>,
-    pub(crate) parser_write_bytes: Cell<usize>,
-    /// `console.group` nesting depth. Grouping has no other observable effect
-    /// in a headless console, so the depth *is* the feature — it rides on
-    /// every `ConsoleMessage` and the CLI indents by it.
-    pub(crate) console_group_depth: Cell<u32>,
-    /// The classic `<script>` element whose source is currently evaluating.
-    /// Modules and callbacks outside direct script evaluation observe `None`.
-    pub current_script: Cell<Option<NodeId>>,
-    /// Immutable Navigator profile associated with this realm.
-    pub(crate) navigator: Rc<NavigatorData>,
     /// The realm's associated Navigator wrapper (`navigator` and
     /// `clientInformation` both return this exact object).
     pub(crate) navigator_js: RefCell<Option<JsValue>>,
-    /// Immutable Screen profile and its realm-stable wrapper.
-    pub(crate) screen: Rc<ScreenData>,
     pub(crate) screen_js: RefCell<Option<JsValue>>,
     /// Realm-stable `performance` wrapper.
     pub(crate) performance_js: RefCell<Option<JsValue>>,
@@ -924,13 +1129,6 @@ pub struct PageState {
     /// so — like `performance_js` — a single cell rather than a
     /// per-node `same_object` entry).
     pub(crate) font_face_set_js: RefCell<Option<JsValue>>,
-    /// Mirrors `Page::pending_fonts.is_empty()` (the page owns the actual
-    /// in-flight `@font-face` loads; it writes this directly through its
-    /// `Rc<PageState>` whenever that set changes — `pub`, unlike this
-    /// struct's other bindings-internal cells, because the page crate sets
-    /// it). Backs `FontFaceSet.status` and the synchronous-resolve check in
-    /// `ready`.
-    pub fonts_loading: Cell<bool>,
     /// `document.fonts.ready` promises stashed by `imp::font_face_set::ready`
     /// when it could not resolve synchronously (a font load is in flight, or
     /// the document is still parsing so more `@font-face` rules could still
@@ -939,11 +1137,9 @@ pub struct PageState {
     /// (`oxidepage_bindings::resolve_font_ready`).
     pub(crate) font_ready_resolvers: RefCell<Vec<JsValue>>,
     /// Pending `document.fonts.load(...)` promise resolvers, drained alongside
-    /// [`PageState::font_ready_resolvers`] once fonts settle. Each resolves with
+    /// [`WorldState::font_ready_resolvers`] once fonts settle. Each resolves with
     /// an (empty) `sequence<FontFace>`.
     pub(crate) font_load_resolvers: RefCell<Vec<JsValue>>,
-    /// Document navigation/timing milestones behind `performance.timing`.
-    pub(crate) timing: RefCell<DocumentTiming>,
     /// Live MediaQueryList objects created in this realm.
     pub(crate) media_queries: RefCell<Vec<Rc<MediaQueryListData>>>,
     /// Registered `ResizeObserver`s (delivery source), cleared on navigation.
@@ -951,10 +1147,18 @@ pub struct PageState {
     /// Registered `IntersectionObserver`s (delivery source), cleared on navigation.
     pub(crate) intersection_observers: RefCell<Vec<Rc<IntersectionObserverData>>>,
     /// Last observer-delivery gate stamp (skips reflow when nothing changed).
+    ///
+    /// **Per world**, next to the registries it gates. Page-level it was a
+    /// starvation bug: `deliver_observations` fans out over the worlds, the
+    /// main world's pass re-stamps the gate, and every world after it then
+    /// short-circuits — so an isolated world's `ResizeObserver` /
+    /// `IntersectionObserver` callbacks never fired at all whenever the main
+    /// world had an observer of its own.
     pub(crate) obs_gate: Cell<Option<ObsGate>>,
     /// Set by `observe()` to force exactly one geometry pass even when the gate
     /// is unchanged (the initial delivery of a freshly observed target). Cleared
     /// after that pass, so a boxless target does not keep the gate bypassed.
+    /// Per world, for the reason [`WorldState::obs_gate`] gives.
     pub(crate) obs_dirty: Cell<bool>,
     /// The HTML *named properties object*: it sits between `Window.prototype`
     /// and `EventTarget.prototype` in the window's prototype chain, and carries
@@ -984,20 +1188,6 @@ pub struct PageState {
     /// `Page`'s field order encodes. A store owned by a session on the driver's
     /// thread would outlive the realm it points into.
     pub remote_objects: RefCell<crate::remote::ObjectStore>,
-    /// CDP's `Runtime.ExecutionContextId`, bumped on every document commit so a
-    /// driver can tell a stale context from the live one.
-    pub execution_context_id: Cell<u64>,
-    /// Payloads delivered by `Runtime.addBinding` functions, drained by the
-    /// page into `Runtime.bindingCalled`.
-    pub binding_calls: RefCell<VecDeque<(String, String)>>,
-    /// Scripts run at the start of every new document, in insertion order.
-    ///
-    /// Deliberately **not** cleared by `reset_for_navigation`: the whole point
-    /// is that they survive navigation. That is what makes a driver's
-    /// `exposeFunction` and `evaluateOnNewDocument` still be there on the next
-    /// page (CDP `Page.addScriptToEvaluateOnNewDocument`).
-    pub init_scripts: RefCell<Vec<(u64, String)>>,
-    pub next_init_script: Cell<u64>,
     /// Strong references to the JS wrappers of *connected* nodes. The generic
     /// node-wrapper cache is weak, so a node kept alive only by tree
     /// connectedness (no JS reference to its wrapper) can have its wrapper GC'd
@@ -1013,38 +1203,53 @@ pub struct PageState {
     /// engine-side sheet routing lives in `StyleEngine`; this is only the JS
     /// view. Cleared on navigation.
     pub(crate) adopted_sheets: RefCell<HashMap<NodeId, JsValue>>,
-    /// Time origin for `Event.timeStamp` (and later `performance.now`).
-    pub(crate) start: std::time::Instant,
-    /// Wall-clock timestamp paired with `start`, in Unix milliseconds.
-    pub(crate) time_origin_epoch_ms: f64,
-    /// Whether the whole document counts as the visible region for an
-    /// `IntersectionObserver` with the implicit (viewport) root, instead of
-    /// just the viewport rectangle.
+    /// `navigator.languages` / `navigator.plugins` / `navigator.mimeTypes`,
+    /// cached per world.
     ///
-    /// Off by default — the viewport is the root, as the spec says. An embedder
-    /// rendering the *whole document* (a full-page screenshot, a PDF) turns it
-    /// on, because there the page below the fold is not "not yet seen": it is
-    /// in the output. Script gates real content on this (a sponsor grid that
-    /// only renders once observed), so with the viewport root that content is
-    /// simply missing from the capture — the same failure `lazy_images` +
-    /// `Page::load_deferred_images` already solve for `<img>`.
-    pub(crate) whole_document_visible: Cell<bool>,
+    /// These used to live on the shared `NavigatorData`, which was wrong twice
+    /// once there is more than one world: the value is a `JsValue` of whichever
+    /// world asked first, so a second world would get a foreign handle
+    /// (`restore` refuses it), and a page-level holder of JS values breaks the
+    /// teardown invariant (ADR-0033 D3).
+    pub(crate) languages_js: RefCell<Option<JsValue>>,
+    pub(crate) plugins_js: RefCell<Option<JsValue>>,
+    pub(crate) mime_types_js: RefCell<Option<JsValue>>,
+    /// Events whose subinterface payload holds a `JsValue` **of this world**,
+    /// held weakly (ADR-0033 D5).
+    ///
+    /// An `EventData` is shared by every world that wraps it, and a world's
+    /// slab is not cleared on navigation — so a main-world wrapper can keep a
+    /// utility world's `CustomEvent.detail` alive past that world's teardown,
+    /// and freeing the runtime under it aborts the process in
+    /// `JS_FreeRuntime`. `release_js` walks this and clears the values it owns
+    /// while the runtime is still alive. Weak, so an event nobody holds is
+    /// collected normally and this never keeps one alive.
+    pub(crate) owned_event_values: RefCell<Vec<std::rc::Weak<RefCell<crate::events::EventData>>>>,
+    /// This world's materialized `history.state`, keyed by the serialized text
+    /// it was parsed from, so `history.state === history.state` holds within a
+    /// world (ADR-0033 D5).
+    pub(crate) history_state_cache: RefCell<Option<(String, JsValue)>>,
+    /// Wrappers minted for nodes that were *disconnected* at mint time, held
+    /// until this world's next connectivity drain promotes them into
+    /// `connected_wrappers` or drops them.
+    ///
+    /// Closes the window where another world connects a node and triggers a GC
+    /// before this one next runs. It also fixes a latent single-world bug: a
+    /// node wrapped while detached and then connected by the *parser* could
+    /// lose its expandos to a GC before the deferred drain.
+    pub(crate) pending_conn: RefCell<HashMap<NodeId, JsValue>>,
 }
 
-impl PageState {
-    /// This document's identity among the subscribers of its storage areas.
+impl PageShared {
+    /// Builds the page-level half, including the engines every world shares.
     #[must_use]
-    pub fn storage_subscriber(&self) -> crate::storage::StorageSubscriber {
-        self.storage_subscriber
-    }
-
     pub fn new(
         dom: Rc<RefCell<DomTree>>,
         hooks: Rc<dyn HostHooks>,
         viewport: Viewport,
         navigator: NavigatorData,
         screen: ScreenData,
-    ) -> Self {
+    ) -> Rc<Self> {
         let mut style_engine = StyleEngine::new(&dom.borrow(), viewport);
         let layout = Rc::new(RefCell::new(LayoutEngine::new(viewport)));
         // Wire real font metrics (parley/skrifa) into the cascade so
@@ -1058,10 +1263,238 @@ impl PageState {
             .unwrap_or_default()
             .as_secs_f64()
             * 1000.0;
-        Self {
+        Rc::new(Self {
             dom,
             style,
             layout,
+            hooks,
+            navigator: Rc::new(navigator),
+            screen: Rc::new(screen),
+            storage_subscriber: crate::storage::StorageSubscriber::next(),
+            pending_scroll_targets: RefCell::new(Vec::new()),
+            pending_navigation: RefCell::new(VecDeque::new()),
+            history: RefCell::new(SessionHistory::new(initial_url)),
+            referrer: RefCell::new(String::new()),
+            firing_submission_events: Cell::new(false),
+            parsing: Cell::new(false),
+            ready_state: Cell::new(ReadyState::default()),
+            parser_script_active: Cell::new(false),
+            pending_parser_write: RefCell::new(String::new()),
+            parser_write_calls: Cell::new(0),
+            parser_write_bytes: Cell::new(0),
+            console_group_depth: Cell::new(0),
+            current_script: Cell::new(None),
+            fonts_loading: Cell::new(false),
+            timing: RefCell::new(DocumentTiming::default()),
+            start,
+            time_origin_epoch_ms,
+            whole_document_visible: Cell::new(false),
+            init_scripts: RefCell::new(Vec::new()),
+            next_init_script: Cell::new(0),
+            binding_calls: RefCell::new(VecDeque::new()),
+            worlds: RefCell::new(Vec::new()),
+            // 0 is never handed out: the first world takes 1, matching the id
+            // the protocol has always reported for the main context.
+            next_context_id: Cell::new(0),
+            bindings: RefCell::new(Vec::new()),
+            net_world: RefCell::new(HashMap::new()),
+            connectivity: RefCell::new(VecDeque::new()),
+            connectivity_seq: Cell::new(0),
+            conn_cursors: RefCell::new(HashMap::new()),
+            next_object_id: Cell::new(0),
+            object_worlds: RefCell::new(HashMap::new()),
+            enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
+        })
+    }
+
+    /// Mints the next `Runtime.ExecutionContextId`.
+    pub(crate) fn next_context_id(&self) -> u64 {
+        let id = self.next_context_id.get() + 1;
+        self.next_context_id.set(id);
+        id
+    }
+
+    /// Installs the hop into other worlds. Called once, by the page, after the
+    /// main world exists — the table cannot exist before its first world does.
+    pub fn set_world_enter(&self, enter: Weak<dyn WorldEnter>) {
+        *self.enter.borrow_mut() = enter;
+    }
+
+    /// Live world ids, main first.
+    ///
+    /// The world table is authoritative when one is installed, because only it
+    /// knows which worlds are *live* — a world torn down at a commit is gone
+    /// from the table before its registry entry is pruned. Without a table
+    /// (a direct `install_world` embedder, and every `bindings` test) the
+    /// registry is the answer: falling back to an empty list would mean no
+    /// world ever matched, and event dispatch would silently deliver nothing.
+    #[must_use]
+    pub fn world_ids(&self) -> Vec<WorldId> {
+        if let Some(table) = self.enter.borrow().upgrade() {
+            return table.world_ids();
+        }
+        self.worlds.borrow().clone()
+    }
+
+    /// Runs `f` in `world`. See [`WorldEnter::enter`] for when this is skipped.
+    pub(crate) fn in_world(
+        &self,
+        world: WorldId,
+        mut f: impl FnMut(&crate::cx::BindCx<'_>),
+    ) -> bool {
+        let Some(table) = self.enter.borrow().upgrade() else {
+            return false;
+        };
+        table.enter(world, &mut f)
+    }
+
+    /// Whether `world` has a listener for `event_type` on `target`.
+    #[must_use]
+    pub(crate) fn world_has_listener(
+        &self,
+        world: WorldId,
+        target: crate::events::EventTargetKey,
+        event_type: &str,
+    ) -> bool {
+        self.enter
+            .borrow()
+            .upgrade()
+            .is_some_and(|table| table.has_listener(world, target, event_type))
+    }
+
+    /// Mints `objectId`s for **every** world's object store.
+    ///
+    /// Page-unique rather than per-store: an id names one value, and two
+    /// worlds handing out `1` would let `Runtime.callFunctionOn` reach the
+    /// wrong world's object. Monotonic and never recycled, so a stale id names
+    /// nothing.
+    pub(crate) fn next_object_id(&self) -> u64 {
+        let id = self.next_object_id.get() + 1;
+        self.next_object_id.set(id);
+        id
+    }
+
+    /// The world whose store holds `object_id`.
+    #[must_use]
+    pub fn object_world(&self, object_id: u64) -> Option<WorldId> {
+        self.object_worlds.borrow().get(&object_id).copied()
+    }
+
+    pub(crate) fn note_object_world(&self, object_id: u64, world: WorldId) {
+        self.object_worlds.borrow_mut().insert(object_id, world);
+    }
+
+    pub fn forget_object(&self, object_id: u64) {
+        self.object_worlds.borrow_mut().remove(&object_id);
+    }
+
+    /// Forgets every handle of one world (a commit, or a world teardown).
+    pub fn forget_objects_of(&self, world: WorldId) {
+        self.object_worlds.borrow_mut().retain(|_, w| *w != world);
+    }
+
+    /// Records which world started a script-initiated request, so its
+    /// `NetEvent`s are delivered where the waiting promise lives.
+    pub(crate) fn note_net_world(&self, id: RequestId, world: WorldId) {
+        self.net_world.borrow_mut().insert(id, world);
+    }
+
+    /// The world that started `id`, if it is still tracked.
+    #[must_use]
+    pub fn net_world_of(&self, id: RequestId) -> Option<WorldId> {
+        self.net_world.borrow().get(&id).copied()
+    }
+
+    /// Drops every request-to-world mapping (a commit aborts them all).
+    pub fn clear_net_worlds(&self) {
+        self.net_world.borrow_mut().clear();
+    }
+
+    /// Forgets a request that has reached a terminal event.
+    pub fn forget_net_world(&self, id: RequestId) {
+        self.net_world.borrow_mut().remove(&id);
+    }
+
+    /// How far `world` has consumed the connectivity log.
+    #[must_use]
+    pub(crate) fn conn_cursor(&self, world: WorldId) -> u64 {
+        self.conn_cursors.borrow().get(&world).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn set_conn_cursor(&self, world: WorldId, seq: u64) {
+        self.conn_cursors.borrow_mut().insert(world, seq);
+    }
+
+    /// Empties the log and every cursor at a document commit.
+    ///
+    /// The log is trimmed below the *minimum* live cursor, so without this a
+    /// world that has not drained since the outgoing document keeps every entry
+    /// alive across navigations — and the ids in them name an arena that is
+    /// gone.
+    pub fn reset_connectivity(&self) {
+        self.connectivity.borrow_mut().clear();
+        self.conn_cursors.borrow_mut().clear();
+        self.connectivity_seq.set(0);
+    }
+
+    /// Forgets a torn-down world, so its stale cursor stops pinning the log.
+    pub fn forget_world_cursor(&self, world: WorldId) {
+        self.conn_cursors.borrow_mut().remove(&world);
+    }
+
+    /// Drops every isolated world from the registry.
+    ///
+    /// The page calls this at a commit, *before* rebuilding them: the rebuild
+    /// goes through `install_world`, which re-appends, and an entry left behind
+    /// would keep a torn-down world in `world_ids`' no-table fallback.
+    pub fn forget_isolated_worlds(&self) {
+        self.worlds.borrow_mut().retain(|id| *id == MAIN_WORLD);
+    }
+
+    /// `Runtime.addBinding` registrations, re-applied to every rebuilt world.
+    pub fn bindings(&self) -> std::cell::RefMut<'_, Vec<(String, Option<String>)>> {
+        self.bindings.borrow_mut()
+    }
+}
+
+/// Uninhabited stand-in so `PageShared::enter` can start as a dangling `Weak`
+/// before the world table exists. `Weak::new` needs a sized type; this is never
+/// constructed.
+pub(crate) enum NoWorlds {}
+
+impl WorldEnter for NoWorlds {
+    fn enter(&self, _world: WorldId, _f: &mut dyn FnMut(&crate::cx::BindCx<'_>)) -> bool {
+        match *self {}
+    }
+    fn world_ids(&self) -> Vec<WorldId> {
+        match *self {}
+    }
+    fn has_listener(
+        &self,
+        _world: WorldId,
+        _target: crate::events::EventTargetKey,
+        _event_type: &str,
+    ) -> bool {
+        match *self {}
+    }
+}
+
+impl WorldState {
+    /// Builds one world over the shared page state.
+    #[must_use]
+    pub fn new(page: Rc<PageShared>, id: WorldId, name: String) -> Self {
+        let context_id = page.next_context_id();
+        Self {
+            dom: Rc::clone(&page.dom),
+            style: Rc::clone(&page.style),
+            layout: Rc::clone(&page.layout),
+            hooks: Rc::clone(&page.hooks),
+            navigator: Rc::clone(&page.navigator),
+            screen: Rc::clone(&page.screen),
+            page,
+            id,
+            name,
+            context_id: Cell::new(context_id),
             slab: RefCell::new(Slab::default()),
             js: RefCell::new(None),
             listeners: RefCell::new(ListenerRegistry::default()),
@@ -1071,37 +1504,18 @@ impl PageState {
             interfaces: RefCell::new(HashMap::new()),
             pending_consts: RefCell::new(Vec::new()),
             same_object: RefCell::new(HashMap::new()),
-            hooks,
-            storage_subscriber: crate::storage::StorageSubscriber::next(),
             storage_handles: RefCell::new(Vec::new()),
             pending_net: RefCell::new(HashMap::new()),
-            pending_scroll_targets: RefCell::new(Vec::new()),
-            pending_navigation: RefCell::new(VecDeque::new()),
-            history: RefCell::new(SessionHistory::new(initial_url)),
-            referrer: RefCell::new(String::new()),
             location_js: RefCell::new(None),
             history_js: RefCell::new(None),
-            firing_submission_events: Cell::new(false),
-            parsing: Cell::new(false),
-            ready_state: Cell::new(ReadyState::default()),
-            parser_script_active: Cell::new(false),
             mutation_microtask_queued: Cell::new(false),
-            pending_parser_write: RefCell::new(String::new()),
-            parser_write_calls: Cell::new(0),
-            parser_write_bytes: Cell::new(0),
-            console_group_depth: Cell::new(0),
-            current_script: Cell::new(None),
-            navigator: Rc::new(navigator),
             navigator_js: RefCell::new(None),
-            screen: Rc::new(screen),
             screen_js: RefCell::new(None),
             performance_js: RefCell::new(None),
             performance_timing_js: RefCell::new(None),
             font_face_set_js: RefCell::new(None),
-            fonts_loading: Cell::new(false),
             font_ready_resolvers: RefCell::new(Vec::new()),
             font_load_resolvers: RefCell::new(Vec::new()),
-            timing: RefCell::new(DocumentTiming::default()),
             media_queries: RefCell::new(Vec::new()),
             resize_observers: RefCell::new(Vec::new()),
             intersection_observers: RefCell::new(Vec::new()),
@@ -1113,36 +1527,146 @@ impl PageState {
             custom_elements: RefCell::new(CustomElementRegistry::default()),
             custom_wrappers: RefCell::new(HashMap::new()),
             remote_objects: RefCell::new(crate::remote::ObjectStore::default()),
-            execution_context_id: Cell::new(1),
-            binding_calls: RefCell::new(VecDeque::new()),
-            init_scripts: RefCell::new(Vec::new()),
-            next_init_script: Cell::new(0),
             connected_wrappers: RefCell::new(HashMap::new()),
             adopted_sheets: RefCell::new(HashMap::new()),
-            start,
-            time_origin_epoch_ms,
-            whole_document_visible: Cell::new(false),
+            pending_conn: RefCell::new(HashMap::new()),
+            owned_event_values: RefCell::new(Vec::new()),
+            history_state_cache: RefCell::new(None),
+            languages_js: RefCell::new(None),
+            plugins_js: RefCell::new(None),
+            mime_types_js: RefCell::new(None),
         }
+    }
+
+    /// This document's identity among the subscribers of its storage areas.
+    #[must_use]
+    pub fn storage_subscriber(&self) -> crate::storage::StorageSubscriber {
+        self.page.storage_subscriber
+    }
+
+    /// True for the page's own world. Custom elements, inline event handlers,
+    /// activation behaviour and the DOM-driven task sources are main-world
+    /// only (ADR-0033 D8).
+    #[must_use]
+    pub fn is_main(&self) -> bool {
+        self.id == MAIN_WORLD
+    }
+
+    /// Whether this world has any listener (or `on*` handler) for `event_type`
+    /// on `target`. Scope-free, for the cross-world dispatch probe.
+    #[must_use]
+    pub fn has_listener(&self, target: crate::events::EventTargetKey, event_type: &str) -> bool {
+        !self
+            .listeners
+            .borrow()
+            .snapshot(target, event_type)
+            .is_empty()
+            || self
+                .event_handlers
+                .borrow()
+                .contains_key(&(target, event_type.to_owned()))
+    }
+
+    /// Takes this world's in-flight `fetch`/XHR ids, so the page can abort
+    /// them before the world is destroyed.
+    #[must_use]
+    pub fn take_pending_net(&self) -> Vec<RequestId> {
+        self.pending_net
+            .borrow_mut()
+            .drain()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Drops every JavaScript value this world holds.
+    ///
+    /// Called by the page's teardown **while this world's runtime is still
+    /// alive** (ADR-0033 D4). A `Persistent` freed after `JS_FreeRuntime`
+    /// aborts the process on a non-empty `gc_obj_list`, so the values must go
+    /// first — and *releasing the values* is the mechanism rather than
+    /// *counting the owners*, because `Page` deliberately keeps its own
+    /// `Rc<WorldState>` for the main world and the realm holds a third as
+    /// `Rc<dyn Any>`. Dropping one strong reference proves nothing; emptying
+    /// the containers does.
+    ///
+    /// A new `JsValue`-holding field on `WorldState` must be cleared here. The
+    /// cost of forgetting is a process abort at page teardown, which is what
+    /// `dropping_a_page_with_live_worlds_is_clean` is for.
+    pub fn release_js(&self) {
+        // First: any event payload holding a value of *this* world. These live
+        // in shared `EventData`s that other worlds' wrappers may still hold, so
+        // dropping this world's containers alone would not reach them.
+        for weak in self.owned_event_values.borrow_mut().drain(..) {
+            if let Some(data) = weak.upgrade() {
+                data.borrow_mut().release_values_of(self.id);
+            }
+        }
+        // The wrapper cache and the interface table hold the prototypes
+        // everything else points at, so they go last among the big ones; order
+        // is not load-bearing within this function, only that it runs before
+        // the runtime dies.
+        self.slab.borrow_mut().clear();
+        self.listeners.borrow_mut().clear();
+        self.event_handlers.borrow_mut().clear();
+        self.handler_attr_seen.borrow_mut().clear();
+        self.observers.borrow_mut().clear();
+        self.same_object.borrow_mut().clear();
+        self.storage_handles.borrow_mut().clear();
+        self.pending_net.borrow_mut().clear();
+        self.font_ready_resolvers.borrow_mut().clear();
+        self.font_load_resolvers.borrow_mut().clear();
+        self.media_queries.borrow_mut().clear();
+        self.resize_observers.borrow_mut().clear();
+        self.intersection_observers.borrow_mut().clear();
+        self.custom_elements.borrow_mut().clear();
+        self.custom_wrappers.borrow_mut().clear();
+        self.connected_wrappers.borrow_mut().clear();
+        self.adopted_sheets.borrow_mut().clear();
+        self.pending_conn.borrow_mut().clear();
+        *self.history_state_cache.borrow_mut() = None;
+        *self.languages_js.borrow_mut() = None;
+        *self.plugins_js.borrow_mut() = None;
+        *self.mime_types_js.borrow_mut() = None;
+        // The page's `objectId -> world` index must forget them too, or it
+        // grows by one entry per handle the main world ever minted, for the
+        // life of the page. Isolated worlds are pruned at teardown; this is the
+        // main world's equivalent.
+        for id in self.remote_objects.borrow().ids() {
+            self.page.forget_object(id);
+        }
+        self.remote_objects.borrow_mut().clear();
+        self.pending_consts.borrow_mut().clear();
+        self.named_prop_keys.borrow_mut().clear();
+        *self.location_js.borrow_mut() = None;
+        *self.history_js.borrow_mut() = None;
+        *self.navigator_js.borrow_mut() = None;
+        *self.screen_js.borrow_mut() = None;
+        *self.performance_js.borrow_mut() = None;
+        *self.performance_timing_js.borrow_mut() = None;
+        *self.font_face_set_js.borrow_mut() = None;
+        *self.named_props.borrow_mut() = None;
+        self.interfaces.borrow_mut().clear();
+        *self.js.borrow_mut() = None;
     }
 
     /// Marks the parser as owning handles into the tree (suspends freeing).
     pub fn set_parsing(&self, parsing: bool) {
-        self.parsing.set(parsing);
+        self.page.parsing.set(parsing);
     }
 
     /// True while the parser holds handles into the tree.
     #[must_use]
     pub fn parsing(&self) -> bool {
-        self.parsing.get()
+        self.page.parsing.get()
     }
 
-    /// See [`PageState::whole_document_visible`]. Set by the embedder before
+    /// See [`WorldState::whole_document_visible`]. Set by the embedder before
     /// the page runs, so the observers script installs at startup see it.
     pub fn set_whole_document_visible(&self, whole: bool) {
-        self.whole_document_visible.set(whole);
+        self.page.whole_document_visible.set(whole);
     }
 
-    /// The time origin behind [`PageState::epoch_now_ms`]: the monotonic base
+    /// The time origin behind [`WorldState::epoch_now_ms`]: the monotonic base
     /// and the wall-clock reading paired with it.
     ///
     /// Exposed so the embedder's own event loop can stamp its payloads off the
@@ -1150,7 +1674,7 @@ impl PageState {
     /// lines and loop-emitted events on timescales that cannot be merged.
     #[must_use]
     pub fn time_origin(&self) -> (std::time::Instant, f64) {
-        (self.start, self.time_origin_epoch_ms)
+        (self.page.start, self.page.time_origin_epoch_ms)
     }
 
     /// A monotonic Unix-epoch timestamp in milliseconds (time origin plus the
@@ -1158,14 +1682,14 @@ impl PageState {
     /// milestones stay ordered even if the wall clock steps).
     #[must_use]
     pub fn epoch_now_ms(&self) -> f64 {
-        self.time_origin_epoch_ms + self.start.elapsed().as_secs_f64() * 1000.0
+        self.page.time_origin_epoch_ms + self.page.start.elapsed().as_secs_f64() * 1000.0
     }
 
-    /// Records a document-lifecycle milestone on [`PageState::timing`].
+    /// Records a document-lifecycle milestone on [`WorldState::timing`].
     /// `document.readyState`.
     #[must_use]
     pub fn ready_state(&self) -> ReadyState {
-        self.ready_state.get()
+        self.page.ready_state.get()
     }
 
     /// Records a lifecycle milestone: the timing entry `PerformanceTiming`
@@ -1179,12 +1703,12 @@ impl PageState {
         use crate::state::TimingMilestone as M;
         let now = self.epoch_now_ms();
         match milestone {
-            M::NavigationStart => self.ready_state.set(ReadyState::Loading),
-            M::DomInteractive => self.ready_state.set(ReadyState::Interactive),
-            M::DomCompleteLoadStart => self.ready_state.set(ReadyState::Complete),
+            M::NavigationStart => self.page.ready_state.set(ReadyState::Loading),
+            M::DomInteractive => self.page.ready_state.set(ReadyState::Interactive),
+            M::DomCompleteLoadStart => self.page.ready_state.set(ReadyState::Complete),
             _ => {}
         }
-        let mut t = self.timing.borrow_mut();
+        let mut t = self.page.timing.borrow_mut();
         match milestone {
             M::NavigationStart => {
                 // Reset the previous document's timing, then collapse the
@@ -1217,7 +1741,7 @@ impl PageState {
 
     /// Marks entry/exit of the parser-inserted classic script task.
     pub fn set_parser_script_active(&self, active: bool) {
-        self.parser_script_active.set(active);
+        self.page.parser_script_active.set(active);
     }
 
     /// Queues markup for the suspended HTML parser. `Ok(false)` means the
@@ -1225,22 +1749,26 @@ impl PageState {
     pub(crate) fn queue_parser_write(&self, text: &str) -> Result<bool, &'static str> {
         const MAX_CALLS: usize = 1024;
         const MAX_BYTES: usize = 1024 * 1024;
-        if !self.parsing.get() || !self.parser_script_active.get() {
+        if !self.page.parsing.get() || !self.page.parser_script_active.get() {
             return Ok(false);
         }
-        let calls = self.parser_write_calls.get().saturating_add(1);
-        let bytes = self.parser_write_bytes.get().saturating_add(text.len());
+        let calls = self.page.parser_write_calls.get().saturating_add(1);
+        let bytes = self
+            .page
+            .parser_write_bytes
+            .get()
+            .saturating_add(text.len());
         if calls > MAX_CALLS || bytes > MAX_BYTES {
             return Err("document.write budget exceeded");
         }
-        self.parser_write_calls.set(calls);
-        self.parser_write_bytes.set(bytes);
-        self.pending_parser_write.borrow_mut().push_str(text);
+        self.page.parser_write_calls.set(calls);
+        self.page.parser_write_bytes.set(bytes);
+        self.page.pending_parser_write.borrow_mut().push_str(text);
         Ok(true)
     }
 
     pub fn take_parser_write(&self) -> String {
-        std::mem::take(&mut *self.pending_parser_write.borrow_mut())
+        std::mem::take(&mut *self.page.pending_parser_write.borrow_mut())
     }
 
     /// Number of in-flight `fetch`/XHR requests (the page's event loop keeps
@@ -1265,7 +1793,7 @@ impl PageState {
             .drain()
             .map(|(id, _)| id)
             .collect();
-        self.pending_scroll_targets.borrow_mut().clear();
+        self.page.pending_scroll_targets.borrow_mut().clear();
         self.event_handlers.borrow_mut().clear();
         // Observers hold stale NodeIds from the previous document; drop the
         // registries (and the delivery gate) so nothing is delivered against
@@ -1280,7 +1808,19 @@ impl PageState {
         self.custom_elements.borrow_mut().clear();
         self.custom_wrappers.borrow_mut().clear();
         self.connected_wrappers.borrow_mut().clear();
+        // Provisional retentions name the outgoing document too, and each holds
+        // a *strong* wrapper — leaving them would pin one detached subtree per
+        // entry for the life of the world.
+        self.pending_conn.borrow_mut().clear();
+        // Parsed from the outgoing document's history entry; the incoming one
+        // materializes its own.
+        *self.history_state_cache.borrow_mut() = None;
         self.adopted_sheets.borrow_mut().clear();
+        // Page-level, and only the main world's reset runs at a commit: the log
+        // and every cursor name nodes of the document being replaced.
+        if self.is_main() {
+            self.page.reset_connectivity();
+        }
         // Every `objectId` named a value of the outgoing document. Keeping them
         // would pin that document's whole object graph for the life of the
         // realm, and would let a driver read a stale handle as if it were live.
@@ -1289,18 +1829,20 @@ impl PageState {
         // A payload the outgoing document queued belongs to a world that is
         // gone; reporting it against the new document would attribute it to the
         // wrong execution context.
-        self.binding_calls.borrow_mut().clear();
-        self.execution_context_id
-            .set(self.execution_context_id.get() + 1);
+        self.page.binding_calls.borrow_mut().clear();
+        // Minted from the page's counter rather than bumped locally: ids must
+        // be unique across documents *and* worlds, so a driver holding one from
+        // the outgoing document gets a clean "no such context" (ADR-0033 D10).
+        self.context_id.set(self.page.next_context_id());
         self.dom.borrow_mut().clear_custom_elements();
-        self.current_script.set(None);
-        self.parser_script_active.set(false);
+        self.page.current_script.set(None);
+        self.page.parser_script_active.set(false);
         self.mutation_microtask_queued.set(false);
-        self.pending_parser_write.borrow_mut().clear();
-        self.parser_write_calls.set(0);
-        self.parser_write_bytes.set(0);
+        self.page.pending_parser_write.borrow_mut().clear();
+        self.page.parser_write_calls.set(0);
+        self.page.parser_write_bytes.set(0);
         // A group the outgoing document opened must not indent the next one.
-        self.console_group_depth.set(0);
+        self.page.console_group_depth.set(0);
         // `pending_navigation` is deliberately *not* cleared. The commit path
         // takes the request before it starts loading, so nothing stale is left
         // here for the incoming document — and a navigation the outgoing
@@ -1313,14 +1855,14 @@ impl PageState {
     /// (`None` = the viewport). The page dispatches `scroll` events for them.
     #[must_use]
     pub fn take_pending_scroll_targets(&self) -> Vec<Option<oxidepage_base::NodeId>> {
-        std::mem::take(&mut self.pending_scroll_targets.borrow_mut())
+        std::mem::take(&mut self.page.pending_scroll_targets.borrow_mut())
     }
 
     /// Queues a `scroll` event for `target` (`None` = the viewport) on the
     /// page's event loop — the same path a script scroll takes, so an
     /// embedder-driven scroll has no event path of its own.
     pub fn queue_scroll_event(&self, target: Option<oxidepage_base::NodeId>) {
-        self.pending_scroll_targets.borrow_mut().push(target);
+        self.page.pending_scroll_targets.borrow_mut().push(target);
     }
 
     /// [`Self::queue_scroll_event`] for the viewport.
@@ -1335,16 +1877,16 @@ impl PageState {
     /// beyond it, because the page thread is inside that fetch and services no
     /// ordinary job until it returns (ADR-0027 D3).
     pub fn clear_pending_navigations(&self) -> usize {
-        let mut queue = self.pending_navigation.borrow_mut();
+        let mut queue = self.page.pending_navigation.borrow_mut();
         let dropped = queue.len();
         queue.clear();
         dropped
     }
 
     /// Queues a navigation for the page's event loop (see
-    /// [`PageState::pending_navigation`] for what does and does not collapse).
+    /// [`WorldState::pending_navigation`] for what does and does not collapse).
     pub fn request_navigation(&self, navigation: PendingNavigation) {
-        let mut queue = self.pending_navigation.borrow_mut();
+        let mut queue = self.page.pending_navigation.borrow_mut();
         // A load supersedes a load that has not started yet.
         if matches!(navigation, PendingNavigation::Load { .. })
             && matches!(queue.back(), Some(PendingNavigation::Load { .. }))
@@ -1364,30 +1906,30 @@ impl PageState {
     /// Takes the next queued navigation, if any.
     #[must_use]
     pub fn take_pending_navigation(&self) -> Option<PendingNavigation> {
-        self.pending_navigation.borrow_mut().pop_front()
+        self.page.pending_navigation.borrow_mut().pop_front()
     }
 
     /// True when script has queued a navigation the page has not run yet.
     #[must_use]
     pub fn has_pending_navigation(&self) -> bool {
-        !self.pending_navigation.borrow().is_empty()
+        !self.page.pending_navigation.borrow().is_empty()
     }
 
     /// The session history, for the page's navigation driver.
     #[must_use]
     pub fn history(&self) -> std::cell::RefMut<'_, SessionHistory> {
-        self.history.borrow_mut()
+        self.page.history.borrow_mut()
     }
 
     /// `document.referrer` — the URL the current document was navigated from.
     #[must_use]
     pub fn referrer(&self) -> String {
-        self.referrer.borrow().clone()
+        self.page.referrer.borrow().clone()
     }
 
     /// Sets `document.referrer` (the page, at commit time).
     pub fn set_referrer(&self, referrer: String) {
-        *self.referrer.borrow_mut() = referrer;
+        *self.page.referrer.borrow_mut() = referrer;
     }
 }
 
@@ -1399,6 +1941,12 @@ pub(crate) struct Slab {
 }
 
 impl Slab {
+    /// Drops every host object. Called only by [`WorldState::release_js`], at
+    /// page teardown, while this world's runtime is still alive.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     pub fn insert(&mut self, data: HostData) -> u64 {
         let key = self.next;
         self.next += 1;

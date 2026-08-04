@@ -439,30 +439,24 @@ fn handle_dialog(connection: &Arc<Connection>, request: &Request) -> CommandResu
 #[serde(rename_all = "camelCase")]
 struct AddInitScriptParams {
     source: String,
-    /// Accepted, and **mapped to the main world** — see [`add_init_script`].
+    /// The world to run the script in, created if it does not exist yet.
+    /// Absent — or empty — is the main world.
     #[serde(default)]
     world_name: Option<String>,
 }
 
 /// `Page.addScriptToEvaluateOnNewDocument`.
 ///
-/// # The one-world compromise
-///
-/// `worldName` is accepted and the script runs in the **main** world, because
-/// there is only one (isolated worlds are a later stage). This is a real,
-/// documented divergence rather than a stub: the script genuinely runs, at
-/// genuinely the right time, and the only property not delivered is isolation.
-///
-/// It is not free. A driver's injected helpers are visible to page script, and
-/// a page that redefines `Array.prototype.map` or `JSON.stringify` can perturb
-/// them. Refusing instead was tried and is worse: Puppeteer requests a utility
-/// world while *creating every page*, so `browser.newPage()` throws and nothing
-/// works at all. Recorded in ADR-0030's deliberate limits.
+/// `worldName` is honoured (ADR-0033 D9): the script runs in that world and
+/// nowhere else, against a global rebuilt fresh at every commit — which is what
+/// makes a driver's `addInitScript` invisible to page script. The registration
+/// survives navigation, which is the whole point of the command.
 fn add_init_script(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let session = connection.require_session(request)?;
     let params: AddInitScriptParams = request.parse()?;
-    let _ = params.world_name;
-    let id = session.page.add_init_script(params.source)?;
+    let id = session
+        .page
+        .add_init_script_for(params.source, params.world_name)?;
     Ok(serde_json::json!({ "identifier": id.to_string() }))
 }
 
@@ -483,12 +477,13 @@ fn remove_init_script(connection: &Arc<Connection>, request: &Request) -> Comman
     Ok(serde_json::json!({}))
 }
 
-/// `Page.createIsolatedWorld`, answering with the **main** world's context.
+/// `Page.createIsolatedWorld` — a real isolated world (ADR-0033).
 ///
-/// The same compromise [`add_init_script`] documents, and for the same reason:
-/// both drivers create a utility world during page setup, so refusing makes the
-/// endpoint unusable rather than honest. What a caller gets is a real, usable
-/// execution context — just not an isolated one.
+/// **Idempotent by name** within a document: asking twice returns the same
+/// context and re-announces it. Chrome mints a fresh context per call, but
+/// drivers call this once per navigation expecting to rebind, and the protocol
+/// has no way to destroy the surplus, so minting would leak a context per
+/// navigation for the life of the page (D9).
 fn create_isolated_world(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -499,13 +494,14 @@ fn create_isolated_world(connection: &Arc<Connection>, request: &Request) -> Com
     let session = connection.require_session(request)?;
     let params: Params = request.parse()?;
     let world_name = params.world_name.clone().unwrap_or_default();
-    // The index is what separates one world's context id from another's, and it
-    // must come from the same function the announcement uses — otherwise the id
-    // handed back names a context the driver will never be told about.
-    let context_id = crate::domains::runtime::world_context_id(
-        session.page.execution_context_id()?,
-        session.isolated_world_index(&world_name),
-    );
+    if world_name.is_empty() {
+        return Err(ProtocolError::server("worldName is required"));
+    }
+    let world = session
+        .page
+        .create_isolated_world(world_name.clone())?
+        .map_err(ProtocolError::server)?;
+    let context_id = world.context_id;
 
     // Announcing the context is not optional. A driver does not use the id this
     // command returns — it waits for a `Runtime.executionContextCreated` whose
@@ -518,6 +514,7 @@ fn create_isolated_world(connection: &Arc<Connection>, request: &Request) -> Com
         &session,
         &world_name,
         /* is_default */ false,
+        context_id,
     ));
 
     Ok(serde_json::json!({ "executionContextId": context_id }))

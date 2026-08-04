@@ -1155,7 +1155,7 @@ impl DomTree {
         // Only the page document has a browsing context, so only there does
         // "look up a custom element definition" find one. Upgrading an element
         // of a second document would run a constructor and strand a strong
-        // wrapper in `PageState::custom_wrappers` keyed by a node that document
+        // wrapper in `WorldState::custom_wrappers` keyed by a node that document
         // outlives.
         if try_upgrade && is_potential_custom && owner == self.document {
             let local = self

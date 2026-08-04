@@ -150,11 +150,37 @@ fn set_emulated_media(connection: &Arc<Connection>, request: &Request) -> Comman
              documented non-goal (ADR-0026)"
         )));
     }
-    if let Some(feature) = params.features.first() {
-        return Err(ProtocolError::server(format!(
-            "Emulation.setEmulatedMedia cannot override the media feature {}={}",
-            feature.name, feature.value
-        )));
+    // A feature set to the value the engine *already reports* is a no-op, and
+    // accepting it is not a lie — the same rule the `screen`/`""` media case
+    // above follows, and the one ADR-0030 D9 states for every refusal in this
+    // domain. Playwright sends `prefers-color-scheme=light` while creating
+    // **every** page, so refusing it makes `newPage()` throw and nothing about
+    // Playwright works at all.
+    //
+    // Deliberately narrow: only each feature's **default**, which is the state
+    // the engine is already in and the only one it can be in — there is no
+    // dark mode, no motion reduction and no forced-colors mode to switch to, so
+    // any *other* value is still refused rather than silently ignored.
+    //
+    // One caveat, recorded in ADR-0033's limits rather than hidden: stylo
+    // reports `prefers-reduced-motion` and `forced-colors` as *not matching* in
+    // `matchMedia`, so a driver that sets one of these and then asserts the
+    // query holds will disagree with the page. That is a pre-existing gap in
+    // media-feature support, not something accepting the no-op introduces.
+    for feature in &params.features {
+        let honest = matches!(
+            (feature.name.as_str(), feature.value.as_str()),
+            ("prefers-color-scheme", "light")
+                | ("prefers-reduced-motion", "no-preference")
+                | ("forced-colors", "none")
+                | ("prefers-contrast", "no-preference")
+        );
+        if !honest {
+            return Err(ProtocolError::server(format!(
+                "Emulation.setEmulatedMedia cannot override the media feature {}={}",
+                feature.name, feature.value
+            )));
+        }
     }
     Ok(json!({}))
 }

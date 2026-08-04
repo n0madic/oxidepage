@@ -24,6 +24,7 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "Target.setDiscoverTargets" => set_discover_targets(connection, request),
         "Target.setAutoAttach" => set_auto_attach(connection, request),
         "Target.getTargets" => get_targets(connection),
+        "Target.getTargetInfo" => get_target_info(connection, request),
         "Target.createTarget" => create_target(connection, request),
         "Target.closeTarget" => close_target(connection, request),
         "Target.activateTarget" => activate_target(connection, request),
@@ -116,6 +117,48 @@ fn get_targets(connection: &Arc<Connection>) -> CommandResult {
     Ok(serde_json::json!({ "targetInfos": connection.registry.infos() }))
 }
 
+/// The browser target's id.
+///
+/// Fixed rather than minted: the browser is a singleton per endpoint, and a
+/// driver only ever compares this against itself. It cannot collide with a page
+/// target, whose ids are hex-formatted counters.
+const BROWSER_TARGET_ID: &str = "oxidepage-browser";
+
+/// `Target.getTargetInfo`, for one target.
+///
+/// Playwright's `connectOverCDP` sends this **first**, with no `targetId`, to
+/// identify the browser it just attached to — so without it nothing about
+/// Playwright works at all, whatever else the endpoint implements. An absent
+/// `targetId` means "the browser", which has no page target of its own; the
+/// browser's own `targetInfo` is what Chrome answers there.
+fn get_target_info(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        #[serde(default)]
+        target_id: Option<String>,
+    }
+    let params: Params = request.parse()?;
+    let Some(target_id) = params.target_id else {
+        // The browser target. It is not in the registry — the registry holds
+        // pages — so it is described here rather than invented per call site.
+        return Ok(serde_json::json!({
+            "targetInfo": {
+                "targetId": BROWSER_TARGET_ID,
+                "type": "browser",
+                "title": "",
+                "url": "",
+                "attached": true,
+                "canAccessOpener": false,
+            }
+        }));
+    };
+    let info = connection.registry.info(&target_id).ok_or_else(|| {
+        ProtocolError::server(format!("No target with given id found: {target_id}"))
+    })?;
+    Ok(serde_json::json!({ "targetInfo": info }))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTargetParams {
@@ -201,12 +244,8 @@ fn close_target(connection: &Arc<Connection>, request: &Request) -> CommandResul
     let Some(page) = connection.registry.page(&params.target_id) else {
         return Err(ProtocolError::no_target(&params.target_id));
     };
-    // Before `close`, not after (ADR-0032 D7): a page parked on a *blocking*
-    // pause — the top-level document's — services no ordinary job and answers
-    // `close` only at its next wait point, so a close sent while the driver
-    // still holds that pause would sit out the whole intercept timeout.
-    // Releasing first lets the load finish and the close land immediately.
-    page.release_paused_requests();
+    // `close` releases whatever this page holds paused before asking it to go
+    // (ADR-0032 D7) — see `PageHandle::close` for why that has to happen first.
     page.close();
     // The pump also removes the target when the stream ends; doing it here too
     // makes `closeTarget` synchronous from the driver's point of view, and

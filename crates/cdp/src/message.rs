@@ -28,6 +28,19 @@ pub struct Request {
     pub params: Option<serde_json::Value>,
     #[serde(default, rename = "sessionId")]
     pub session_id: Option<String>,
+    /// The order this request was **received** in, stamped by the read loop
+    /// from one endpoint-wide counter — the state it is compared against is
+    /// page-level, and a target's sessions can span connections.
+    ///
+    /// Not from the wire: `id` is client-chosen and need not increase. This is
+    /// the only place the driver's true ordering survives, because commands are
+    /// then spread across lanes that run concurrently — and two of them,
+    /// `Fetch.enable` and `Fetch.disable`, write the *same* page-wide config
+    /// from *different* lanes (`is_priority`). Without it, an unawaited
+    /// `setRequestInterception(true)` followed by `(false)` can apply in the
+    /// wrong order and leave interception on.
+    #[serde(skip)]
+    pub seq: u64,
 }
 
 impl Request {

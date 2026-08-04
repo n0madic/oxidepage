@@ -85,6 +85,16 @@ fn spawn_server() -> u16 {
                                  Content-Length: 0\r\nConnection: close\r\n\r\n",
                             ),
                         }
+                    } else if head.contains("/echo-headers") {
+                        // Reflects the headers that actually reached the wire,
+                        // which is the only way to see a silently dropped one.
+                        let sent: Vec<String> = request
+                            .lines()
+                            .skip(1)
+                            .take_while(|line| !line.is_empty())
+                            .map(|line| line.trim().to_ascii_lowercase())
+                            .collect();
+                        ok_response(&sent.join("|"))
                     } else if head.contains("/echo") {
                         ok_response(&head)
                     } else {
@@ -134,6 +144,14 @@ impl Harness {
         })
     }
 
+    /// Whether `id` reached a `Failed` terminal.
+    fn failed(&self, id: oxidepage_net::RequestId) -> bool {
+        self.log
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, NetworkEvent::Failed { id: got, .. } if *got == id))
+    }
+
     fn terminal_count(&self) -> usize {
         self.log
             .borrow()
@@ -174,7 +192,10 @@ impl Harness {
 }
 
 fn enable_all(harness: &Harness) {
-    harness.service.intercept().enable(Vec::new(), false);
+    harness
+        .service
+        .intercept()
+        .enable(0, "s", Vec::new(), false);
 }
 
 // === D1: what pauses, and what must never ===
@@ -205,6 +226,8 @@ fn a_pattern_that_does_not_match_does_not_pause() {
     let port = spawn_server();
     let harness = Harness::new();
     harness.service.intercept().enable(
+        0,
+        "s",
         vec![RequestPattern {
             url_pattern: String::from("*/never"),
             resource_type: None,
@@ -225,6 +248,8 @@ fn a_resource_type_pattern_selects_one_kind_of_request() {
     let port = spawn_server();
     let harness = Harness::new();
     harness.service.intercept().enable(
+        0,
+        "s",
         vec![RequestPattern {
             url_pattern: String::from("*"),
             resource_type: Some(ResourceType::Image),
@@ -401,10 +426,13 @@ fn a_failed_request_reports_one_failure() {
     });
     harness.pump(|h| h.terminal_count() == 1);
 
+    // Equality, not `contains`: a driver compares `loadingFailed.errorText`
+    // against Chrome's name, so a category prefix in front of it is a defect
+    // that a substring assertion would wave through.
     assert!(
         matches!(
             harness.log.borrow().last(),
-            Some(NetworkEvent::Failed { error, .. }) if error.contains("net::ERR_FAILED")
+            Some(NetworkEvent::Failed { error, .. }) if error == "net::ERR_FAILED"
         ),
         "got {:?}",
         harness.log.borrow()
@@ -480,7 +508,7 @@ fn disable_reports_every_paused_id_so_the_caller_can_release_them() {
         format!("http://127.0.0.1:{port}/"),
     ));
 
-    let released = harness.service.intercept().disable();
+    let released = harness.service.intercept().disable(1, "s");
     assert_eq!(released.len(), 2);
     for id in released {
         harness
@@ -505,7 +533,7 @@ fn a_blocking_fetch_pauses_and_resolves_inline() {
     let (service, _events) =
         NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
     let service = Rc::new(service);
-    service.intercept().enable(Vec::new(), false);
+    service.intercept().enable(0, "s", Vec::new(), false);
 
     let control = service.intercept();
     service.set_observer(Some(Rc::new(move |event| {
@@ -541,7 +569,7 @@ fn a_decision_for_another_request_does_not_extend_a_blocking_park() {
     let (service, _events) =
         NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
     let service = Rc::new(service);
-    service.intercept().enable(Vec::new(), false);
+    service.intercept().enable(0, "s", Vec::new(), false);
 
     let control = service.intercept();
     let stranger = oxidepage_net::RequestId::from_parts(9999, oxidepage_base::id::FIRST_GENERATION);
@@ -574,7 +602,7 @@ fn a_basic_challenge_is_answered_under_the_same_id() {
     let service = Rc::new(service);
     service
         .intercept()
-        .enable(Vec::new(), /* handle_auth */ true);
+        .enable(0, "s", Vec::new(), /* handle_auth */ true);
 
     let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let control = service.intercept();
@@ -615,7 +643,7 @@ fn a_default_auth_answer_lets_the_challenge_through() {
     let (service, _events) =
         NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
     let service = Rc::new(service);
-    service.intercept().enable(Vec::new(), true);
+    service.intercept().enable(0, "s", Vec::new(), true);
 
     let control = service.intercept();
     service.set_observer(Some(Rc::new(move |event| match event {
@@ -644,7 +672,10 @@ fn no_challenge_is_raised_when_auth_handling_is_off() {
     let harness = Harness::new();
     // `handle_auth: false` — Puppeteer sends `handleAuthRequests` explicitly,
     // and a driver that did not ask must see the 401 itself.
-    harness.service.intercept().enable(Vec::new(), false);
+    harness
+        .service
+        .intercept()
+        .enable(0, "s", Vec::new(), false);
 
     let control = harness.service.intercept();
     let outcome = {
@@ -743,7 +774,7 @@ fn a_server_that_keeps_refusing_does_not_loop_forever() {
     let (service, events) =
         NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
     let service = Rc::new(service);
-    service.intercept().enable(Vec::new(), true);
+    service.intercept().enable(0, "s", Vec::new(), true);
 
     let challenges = Rc::new(std::cell::Cell::new(0u32));
     let control = service.intercept();
@@ -790,7 +821,7 @@ fn a_proxy_challenge_is_answered_in_the_proxy_header() {
     let (service, _events) =
         NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
     let service = Rc::new(service);
-    service.intercept().enable(Vec::new(), true);
+    service.intercept().enable(0, "s", Vec::new(), true);
 
     let control = service.intercept();
     service.set_observer(Some(Rc::new(move |event| match event {
@@ -841,10 +872,8 @@ fn offline_fails_every_request_without_touching_the_network() {
         .fetch_blocking(NetRequest::navigation(format!("http://127.0.0.1:{port}/a")));
 
     let error = outcome.expect_err("offline must fail");
-    assert!(
-        error.to_string().contains("net::ERR_INTERNET_DISCONNECTED"),
-        "got {error}"
-    );
+    // Verbatim: this string reaches a driver as `Page.navigate.errorText`.
+    assert_eq!(error.to_string(), "net::ERR_INTERNET_DISCONNECTED");
     assert_eq!(harness.terminal_count(), 1, "and it still reports once");
 }
 
@@ -910,5 +939,168 @@ fn latency_delays_a_request_without_eating_its_timeout_budget() {
         started.elapsed() >= Duration::from_millis(250),
         "the delay was not applied: {:?}",
         started.elapsed()
+    );
+}
+
+/// A driver's `continueRequest` headers must reach the wire on a **subresource**.
+///
+/// `NetRequest::subresource` is `RequestMode::NoCors`, and the script header
+/// slot is filtered by the CORS safelist — so an override written there was
+/// silently dropped for everything except documents. `header_overrides` is the
+/// driver's own slot, past that filter (ADR-0032 D6 / the `auth` precedent).
+#[test]
+fn a_driver_header_override_reaches_a_subresource() {
+    let port = spawn_server();
+    let harness = Harness::new();
+    enable_all(&harness);
+
+    let id = harness.service.start_resource(
+        NetRequest::subresource(
+            format!("http://127.0.0.1:{port}/echo-headers"),
+            format!("http://127.0.0.1:{port}/"),
+        )
+        .of_type(ResourceType::Image),
+    );
+    harness
+        .service
+        .intercept()
+        .send(InterceptCommand::Continue {
+            id,
+            overrides: Box::new(RequestOverrides {
+                headers: Some(vec![
+                    // Not CORS-safelisted: the whole point.
+                    (String::from("x-trace"), String::from("1")),
+                    // On the *forbidden request header* list, which governs
+                    // script and not a driver.
+                    (String::from("user-agent"), String::from("probe/1.0")),
+                    (
+                        String::from("referer"),
+                        String::from("http://example.test/"),
+                    ),
+                ]),
+                ..RequestOverrides::default()
+            }),
+        });
+    harness.pump(|h| h.terminal_count() == 1);
+
+    let sent = harness.body_of(id);
+    for expected in [
+        "x-trace: 1",
+        "user-agent: probe/1.0",
+        "referer: http://example.test/",
+    ] {
+        assert!(
+            sent.contains(expected),
+            "override {expected:?} never reached the wire; sent: {sent:?}"
+        );
+    }
+    // …and the framing headers stay ours, whatever a driver asks for.
+    assert!(
+        !sent.contains("transfer-encoding"),
+        "a transport header must not be settable: {sent:?}"
+    );
+}
+
+/// The framing headers are refused even for a driver: a `Content-Length` that
+/// disagrees with the body is request smuggling, not automation.
+#[test]
+fn a_driver_cannot_set_transport_headers() {
+    let port = spawn_server();
+    let harness = Harness::new();
+    enable_all(&harness);
+
+    let id = harness.service.start_resource(NetRequest::subresource(
+        format!("http://127.0.0.1:{port}/echo-headers"),
+        format!("http://127.0.0.1:{port}/"),
+    ));
+    harness
+        .service
+        .intercept()
+        .send(InterceptCommand::Continue {
+            id,
+            overrides: Box::new(RequestOverrides {
+                headers: Some(vec![
+                    (String::from("content-length"), String::from("999")),
+                    (String::from("transfer-encoding"), String::from("chunked")),
+                    (String::from("x-kept"), String::from("yes")),
+                ]),
+                ..RequestOverrides::default()
+            }),
+        });
+    harness.pump(|h| h.terminal_count() == 1);
+
+    let sent = harness.body_of(id);
+    assert!(sent.contains("x-kept: yes"), "sent: {sent:?}");
+    assert!(!sent.contains("content-length: 999"), "sent: {sent:?}");
+    assert!(
+        !sent.contains("transfer-encoding: chunked"),
+        "sent: {sent:?}"
+    );
+}
+
+/// A driver can stub a request **while offline**.
+///
+/// Chrome's `Fetch` domain sits above the network stack, so
+/// `setOfflineMode(true)` + `setRequestInterception(true)` + `request.respond()`
+/// is the standard offline-page test. The offline check used to run *before*
+/// the pause point, so the driver never saw the request it meant to stub and
+/// every request failed outright.
+#[test]
+fn a_paused_request_can_be_fulfilled_while_offline() {
+    let port = spawn_server();
+    let harness = Harness::new();
+    enable_all(&harness);
+    harness
+        .service
+        .intercept()
+        .set_conditions(/* offline */ true, std::time::Duration::ZERO);
+
+    let id = harness.service.start_resource(NetRequest::subresource(
+        format!("http://127.0.0.1:{port}/never-reached"),
+        format!("http://127.0.0.1:{port}/"),
+    ));
+    harness.pump(|h| h.paused_id() == Some(id));
+
+    harness.service.intercept().send(InterceptCommand::Fulfill {
+        id,
+        response: Box::new(FulfilledResponse {
+            status: 200,
+            status_text: String::from("OK"),
+            headers: vec![(String::from("content-type"), String::from("text/plain"))],
+            body: b"stubbed".to_vec(),
+        }),
+    });
+    harness.pump(|h| h.terminal_count() == 1);
+    assert_eq!(harness.body_of(id), "stubbed");
+}
+
+/// …and a request the driver *continues* while offline still fails, because
+/// that one really does go to the network.
+#[test]
+fn a_continued_request_still_fails_while_offline() {
+    let port = spawn_server();
+    let harness = Harness::new();
+    enable_all(&harness);
+    harness
+        .service
+        .intercept()
+        .set_conditions(/* offline */ true, std::time::Duration::ZERO);
+
+    let id = harness.service.start_resource(NetRequest::subresource(
+        format!("http://127.0.0.1:{port}/a"),
+        format!("http://127.0.0.1:{port}/"),
+    ));
+    harness.pump(|h| h.paused_id() == Some(id));
+    harness
+        .service
+        .intercept()
+        .send(InterceptCommand::Continue {
+            id,
+            overrides: Box::new(RequestOverrides::default()),
+        });
+    harness.pump(|h| h.terminal_count() == 1);
+    assert!(
+        harness.failed(id),
+        "a continued request must still be refused while offline"
     );
 }

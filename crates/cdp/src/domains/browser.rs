@@ -107,7 +107,15 @@ fn set_download_behavior(connection: &Arc<Connection>, request: &Request) -> Com
             None => connection.registry.all_contexts(),
         };
     for context in contexts {
-        context.set_download_path(path.clone());
+        // A page that is alive but busy never received the new behaviour, and
+        // reporting success there would tell a driver its `deny` took effect on
+        // a page still writing downloads. A page that has *gone* is not an
+        // error — `set_download_path` already distinguishes the two.
+        context.set_download_path(path.clone()).map_err(|error| {
+            ProtocolError::server(format!(
+                "the download behavior could not be applied to every page: {error}"
+            ))
+        })?;
     }
     Ok(serde_json::json!({}))
 }

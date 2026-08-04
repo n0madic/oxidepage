@@ -37,14 +37,14 @@ use crossbeam_channel::{Receiver, Sender};
 // `oxidepage_base` dependency of its own.
 pub use oxidepage_base::{NodeId, Point, Rect, RequestId, Size};
 /// The remote object model (ADR-0030): CDP's `Runtime` vocabulary as plain,
-/// `Send` Rust data. The live values stay in `PageState`.
+/// `Send` Rust data. The live values stay in `WorldState`.
 pub use oxidepage_bindings::remote::{
     EvaluationResult, ExceptionDetails, MAX_REMOTE_OBJECTS, PropertyDescriptor, RemoteObject,
     RemoteSubtype, RemoteType,
 };
 use oxidepage_bindings::{
-    BindCx, EventTargetKey, HostHooks, NavigationBody, PageState, PendingNavigation,
-    TimingMilestone, is_classic_script_type,
+    BindCx, EventTargetKey, HostHooks, NavigationBody, PendingNavigation, TimingMilestone,
+    WorldEnter, WorldId, WorldState, is_classic_script_type,
 };
 use oxidepage_dom::{DomTree, ParseOptions, ParseSignal, Parser, StyleUpdate};
 use oxidepage_js::{
@@ -63,6 +63,7 @@ mod domnode;
 pub mod node_handle;
 pub mod remote;
 mod render;
+mod worlds;
 pub use command::{LoopStats, PageJob};
 pub use domnode::{KeyEvent, LayoutMetrics, MAX_DESCRIPTION_DEPTH, NodeDescription, NodeRef};
 
@@ -73,13 +74,13 @@ pub use render::{ImageFormat, ScreenshotOptions};
 // *this* crate's API, so it is re-exported wholesale: one import path, no
 // `oxidepage_bindings` dependency in an embedder's Cargo.toml (ADR-0025 D9).
 pub use oxidepage_bindings::{
-    ConsoleLevel, ConsoleMessage, DialogEvent, DialogHandler, DialogKind, DialogRequest,
-    DialogResponse, KeyEventKind, KeyInput, MAX_STORAGE_ORIGINS, Modifiers, MouseEventKind,
-    MouseInput, OpenWindowRequest, OpenedWindow, PREVIEW_MAX_DEPTH, PREVIEW_MAX_ENTRIES,
-    PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, PrivateStorageAreas, STORAGE_QUOTA_BYTES, ScriptError,
-    ScriptErrorKind, SharedStorage, StorageArea, StorageAreaKind, StorageNotification,
-    StorageSubscriber, ValuePreview, WheelInput, WindowOp, evict_unreferenced_areas, key_for_code,
-    render_preview, render_preview_top,
+    BindingCall, ConsoleLevel, ConsoleMessage, DialogEvent, DialogHandler, DialogKind,
+    DialogRequest, DialogResponse, KeyEventKind, KeyInput, MAX_STORAGE_ORIGINS, Modifiers,
+    MouseEventKind, MouseInput, OpenWindowRequest, OpenedWindow, PREVIEW_MAX_DEPTH,
+    PREVIEW_MAX_ENTRIES, PREVIEW_MAX_NODES, PREVIEW_MAX_STRING, PrivateStorageAreas,
+    STORAGE_QUOTA_BYTES, ScriptError, ScriptErrorKind, SharedStorage, StorageArea, StorageAreaKind,
+    StorageNotification, StorageSubscriber, ValuePreview, WheelInput, WindowOp,
+    evict_unreferenced_areas, key_for_code, render_preview, render_preview_top,
 };
 pub use oxidepage_export_pdf::{MAX_PDF_PAGES, Margins, PaperSize, PdfOptions};
 pub use oxidepage_js::{StackFrame, parse_stack};
@@ -160,6 +161,39 @@ enum HistoryTarget {
     Replace,
     /// A traversal: move the index to an entry that already exists.
     Traverse(usize),
+}
+
+/// What a load is, beyond its URL — the three things a
+/// [`PendingNavigation::Load`] carries that change how the response is handled.
+///
+/// Grouped rather than passed as three parameters because they travel together
+/// through every navigation path and are meaningless apart: each one on its own
+/// is the difference between "stay in this document" and "fetch".
+struct LoadKind {
+    /// A form submission's request body.
+    body: Option<NavigationBody>,
+    /// `location.reload()`: skip the HTTP cache.
+    reload: bool,
+    /// `<a download>`'s value — `Some` makes the response a download whatever
+    /// it says it is. See [`Page::take_download`].
+    download: Option<String>,
+}
+
+impl LoadKind {
+    /// An ordinary load: no body, no cache bypass, no download request.
+    fn plain() -> Self {
+        Self {
+            body: None,
+            reload: false,
+            download: None,
+        }
+    }
+
+    /// Whether this load can be satisfied without leaving the document, given a
+    /// URL that differs only in its fragment.
+    fn is_plain(&self) -> bool {
+        self.body.is_none() && !self.reload && self.download.is_none()
+    }
 }
 
 /// The fragment of a URL, `None` when it has none or does not parse. Comparing
@@ -276,6 +310,9 @@ pub enum PageRecord {
     Binding {
         name: String,
         payload: String,
+        /// The execution context the call came from, so a binding installed
+        /// in an isolated world is attributed to that world (ADR-0033 D10).
+        context_id: u64,
     },
     /// An `<input type=file>` was activated and a driver asked to intercept
     /// the chooser (ADR-0032 D12).
@@ -721,6 +758,10 @@ struct Timer {
     /// Tie-breaker preserving registration order for equal deadlines.
     seq: u64,
     id: u64,
+    /// The world that scheduled it. `callback` and `args` are that world's
+    /// values and can be invoked nowhere else (ADR-0033 D5), so the loop enters
+    /// this world to fire them.
+    world: WorldId,
     callback: JsValue,
     args: Vec<JsValue>,
     repeat: Option<Duration>,
@@ -785,7 +826,8 @@ struct LoopHooks {
     next_seq: Cell<u64>,
     /// Pending `requestAnimationFrame` callbacks in registration order, fired
     /// (and drained) at each rendering opportunity (Phase 6, ADR-0007 D8).
-    raf_callbacks: RefCell<Vec<(u64, JsValue)>>,
+    /// `(id, world, callback)` — the world is where the callback must run.
+    raf_callbacks: RefCell<Vec<(u64, WorldId, JsValue)>>,
     next_raf_id: Cell<u64>,
     raf_cancelled: RefCell<HashSet<u64>>,
     /// `Page.setInterceptFileChooserDialog` (ADR-0032 D12). Off by default: a
@@ -829,7 +871,7 @@ struct LoopHooks {
     /// Time origin for the payload timestamps the hooks stamp themselves.
     ///
     /// Seeded provisionally at construction and then **replaced with
-    /// `PageState`'s** once the bindings are installed (`Page::new`), because
+    /// `WorldState`'s** once the bindings are installed (`Page::new`), because
     /// the hooks exist before the state does. Sharing one origin is what makes
     /// a console message, an engine warning and a dialog event comparable:
     /// two independently-seeded clocks would order a merged view wrongly.
@@ -944,7 +986,7 @@ impl LoopHooks {
     }
 
     /// A monotonic Unix-epoch timestamp in milliseconds — the same clock and
-    /// origin as `PageState::epoch_now_ms`, hence as `NavigationEvent`.
+    /// origin as `WorldState::epoch_now_ms`, hence as `NavigationEvent`.
     fn now_ms(&self) -> f64 {
         self.time_origin_epoch_ms.get() + self.start.get().elapsed().as_secs_f64() * 1000.0
     }
@@ -1028,8 +1070,21 @@ impl LoopHooks {
     /// Removes and returns the current animation-frame callbacks. Callbacks
     /// registered during firing accumulate in the freshly emptied list and run
     /// at the next opportunity (spec behavior).
-    fn take_raf_callbacks(&self) -> Vec<(u64, JsValue)> {
+    fn take_raf_callbacks(&self) -> Vec<(u64, WorldId, JsValue)> {
         std::mem::take(&mut self.raf_callbacks.borrow_mut())
+    }
+
+    /// Drops every JS value these hooks hold.
+    ///
+    /// Called from `Drop for Page` **before** any world is torn down, so each
+    /// `Persistent` is released while its runtime is still alive. Timers and
+    /// rAF callbacks are the only page-level JS the design permits
+    /// (ADR-0033 D3/D5); if that ever stops being true, this is where the new
+    /// holder must be released too.
+    fn clear_js(&self) {
+        self.timers.borrow_mut().clear();
+        self.raf_callbacks.borrow_mut().clear();
+        self.pending_rejections.borrow_mut().clear();
     }
 
     /// Whether animation-frame `id` was cancelled (consumes the flag).
@@ -1145,6 +1200,7 @@ impl HostHooks for LoopHooks {
 
     fn schedule_timer(
         &self,
+        world: WorldId,
         callback: JsValue,
         args: Vec<JsValue>,
         delay_ms: f64,
@@ -1158,6 +1214,7 @@ impl HostHooks for LoopHooks {
             deadline: Instant::now() + delay,
             seq: self.next_seq(),
             id,
+            world,
             callback,
             args,
             repeat: repeat.then_some(delay),
@@ -1180,10 +1237,10 @@ impl HostHooks for LoopHooks {
         }
     }
 
-    fn request_animation_frame(&self, callback: JsValue) -> f64 {
+    fn request_animation_frame(&self, world: WorldId, callback: JsValue) -> f64 {
         let id = self.next_raf_id.get();
         self.next_raf_id.set(id + 1);
-        self.raf_callbacks.borrow_mut().push((id, callback));
+        self.raf_callbacks.borrow_mut().push((id, world, callback));
         id as f64
     }
 
@@ -1199,7 +1256,7 @@ impl HostHooks for LoopHooks {
                     .raf_callbacks
                     .borrow()
                     .iter()
-                    .map(|(id, _)| *id)
+                    .map(|(id, _, _)| *id)
                     .collect();
                 cancelled.retain(|id| live.contains(id));
             }
@@ -1441,13 +1498,16 @@ impl ModuleSource for ModuleLoader {
 
 /// A page: one realm, one document, one event loop, one net service.
 pub struct Page {
-    // Field order = drop order: bindings state and hooks own persistent JS
-    // references and must drop before the realm; the realm's module loader
-    // holds an `Rc<NetService>`, so `net` (also an `Rc`) keeps the service
-    // alive until after the realm's teardown.
-    state: Rc<PageState>,
+    // Field order = drop order, and `impl Drop for Page` is the primary
+    // guarantee rather than this ordering (ADR-0033 D4). `hooks` holds timer
+    // and rAF callbacks — the only page-level JS values left — so it releases
+    // first; `worlds` then destroys each world's state before its realm; every
+    // world's module loader holds an `Rc<NetService>`, so `net` outlives them
+    // all. `shared` deliberately holds no `JsValue` at all.
     hooks: Rc<LoopHooks>,
-    realm: QuickJsRealm,
+    state: Rc<WorldState>,
+    shared: Rc<oxidepage_bindings::PageShared>,
+    worlds: Rc<worlds::WorldTable>,
     net: Rc<NetService>,
     net_rx: Receiver<NetEvent>,
     /// What a `Content-Disposition: attachment` navigation does (ADR-0032 D13).
@@ -1455,8 +1515,6 @@ pub struct Page {
     /// A `RefCell` because `Browser.setDownloadBehavior` changes it at runtime;
     /// the default is [`DownloadBehavior::Deny`].
     download_behavior: RefCell<DownloadBehavior>,
-    /// Serial for download guids, so a driver can pair a begin with its end.
-    next_download: Cell<u64>,
     in_flight: Cell<usize>,
     pending_async: RefCell<HashMap<RequestId, AsyncScript>>,
     ordered_dynamic_ready: RefCell<BTreeMap<u64, CompletedDynamicScript>>,
@@ -1544,6 +1602,13 @@ pub struct Page {
     next_render_at: Cell<Instant>,
     /// Per-task wall-clock budget enforced through the realm's interrupt.
     script_budget: Rc<ScriptBudget>,
+    /// The realm limits every world of this page is built with.
+    ///
+    /// Kept because an isolated world is built *later*, from a driver command,
+    /// and must be held to the same caps: an embedder that set `memory_limit`
+    /// to contain a hostile page would otherwise have that cap apply to the
+    /// main world alone, and `MAX_WORLDS` uncapped runtimes beside it.
+    realm_options: RealmOptions,
     /// The embedder's command port, installed by [`Page::run_command_loop`].
     ///
     /// `None` for a page an embedder drives directly (the CLI, every test in
@@ -1601,11 +1666,85 @@ pub struct Page {
     /// `backendNodeId` ↔ [`NodeId`], for drivers that name nodes over a wire
     /// (ADR-0031 D1).
     ///
-    /// Lives here and not on [`PageState`] because it holds plain data:
-    /// `ObjectStore` is on `PageState` only because its `JsValue`s are `!Send`
+    /// Lives here and not on [`WorldState`] because it holds plain data:
+    /// `ObjectStore` is on `WorldState` only because its `JsValue`s are `!Send`
     /// and must drop before the realm, and that argument does not transfer.
     /// `bindings` never reads this table and should not learn about it.
     node_handles: RefCell<node_handle::NodeHandleStore>,
+}
+
+/// One execution world, as an embedder sees it (ADR-0033 D10).
+///
+/// Carries the monotonic `context_id`, **not** the internal `WorldId`: a
+/// `WorldId` is reused when a world is rebuilt at a commit, so a stale one
+/// would silently name a live world, where a stale `context_id` is a clean
+/// "no such context".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldInfo {
+    /// `""` for the main world; a driver's chosen name otherwise.
+    pub name: String,
+    pub context_id: u64,
+    /// True for the page's own world (CDP's `auxData.isDefault`).
+    pub is_default: bool,
+}
+
+impl Drop for Page {
+    /// Releases every JS value while the runtime that owns it is still alive.
+    ///
+    /// This is the primary drop-order guarantee, not the field order above: a
+    /// `Persistent` outliving its `Runtime` aborts the process inside
+    /// `JS_FreeRuntime` on a non-empty `gc_obj_list`, and with one runtime per
+    /// world the ordering is spread across `Page`, `WorldTable` and `World`
+    /// (ADR-0033 D4). `dropping_a_page_with_live_worlds_is_clean` exists
+    /// because the failure mode is an abort rather than a test failure.
+    fn drop(&mut self) {
+        // 1. Page-level JS: timer callbacks and their arguments, rAF
+        //    callbacks. `LoopHooks` is the only page-level owner left, and
+        //    every value it holds belongs to some world's runtime.
+        self.hooks.clear_js();
+        // 2. Each world's state before its realm, newest world first.
+        self.worlds.teardown();
+    }
+}
+
+/// Routes a realm's unhandled promise rejections into the page's error stream.
+///
+/// A promise that rejects with nobody listening is how a broken page fails
+/// *silently*: the module evaluated, the app never mounted, and nothing reached
+/// the console. Browsers surface these as `unhandledrejection`; a headless
+/// engine has no console to notice them in, so they become reported errors.
+///
+/// Installed on **every** world (ADR-0033 D1): a job queue is per runtime, so
+/// an isolated world's rejections reach no tracker but its own — and a driver's
+/// injected code failing invisibly is the same bug this exists to prevent.
+fn install_rejection_tracker(realm: &QuickJsRealm, hooks: &Rc<LoopHooks>) {
+    let hooks = Rc::clone(hooks);
+    realm.set_rejection_tracker(Some(Box::new(move |reason, is_handled| {
+        let key = reason.rendered();
+        if is_handled {
+            // A handler attached after the fact: retract the rejection.
+            let mut pending = hooks.pending_rejections.borrow_mut();
+            if let Some(at) = pending.iter().position(|p| p.key == key) {
+                pending.remove(at);
+            }
+            return;
+        }
+        let error =
+            ScriptError::from_js(ScriptErrorKind::UnhandledRejection, &reason, hooks.now_ms());
+        // Bounded like every other stream: these are held until `drain_errors`,
+        // and a page that rejects in a loop must not grow them without limit.
+        // Dropping the oldest costs the ability to retract it, which is the same
+        // trade the other streams make.
+        push_bounded(
+            &hooks.pending_rejections,
+            MAX_SCRIPT_ERRORS,
+            PendingRejection {
+                key,
+                error,
+                queued_at: Instant::now(),
+            },
+        );
+    })));
 }
 
 impl Page {
@@ -1639,6 +1778,14 @@ impl Page {
         let navigator_data = navigator.bindings_data();
         let screen_data = screen.bindings_data();
 
+        // A world's native-stack budget is ours, not QuickJS's 1 MiB default:
+        // `MAX_WORLD_DEPTH` of them must fit one page thread (ADR-0033 D2).
+        let realm_options = RealmOptions {
+            max_stack_size: realm_options
+                .max_stack_size
+                .or(Some(worlds::WORLD_STACK_BYTES)),
+            ..realm_options
+        };
         let realm = QuickJsEngine.new_realm(realm_options)?;
         let script_budget = Rc::new(ScriptBudget::new(
             script_budget.unwrap_or(DEFAULT_SCRIPT_BUDGET),
@@ -1658,52 +1805,22 @@ impl Page {
         if let Some(local_storage) = local_storage {
             *hooks.local_storage.borrow_mut() = local_storage;
         }
-        {
-            // A promise that rejects with nobody listening is how a broken page
-            // fails *silently*: the module evaluated, the app never mounted, and
-            // nothing reached the console. Browsers surface these as
-            // `unhandledrejection`; a headless engine has no console to notice
-            // them in, so they become reported errors instead.
-            let hooks = Rc::clone(&hooks);
-            realm.set_rejection_tracker(Some(Box::new(move |reason, is_handled| {
-                let key = reason.rendered();
-                if is_handled {
-                    // A handler attached after the fact: retract the rejection.
-                    let mut pending = hooks.pending_rejections.borrow_mut();
-                    if let Some(at) = pending.iter().position(|p| p.key == key) {
-                        pending.remove(at);
-                    }
-                    return;
-                }
-                let error = ScriptError::from_js(
-                    ScriptErrorKind::UnhandledRejection,
-                    &reason,
-                    hooks.now_ms(),
-                );
-                // Bounded like every other stream: these are held until
-                // `drain_errors`, and a page that rejects in a loop must not
-                // grow them without limit. Dropping the oldest costs the
-                // ability to retract it, which is the same trade the other
-                // streams make.
-                push_bounded(
-                    &hooks.pending_rejections,
-                    MAX_SCRIPT_ERRORS,
-                    PendingRejection {
-                        key,
-                        error,
-                        queued_at: Instant::now(),
-                    },
-                );
-            })));
-        }
-        let state = oxidepage_bindings::install_with_profiles(
-            &realm,
+        install_rejection_tracker(&realm, &hooks);
+        let shared = oxidepage_bindings::install_page(
             dom,
             Rc::clone(&hooks) as Rc<dyn HostHooks>,
             viewport,
             navigator_data,
             screen_data,
-        )?;
+        );
+        let state =
+            oxidepage_bindings::install_world(&realm, &shared, oxidepage_bindings::MAIN_WORLD, "")?;
+        let world_table = Rc::new(worlds::WorldTable::new());
+        world_table.push(oxidepage_bindings::MAIN_WORLD, "", realm, Rc::clone(&state));
+        // The hop a host callback in one world uses to reach another. Weak, so
+        // the `Page -> WorldTable -> realm -> WorldState -> PageShared` chain
+        // stays acyclic and every runtime is freed on drop.
+        shared.set_world_enter(Rc::downgrade(&world_table) as std::rc::Weak<dyn WorldEnter>);
         state.set_whole_document_visible(whole_document_visible);
         hooks.adopt_time_origin(state.time_origin());
 
@@ -1716,26 +1833,31 @@ impl Page {
         };
         let net = Rc::new(net);
         hooks.set_net(Rc::clone(&net));
-        realm.set_module_loader(Rc::new(ModuleLoader {
-            net: Rc::clone(&net),
-            dom: Rc::clone(&state.dom),
-        }));
+        // Installed on every runtime, so `import()` from an isolated world is
+        // not a silent no-op. The loader's module cache is per runtime, which
+        // is the isolation this stage is for.
+        for world in world_table.all() {
+            world.realm().set_module_loader(Rc::new(ModuleLoader {
+                net: Rc::clone(&net),
+                dom: Rc::clone(&state.dom),
+            }));
+        }
 
         // Capacity 1: this is a level trigger ("there is cross-thread work"),
         // not a queue. A second nudge before the loop drains is redundant, and
         // dropping it is what keeps a chatty sibling from growing anything.
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let page = Self {
-            state,
             hooks,
-            realm,
+            state,
+            shared,
+            worlds: world_table,
             net,
             net_rx,
             download_behavior: RefCell::new(match download_path {
                 Some(path) => DownloadBehavior::Allow(path),
                 None => DownloadBehavior::Deny,
             }),
-            next_download: Cell::new(1),
             in_flight: Cell::new(0),
             pending_async: RefCell::new(HashMap::new()),
             ordered_dynamic_ready: RefCell::new(BTreeMap::new()),
@@ -1765,6 +1887,7 @@ impl Page {
             start_time: Cell::new(Instant::now()),
             next_render_at: Cell::new(Instant::now()),
             script_budget,
+            realm_options,
             cmd_rx: RefCell::new(None),
             pending_jobs: RefCell::new(VecDeque::new()),
             closing: Cell::new(false),
@@ -1817,6 +1940,7 @@ impl Page {
                 replace: false,
                 body: None,
                 reload: false,
+                download: None,
             },
             wait_until,
             /* embedder */ true,
@@ -1835,6 +1959,7 @@ impl Page {
                 replace: true,
                 body: None,
                 reload: true,
+                download: None,
             },
             wait_until,
             /* embedder */ true,
@@ -1845,20 +1970,52 @@ impl Page {
     /// returning its identifier. CDP's
     /// `Page.addScriptToEvaluateOnNewDocument`.
     pub fn add_init_script(&self, source: &str) -> u64 {
-        let id = self.state.next_init_script.get() + 1;
-        self.state.next_init_script.set(id);
+        let id = self.state.page.next_init_script.get() + 1;
+        self.state.page.next_init_script.set(id);
         self.state
+            .page
             .init_scripts
             .borrow_mut()
-            .push((id, source.to_owned()));
+            .push(oxidepage_bindings::InitScript {
+                id,
+                source: source.to_owned(),
+                world: None,
+            });
+        id
+    }
+
+    /// Registers an init script for one world, or the main world when `world`
+    /// is `None` (CDP's `Page.addScriptToEvaluateOnNewDocument { worldName }`).
+    ///
+    /// Naming a world that does not exist creates it, because a driver may send
+    /// this before any `createIsolatedWorld`.
+    pub fn add_init_script_for(&self, source: &str, world: Option<&str>) -> u64 {
+        if let Some(name) = world
+            && !name.is_empty()
+            && let Err(error) = self.create_isolated_world(name)
+        {
+            self.hooks
+                .report_resource_error(format!("could not create world {name:?}: {error}"));
+        }
+        let id = self.state.page.next_init_script.get() + 1;
+        self.state.page.next_init_script.set(id);
+        self.state
+            .page
+            .init_scripts
+            .borrow_mut()
+            .push(oxidepage_bindings::InitScript {
+                id,
+                source: source.to_owned(),
+                world: world.filter(|n| !n.is_empty()).map(str::to_owned),
+            });
         id
     }
 
     /// Removes an init script. `false` if no script has that id.
     pub fn remove_init_script(&self, id: u64) -> bool {
-        let mut scripts = self.state.init_scripts.borrow_mut();
+        let mut scripts = self.state.page.init_scripts.borrow_mut();
         let before = scripts.len();
-        scripts.retain(|(existing, _)| *existing != id);
+        scripts.retain(|script| script.id != id);
         scripts.len() != before
     }
 
@@ -1868,9 +2025,25 @@ impl Page {
     /// init script must not stop the document from loading, and it must not
     /// stop the others from running either.
     fn run_init_scripts(&self) {
-        let scripts: Vec<(u64, String)> = self.state.init_scripts.borrow().clone();
-        for (_, source) in scripts {
-            if let Err(error) = self.with_cx(|cx| cx.scope.eval(&source, "oxidepage:initScript")) {
+        let scripts: Vec<oxidepage_bindings::InitScript> =
+            self.state.page.init_scripts.borrow().clone();
+        for script in scripts {
+            // Routed to its own world: a `worldName` init script is the
+            // driver's own code and must not run against page globals.
+            let world = match script.world.as_deref() {
+                None | Some("") => Some(oxidepage_bindings::MAIN_WORLD),
+                Some(name) => self.world_id_by_name(name),
+            };
+            let Some(world) = world else {
+                self.hooks.report_resource_error(format!(
+                    "init script names world {:?}, which does not exist",
+                    script.world.unwrap_or_default()
+                ));
+                continue;
+            };
+            if let Some(Err(error)) = self.with_cx_in(world, |cx| {
+                cx.scope.eval(&script.source, "oxidepage:initScript")
+            }) {
                 self.report_script_error(&error);
             }
         }
@@ -1883,7 +2056,14 @@ impl Page {
     /// the real number or none at all.
     #[must_use]
     pub fn js_heap_used(&self) -> i64 {
-        self.realm.memory_used()
+        // Summed across worlds: each world is its own runtime with its own
+        // heap, and a driver watching `JSHeapUsedSize` for a leak needs the
+        // page total or none at all.
+        self.worlds
+            .all()
+            .iter()
+            .map(|w| w.realm().memory_used())
+            .sum()
     }
 
     /// The retained body of a completed request, and whether it is text.
@@ -2150,7 +2330,14 @@ impl Page {
         // No `with_cx`: re-pointing the handles is pure Rust, and entering the
         // realm here would run `sync_named_properties` against the document
         // this commit is replacing.
-        oxidepage_bindings::refresh_storage(&self.state);
+        // Every world's `Storage` handles, not just the main world's: each
+        // world installed its own pair, and a handle left pointing at the old
+        // origin's area would read another origin's keys.
+        for world in self.worlds.all() {
+            if let Some(state) = world.state() {
+                oxidepage_bindings::refresh_storage(&state);
+            }
+        }
         self.resubscribe_storage();
     }
 
@@ -2182,7 +2369,11 @@ impl Page {
                 continue;
             }
             dispatched = true;
-            self.with_cx(|cx| {
+            // Every world: `localStorage` is a distinct `Storage` object per
+            // world over the *same* area, so a sibling's write is news to all
+            // of them. The subscriber id stays page-level, so this page is
+            // still never echoed its own write.
+            self.for_each_world(|cx| {
                 if let Err(error) = oxidepage_bindings::dispatch_storage_event(cx, notification) {
                     report_throw(&self.hooks, error);
                 }
@@ -2325,18 +2516,27 @@ impl Page {
                     replace,
                     body,
                     reload,
+                    download,
                 } => {
                     let target = if replace {
                         HistoryTarget::Replace
                     } else {
                         HistoryTarget::Push
                     };
+                    let load = LoadKind {
+                        body,
+                        reload,
+                        download,
+                    };
                     // A fragment-only change, a form POST and a reload are three
                     // different things and only the first stays in the document.
-                    if body.is_none() && !reload && self.is_same_document(&url) {
+                    // A `download` request is none of them: `<a download>` on a
+                    // same-page fragment still has to fetch, because only the
+                    // response has bytes to hand to the download path.
+                    if load.is_plain() && self.is_same_document(&url) {
                         self.commit_same_document(&url, target, None);
                     } else {
-                        self.commit_document(&url, target, body, reload, wait_until, embedder)?;
+                        self.commit_document(&url, target, load, wait_until, embedder)?;
                     }
                 }
                 PendingNavigation::Traverse { delta } => {
@@ -2430,15 +2630,20 @@ impl Page {
     /// `popstate` carries the state of the entry a traversal landed on;
     /// `hashchange` fires whenever the fragment actually changed. Both are
     /// dispatched after the scroll, per HTML's "apply the history step".
-    fn commit_same_document(&self, url: &str, target: HistoryTarget, popstate: Option<JsValue>) {
+    fn commit_same_document(
+        &self,
+        url: &str,
+        target: HistoryTarget,
+        popstate: Option<Option<String>>,
+    ) {
         let previous = self.state.dom.borrow().document_url().to_owned();
         self.state.dom.borrow_mut().set_document_url(url.to_owned());
         {
             let mut history = self.state.history();
             let seq = history.document_seq();
             match target {
-                HistoryTarget::Push => history.push(url.to_owned(), JsValue::Null, seq),
-                HistoryTarget::Replace => history.replace(url.to_owned(), JsValue::Null, seq),
+                HistoryTarget::Push => history.push(url.to_owned(), None, seq),
+                HistoryTarget::Replace => history.replace(url.to_owned(), None, seq),
                 HistoryTarget::Traverse(index) => history.set_index(index),
             }
         }
@@ -2446,8 +2651,11 @@ impl Page {
         self.scroll_to_fragment(url);
 
         if let Some(state) = popstate {
-            self.with_cx(|cx| {
-                if let Err(e) = oxidepage_bindings::fire_pop_state(cx, state) {
+            // Delivered to every world, main first: each materializes the
+            // serialized state itself, so a driver's utility world sees the
+            // same navigation the page does.
+            self.for_each_world(|cx| {
+                if let Err(e) = oxidepage_bindings::fire_pop_state(cx, state.as_deref()) {
                     report_throw(&self.hooks, e);
                 }
             });
@@ -2474,11 +2682,15 @@ impl Page {
         &self,
         url: &str,
         target: HistoryTarget,
-        body: Option<NavigationBody>,
-        reload: bool,
+        load: LoadKind,
         wait_until: WaitUntil,
         embedder: bool,
     ) -> Result<(), JsError> {
+        let LoadKind {
+            body,
+            reload,
+            download,
+        } = load;
         self.record_navigation(NavigationEventKind::Started, url, None);
         // The referrer of the new document is the URL of the one it left. An
         // embedder-driven navigation has no predecessor, so it sends none.
@@ -2503,7 +2715,10 @@ impl Page {
                 let message = error.to_string();
                 self.record_navigation(NavigationEventKind::Failed, url, Some(message.clone()));
                 if embedder {
-                    return Err(JsError::Engine(message));
+                    // `Host`, not `Engine`: this is the network layer's own
+                    // text, and it surfaces as `Page.navigate.errorText`, which
+                    // a driver compares against Chrome's `net::ERR_…` names.
+                    return Err(JsError::Host(message));
                 }
                 // A failed script-initiated navigation keeps the current
                 // document — the page is not blanked, it simply did not move.
@@ -2522,8 +2737,8 @@ impl Page {
         // which is what a browser does. Checked here rather than in `net`
         // because it is a *navigation* rule — the same `Content-Disposition` on
         // a subresource means nothing.
-        if let Some(download) = self.take_download(&final_url, &outcome) {
-            self.record_navigation(NavigationEventKind::Failed, url, Some(download));
+        if let Some(reason) = self.take_download(&final_url, &outcome, download.as_deref()) {
+            self.record_navigation(NavigationEventKind::Failed, url, Some(reason));
             return Ok(());
         }
 
@@ -2556,21 +2771,36 @@ impl Page {
     ///
     /// `Some(reason)` means the navigation must stop — the download was taken,
     /// or refused. `None` means this is an ordinary document, so commit it.
-    fn take_download(&self, final_url: &str, outcome: &FetchOutcome) -> Option<String> {
+    ///
+    /// The guid pairs the `InProgress` announcement with the terminal event.
+    ///
+    /// `requested` is `<a download>`'s value, and its presence alone makes this
+    /// a download: the attribute says so, and the response's own
+    /// `Content-Disposition` — usually absent on a static file server — does not
+    /// get a veto. Its *value* is the author's suggested filename, which wins
+    /// over the server's, per HTML; a bare `download` carries the empty string
+    /// and falls through to the ordinary naming.
+    fn take_download(
+        &self,
+        final_url: &str,
+        outcome: &FetchOutcome,
+        requested: Option<&str>,
+    ) -> Option<String> {
         let disposition = header_value(&outcome.head.headers, "content-disposition")
             .map(|value| oxidepage_net::parse_content_disposition(&value))
             .unwrap_or_default();
-        if !disposition.attachment {
+        if !disposition.attachment && requested.is_none() {
             return None;
         }
-        let suggested = disposition
-            .filename
+        // Sanitized like every other attacker-influenced name: the value is the
+        // page's, so `download="../../.ssh/authorized_keys"` must not become a
+        // path. `write_download` checks containment again before writing.
+        let suggested = requested
+            .and_then(oxidepage_net::sanitize_filename)
+            .or(disposition.filename)
             .or_else(|| filename_from_url(final_url))
             .unwrap_or_else(|| String::from("download"));
-        let guid = format!(
-            "dl-{}",
-            self.next_download.replace(self.next_download.get() + 1)
-        );
+        let guid = next_download_guid();
 
         // Announced before it is written, so a driver sees a download start
         // even if the write then fails.
@@ -2650,11 +2880,12 @@ impl Page {
             self.commit_same_document(&url, HistoryTarget::Traverse(index), Some(state));
             return Ok(());
         }
+        // A traversal re-fetches a document, never a download: the entry it
+        // returns to is one that committed.
         self.commit_document(
             &url,
             HistoryTarget::Traverse(index),
-            None,
-            /* reload */ false,
+            LoadKind::plain(),
             wait_until,
             embedder,
         )
@@ -2668,9 +2899,9 @@ impl Page {
         match target {
             // The initial `about:blank` entry is replaced, never left behind —
             // a fresh tab that loads a page has one entry, not two.
-            HistoryTarget::Push if seq > 1 => history.push(url, JsValue::Null, seq),
+            HistoryTarget::Push if seq > 1 => history.push(url, None, seq),
             HistoryTarget::Push | HistoryTarget::Replace => {
-                history.replace(url, JsValue::Null, seq);
+                history.replace(url, None, seq);
             }
             HistoryTarget::Traverse(index) => {
                 history.set_index(index);
@@ -2762,14 +2993,24 @@ impl Page {
             .chain(self.pending_images.borrow_mut().drain().map(|(id, _)| id))
             .chain(self.pending_fonts.borrow_mut().drain().map(|(id, _)| id))
             // Script-initiated `fetch`/XHR of the previous document; their
-            // promises must never resolve into the new one.
-            .chain(self.state.reset_for_navigation())
+            // promises must never resolve into the new one. **Every** world's,
+            // not just the main one's: an isolated world's `pending_net` is
+            // dropped by `release_js` at teardown without ever reaching
+            // `net.abort`, so a driver's utility-world request would keep
+            // downloading across the commit.
+            .chain(self.reset_worlds_pending_net())
             .collect();
         for id in abort_ids {
             self.net.abort(id);
         }
         // Timers, intervals and animation frames belong to the old document too.
         self.hooks.reset_for_navigation();
+        // Every isolated world is destroyed and rebuilt against a fresh global
+        // before any init script runs (ADR-0033 D9).
+        self.reset_worlds_for_navigation();
+        // A request the outgoing document started must not be routed into the
+        // new one; the ids were aborted just above.
+        self.shared.clear_net_worlds();
         self.deferred.borrow_mut().clear();
         self.ordered_dynamic_ready.borrow_mut().clear();
         self.next_dynamic_order.set(0);
@@ -2956,7 +3197,7 @@ impl Page {
 
     /// Dispatches `readystatechange` on the document after a readiness
     /// transition. Does not bubble (HTML "update the current document
-    /// readiness"); `PageState::mark_timing` has already moved the state, so a
+    /// readiness"); `WorldState::mark_timing` has already moved the state, so a
     /// listener reads the new value.
     fn fire_ready_state_change(&self) {
         self.with_cx(|cx| {
@@ -3155,12 +3396,12 @@ impl Page {
     }
 
     fn eval_classic(&self, source: &str, url: &str, node: Option<NodeId>) -> bool {
-        let previous = self.state.current_script.replace(node);
+        let previous = self.state.page.current_script.replace(node);
         self.with_cx(|cx| {
             let result = cx.scope.eval(source, url);
             // `document.currentScript` is null in promise reactions and other
             // microtasks queued by the script, so restore before the checkpoint.
-            cx.state.current_script.set(previous);
+            cx.state.page.current_script.set(previous);
             let succeeded = match result {
                 Ok(_) => true,
                 Err(error) => {
@@ -3812,6 +4053,17 @@ impl Page {
             // Deliver queued custom-element reactions (may run author JS that
             // mutates the DOM, so it counts as progress).
             progressed |= self.drain_custom_element_reactions();
+            // Promise jobs of **every** world. Job queues are per runtime
+            // (ADR-0033 D1), so a promise created in a utility world — which is
+            // where a driver's whole injected surface lives — would otherwise
+            // never settle: the main world's checkpoint cannot see its queue.
+            progressed |= self.pump_non_main_jobs();
+            // A mutation queues the compound microtask on the queue of the
+            // world that *made* it, so every other world's observers would
+            // never hear about it. Delivering per world at the task boundary is
+            // what makes an injected `MutationObserver` work at all — which is
+            // what a driver's waiting is built on.
+            progressed |= self.deliver_mutation_records();
             // Newly connected `<img>` elements (or `src` changes) start loads.
             self.drain_image_updates();
             // Deferred `<img>` elements that have reached the viewport (lazy mode).
@@ -3924,8 +4176,18 @@ impl Page {
         // Release the net service's cancel-flag entry once a fetch/XHR request
         // reaches a terminal event (otherwise the bookkeeping grows unbounded).
         let terminal = matches!(event, NetEvent::Done { .. } | NetEvent::Error { .. });
-        self.with_cx(|cx| oxidepage_bindings::deliver_net_event(cx, event));
+        // Delivered to the world that started it: the `fetch` promise and the
+        // `XMLHttpRequest` wrapper are that world's values, and settling them
+        // from another is impossible (ADR-0033 D5). A request whose world is
+        // gone — torn down by a commit — falls back to the main world, where
+        // `deliver_net_event` finds no pending entry and drops it.
+        let world = self
+            .shared
+            .net_world_of(id)
+            .unwrap_or(oxidepage_bindings::MAIN_WORLD);
+        self.with_cx_in(world, |cx| oxidepage_bindings::deliver_net_event(cx, event));
         if terminal {
+            self.shared.forget_net_world(id);
             self.net.finish(id);
         }
     }
@@ -3935,14 +4197,27 @@ impl Page {
     /// elements are created/connected between scripts without a checkpoint, so
     /// this must be pumped explicitly. Returns whether any reaction ran.
     fn drain_custom_element_reactions(&self) -> bool {
-        self.with_cx(|cx| {
+        let reacted = self.with_cx(|cx| {
             let reacted = oxidepage_bindings::drain_custom_element_reactions(cx);
             // Apply connect/disconnect wrapper-retention changes in the same
             // step: adds preserve expando state, drops let detached trees free.
             oxidepage_bindings::drain_pinned_connectivity(cx);
             oxidepage_bindings::microtask_checkpoint(cx);
             reacted
-        })
+        });
+        // Every other world's retention too (ADR-0033 D7). An isolated world
+        // otherwise drains only from its own host calls, so an idle one — which
+        // is what a driver's utility world is between commands — never advances
+        // its cursor, and `PageShared::connectivity` is trimmed below the
+        // *minimum* live cursor: the log then grows by one entry per pinned-node
+        // connect/disconnect for the whole life of the document.
+        for world in self.worlds.all() {
+            if world.id == oxidepage_bindings::MAIN_WORLD {
+                continue;
+            }
+            self.with_cx_in(world.id, oxidepage_bindings::drain_pinned_connectivity);
+        }
+        reacted
     }
 
     // === Images (Phase 6, WP-K) ===
@@ -4583,7 +4858,7 @@ impl Page {
                     buffer: Vec::new(),
                 },
             );
-            self.state.fonts_loading.set(true);
+            self.state.page.fonts_loading.set(true);
             return;
         }
         // Every source exhausted: the family never resolves and text keeps its
@@ -4648,11 +4923,13 @@ impl Page {
     /// after a font load's fallback chain is exhausted.
     fn settle_font_ready(&self) {
         let loading = !self.pending_fonts.borrow().is_empty();
-        self.state.fonts_loading.set(loading);
+        self.state.page.fonts_loading.set(loading);
         if loading || self.state.ready_state() == oxidepage_bindings::ReadyState::Loading {
             return;
         }
-        self.with_cx(oxidepage_bindings::resolve_font_ready);
+        // Per world: each world's `document.fonts.ready` promises are its own
+        // values, and resolving them from another world is impossible.
+        self.for_each_world(oxidepage_bindings::resolve_font_ready);
     }
 
     /// Decodes and registers font `bytes` under `family`, reporting whether the
@@ -4782,13 +5059,22 @@ impl Page {
         if self.hooks.event_sink.borrow().is_none() {
             return false;
         }
-        let calls: Vec<(String, String)> =
-            self.state.binding_calls.borrow_mut().drain(..).collect();
+        let calls: Vec<oxidepage_bindings::BindingCall> = self
+            .state
+            .page
+            .binding_calls
+            .borrow_mut()
+            .drain(..)
+            .collect();
         if calls.is_empty() {
             return false;
         }
-        for (name, payload) in calls {
-            self.hooks.emit(PageRecord::Binding { name, payload });
+        for call in calls {
+            self.hooks.emit(PageRecord::Binding {
+                name: call.name,
+                payload: call.payload,
+                context_id: call.context_id,
+            });
         }
         true
     }
@@ -4811,15 +5097,27 @@ impl Page {
                     report_throw(&self.hooks, e);
                 }
             }
-            oxidepage_bindings::microtask_checkpoint(cx);
         });
+        // One checkpoint across every world, because a scroll listener in one
+        // world can queue a MutationObserver microtask in another.
+        self.microtask_checkpoint_all();
         true
     }
 
     /// Delivers pending ResizeObserver/IntersectionObserver notifications
     /// (a `with_cx` wrapper over the bindings' `deliver_observations`).
     fn deliver_observations(&self) -> bool {
-        self.with_cx(oxidepage_bindings::deliver_observations)
+        // Each world owns its own `ResizeObserver`/`IntersectionObserver`
+        // registrations and their callbacks, so delivery fans out. A utility
+        // world observing the page's layout is exactly what a driver's
+        // `waitForSelector` is built on.
+        let mut delivered = false;
+        for world in self.worlds.all() {
+            delivered |= self
+                .with_cx_in(world.id, oxidepage_bindings::deliver_observations)
+                .unwrap_or(false);
+        }
+        delivered
     }
 
     /// Applies queued [`StyleUpdate`]s to the style engine: connects/removes
@@ -5112,7 +5410,9 @@ impl Page {
         // Expose this timer's nesting level so timers it schedules inherit
         // `current + 1` (HTML timer initialization steps).
         let prev_nesting = self.hooks.timer_nesting.replace(timer.nesting);
-        self.with_cx(|cx| {
+        // Fired in the world that scheduled it: the callback is that world's
+        // value, and `restore` in any other would refuse it.
+        self.with_cx_in(timer.world, |cx| {
             oxidepage_bindings::fire_timer_callback(cx, &timer.callback, &timer.args);
         });
         self.hooks.timer_nesting.set(prev_nesting);
@@ -5142,11 +5442,271 @@ impl Page {
         }
     }
 
+    /// Every live world of this page, main world first.
+    #[must_use]
+    pub fn worlds(&self) -> Vec<WorldInfo> {
+        self.worlds
+            .all()
+            .iter()
+            .filter_map(|w| {
+                let state = w.state()?;
+                Some(WorldInfo {
+                    name: w.name.borrow().clone(),
+                    context_id: state.context_id.get(),
+                    is_default: w.id == oxidepage_bindings::MAIN_WORLD,
+                })
+            })
+            .collect()
+    }
+
+    /// Creates — or returns — the isolated world named `name`.
+    ///
+    /// **Idempotent by name within a document.** Chrome mints a fresh context
+    /// per call, but drivers call this once per navigation expecting to rebind,
+    /// and the protocol offers no way to destroy the surplus, so minting would
+    /// leak a context per navigation for the life of the page (ADR-0033 D9).
+    ///
+    /// An empty name would collide with the main world, which is the one name a
+    /// driver must never be able to take over.
+    pub fn create_isolated_world(&self, name: &str) -> Result<WorldInfo, String> {
+        if name.is_empty() {
+            return Err("an isolated world needs a name".into());
+        }
+        if let Some(existing) = self.worlds.by_name(name) {
+            let state = existing
+                .state()
+                .ok_or_else(|| "the world is being torn down".to_owned())?;
+            return Ok(WorldInfo {
+                name: name.to_owned(),
+                context_id: state.context_id.get(),
+                is_default: false,
+            });
+        }
+        if self.worlds.len() >= worlds::MAX_WORLDS {
+            return Err(format!(
+                "a page may hold at most {} execution worlds",
+                worlds::MAX_WORLDS
+            ));
+        }
+        let info = self.install_isolated_world(name)?;
+        // A binding registered for this world (or for every world) must exist
+        // in it from the moment it is created, not from the next commit.
+        self.apply_bindings_to(name);
+        Ok(info)
+    }
+
+    /// Builds a world's runtime, installs the bindings and registers it.
+    fn install_isolated_world(&self, name: &str) -> Result<WorldInfo, String> {
+        // The page's own limits, not `Default`: an embedder that capped the
+        // heap or the GC threshold to contain a hostile page meant the page,
+        // and a world a driver adds later must not be the way out of that cap.
+        let realm = QuickJsEngine
+            .new_realm(self.realm_options)
+            .map_err(|e| e.to_string())?;
+        // Every per-runtime facility is replicated: one interrupt over the
+        // *same* `ScriptBudget`, so a task that crosses worlds keeps one
+        // deadline; the module loader, so `import()` is not a silent no-op; the
+        // rejection tracker, so this world's unhandled rejections are reported
+        // rather than swallowed (a job queue is per runtime).
+        {
+            let budget = Rc::clone(&self.script_budget);
+            realm.set_interrupt(Some(Box::new(move || budget.expired())));
+        }
+        install_rejection_tracker(&realm, &self.hooks);
+        realm.set_module_loader(Rc::new(ModuleLoader {
+            net: Rc::clone(&self.net),
+            dom: Rc::clone(&self.state.dom),
+        }));
+        let id = self.worlds.next_id();
+        let state = oxidepage_bindings::install_world(&realm, &self.shared, id, name)
+            .map_err(|e| e.to_string())?;
+        let context_id = state.context_id.get();
+        self.worlds.push(id, name, realm, state);
+        Ok(WorldInfo {
+            name: name.to_owned(),
+            context_id,
+            is_default: false,
+        })
+    }
+
+    /// Tears every isolated world down and rebuilds it under the same name.
+    ///
+    /// Mandatory at a commit, not an optimisation to skip: a `worldName` init
+    /// script must run against a *fresh* global, and a surviving world's
+    /// wrapper cache, slab, listener registry and object store would all name
+    /// the dead document (ADR-0033 D9). The rebuilt world keeps its name and
+    /// gets a new `context_id`, which is how a driver learns the old one died.
+    fn reset_worlds_for_navigation(&self) {
+        let names = self.worlds.take_isolated();
+        // The registry is rebuilt from scratch: `install_world` re-appends,
+        // and a stale entry would advertise a world that no longer exists.
+        self.shared.forget_isolated_worlds();
+        for name in names {
+            match self.install_isolated_world(&name) {
+                Ok(_) => self.apply_bindings_to(&name),
+                Err(error) => self
+                    .hooks
+                    .report_resource_error(format!("could not rebuild world {name:?}: {error}")),
+            }
+        }
+    }
+
+    /// Pumps the promise-job queue of every world but the main one.
+    ///
+    /// The main world's jobs are drained by its own microtask checkpoints,
+    /// which run at every callback boundary; an isolated world has no such
+    /// boundary of its own unless script is running in it, so the loop has to
+    /// pump it as a task source.
+    fn pump_non_main_jobs(&self) -> bool {
+        let mut progressed = false;
+        for world in self.worlds.all() {
+            if world.id == oxidepage_bindings::MAIN_WORLD || !world.realm().has_pending_jobs() {
+                continue;
+            }
+            progressed = true;
+            self.with_cx_in(world.id, oxidepage_bindings::microtask_checkpoint);
+        }
+        progressed
+    }
+
+    /// Resets every world's per-document state, returning the request ids to
+    /// abort.
+    ///
+    /// The main world is reset in place (it survives the commit); an isolated
+    /// world is about to be destroyed, so only its in-flight requests are
+    /// harvested here — `reset_worlds_for_navigation` does the teardown.
+    fn reset_worlds_pending_net(&self) -> Vec<RequestId> {
+        let mut ids = self.state.reset_for_navigation();
+        for world in self.worlds.all() {
+            if world.id == oxidepage_bindings::MAIN_WORLD {
+                continue;
+            }
+            if let Some(state) = world.state() {
+                ids.extend(state.take_pending_net());
+            }
+        }
+        ids
+    }
+
+    /// Delivers every world's pending `MutationObserver` records.
+    ///
+    /// Records are partitioned by observer id, so a world only ever takes the
+    /// ones belonging to observers it registered.
+    fn deliver_mutation_records(&self) -> bool {
+        let mut delivered = false;
+        for world in self.worlds.all() {
+            delivered |= self
+                .with_cx_in(world.id, oxidepage_bindings::deliver_mutation_observers)
+                .unwrap_or(false);
+        }
+        delivered
+    }
+
+    /// A microtask checkpoint across **every** world, run to quiescence.
+    ///
+    /// One pass per world is not enough: a mutation made in world A queues the
+    /// MutationObserver compound microtask on world **B**'s own job queue, and
+    /// B's reaction can mutate again. The loop is bounded because a runaway is
+    /// the script budget's job, not this function's.
+    fn microtask_checkpoint_all(&self) {
+        const MAX_ROUNDS: usize = 16;
+        for _ in 0..MAX_ROUNDS {
+            let mut progressed = false;
+            for world in self.worlds.all() {
+                let had_jobs = world.realm().has_pending_jobs();
+                self.with_cx_in(world.id, oxidepage_bindings::microtask_checkpoint);
+                progressed |= had_jobs;
+            }
+            if !progressed {
+                break;
+            }
+        }
+    }
+
+    /// Live world ids, main world first.
+    pub(crate) fn world_ids(&self) -> Vec<oxidepage_bindings::WorldId> {
+        self.worlds.all().iter().map(|w| w.id).collect()
+    }
+
+    /// The id of the world registered under `name` (`""` is the main world).
+    pub(crate) fn world_id_by_name(&self, name: &str) -> Option<oxidepage_bindings::WorldId> {
+        self.worlds.by_name(name).map(|w| w.id)
+    }
+
+    /// The id of the world a `Runtime.ExecutionContextId` names.
+    pub(crate) fn world_id_by_context(
+        &self,
+        context_id: u64,
+    ) -> Option<oxidepage_bindings::WorldId> {
+        self.worlds
+            .all()
+            .iter()
+            .find(|w| w.state().is_some_and(|s| s.context_id.get() == context_id))
+            .map(|w| w.id)
+    }
+
+    /// The main world's realm. Every world is a whole realm (ADR-0033 D1); this
+    /// is the one page script runs in.
+    fn main_realm(&self) -> Rc<worlds::World> {
+        self.worlds
+            .get(oxidepage_bindings::MAIN_WORLD)
+            .expect("the main world outlives the page")
+    }
+
+    /// Enters `world` and runs `f` against that world's bindings state.
+    ///
+    /// `None` when the world is gone, is already on the stack, or the nesting
+    /// cap is hit — the same refusal [`WorldEnter::enter`] documents. Callers in
+    /// the event loop treat that as "this world had nothing to do", which is
+    /// correct: the work it would have done belongs to a world that is not in a
+    /// state to do it.
+    fn with_cx_in<T>(
+        &self,
+        world: oxidepage_bindings::WorldId,
+        f: impl FnOnce(&BindCx<'_>) -> T,
+    ) -> Option<T> {
+        if world == oxidepage_bindings::MAIN_WORLD {
+            // The main world takes the same latch as every other: `with_cx`
+            // arms it for the duration of its scope, so a cross-world delivery
+            // arriving back into main while main is live is **refused** here
+            // rather than re-entering a borrowed `Context` and panicking.
+            if self.worlds.is_entered(oxidepage_bindings::MAIN_WORLD) {
+                return None;
+            }
+            return Some(self.with_cx(f));
+        }
+        let owns_budget = self.script_budget.arm();
+        let mut slot = None;
+        let mut once = Some(f);
+        let entered = WorldEnter::enter(&*self.worlds, world, &mut |cx| {
+            if let Some(f) = once.take() {
+                slot = Some(f(cx));
+            }
+        });
+        if owns_budget {
+            self.script_budget.disarm();
+        }
+        entered.then_some(slot).flatten()
+    }
+
+    /// Runs `f` in every live world, main world first (ADR-0033 D6).
+    fn for_each_world(&self, mut f: impl FnMut(&BindCx<'_>)) {
+        for world in self.worlds.all() {
+            self.with_cx_in(world.id, &mut f);
+        }
+    }
+
     /// Enters JS with the per-task script budget armed (a no-op when an outer
     /// `with_cx` already armed it, so a task keeps one deadline throughout).
     fn with_cx<T>(&self, f: impl FnOnce(&BindCx<'_>) -> T) -> T {
         let owns_budget = self.script_budget.arm();
-        let result = self.realm.with_scope(|scope| {
+        // Arms the main world's re-entry latch for the lifetime of this scope
+        // (ADR-0033 D4). `with_cx` is the main world's only entry, so this is
+        // where the guard has to live; `with_cx_in` checks it before delegating
+        // here, and `WorldEnter::enter` checks it for a delivery from another
+        // world.
+        let _entered = self.worlds.mark_entered(oxidepage_bindings::MAIN_WORLD);
+        let result = self.main_realm().realm().with_scope(|scope| {
             let cx = BindCx {
                 scope,
                 state: Rc::clone(&self.state),
@@ -5192,14 +5752,28 @@ impl Page {
 
     /// Runs a GC cycle and processes wrapper finalizations (pin bookkeeping).
     pub fn collect_garbage(&self) {
-        self.realm.run_gc();
+        // Every world first, then every world's finalizer queue: no value can
+        // cross a world (ADR-0033 D1), so a cross-world cycle cannot exist and
+        // per-world collection is complete rather than approximate.
+        for world in self.worlds.all() {
+            world.realm().run_gc();
+        }
         self.process_finalized();
     }
 
+    /// Routes each world's finalized wrappers back to **that world's** state.
+    ///
+    /// `take_finalized` is already per realm, so a slab key can only ever name
+    /// the world that minted it; handing world A's queue to world B's state
+    /// would free an unrelated object at the same key.
     fn process_finalized(&self) {
-        let finalized = self.realm.take_finalized();
-        if !finalized.is_empty() {
-            oxidepage_bindings::process_finalized(&self.state, finalized);
+        for world in self.worlds.all() {
+            let finalized = world.realm().take_finalized();
+            if finalized.is_empty() {
+                continue;
+            }
+            let Some(state) = world.state() else { continue };
+            oxidepage_bindings::process_finalized(&state, finalized);
         }
     }
 
@@ -5636,6 +6210,21 @@ fn mime_for_path(name: &str) -> String {
         _ => "application/octet-stream",
     };
     mime.to_owned()
+}
+
+/// Mints a download guid, unique across every page in the process.
+///
+/// Process-wide rather than per-`Page`, which is what Chrome's UUID is in
+/// effect: a driver keys downloads **browser-wide** by guid — Playwright's
+/// `_onDownloadCreated` stores them on the browser, not the page — so two pages
+/// each counting from 1 hand it the same key twice, and the second page's
+/// terminal event completes the first page's entry.
+fn next_download_guid() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "dl-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// The last path segment of a URL, as a filename.

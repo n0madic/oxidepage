@@ -132,7 +132,12 @@ fn enable(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     // timeout with nobody able to release it. That is the exact wedge D2 exists
     // to prevent, reached through a two-line window.
     session.flags.fetch.store(true, Ordering::Relaxed);
-    intercept(&session)?.enable(patterns, params.handle_auth_requests);
+    intercept(&session)?.enable(
+        request.seq,
+        &session.id,
+        patterns,
+        params.handle_auth_requests,
+    );
     Ok(json!({}))
 }
 
@@ -142,10 +147,15 @@ fn disable(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     // Puppeteer's `NetworkManager` sends this unconditionally when a page is
     // created, before anything was ever enabled, so a missing control is not an
     // error — there is simply nothing to release.
-    if let Some(control) = session.page.intercept() {
-        for id in control.disable() {
-            control.send(InterceptCommand::release(id));
-        }
+    let Some(control) = session.page.intercept() else {
+        return Ok(json!({}));
+    };
+    // `InterceptControl` tracks which sessions want interception, so this ends
+    // it only when the last one lets go — see `InterceptConfig::wanted_by`.
+    // The bookkeeping lives there rather than here because a target's sessions
+    // can span *connections*, and no single connection can see them all.
+    for id in control.disable(request.seq, &session.id) {
+        control.send(InterceptCommand::release(id));
     }
     Ok(json!({}))
 }

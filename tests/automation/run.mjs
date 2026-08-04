@@ -508,6 +508,114 @@ try {
     }
   });
 
+  // === Isolated worlds (ADR-0033) ==========================================
+  //
+  // Driven over a raw CDP session rather than through Puppeteer's own helpers,
+  // because Puppeteer hides its utility world entirely — the point here is to
+  // assert the isolation the driver relies on, not to re-test the driver.
+
+  await check('an isolated world is really isolated', async () => {
+    const worlds = await browser.newPage();
+    try {
+      await worlds.goto(`${base}/index.html`);
+      const client = await worlds.createCDPSession();
+      const { executionContextId } = await client.send('Page.createIsolatedWorld', {
+        worldName: 'probe',
+      });
+
+      // Page globals are not visible in the world…
+      const fromPage = await client.send('Runtime.evaluate', {
+        expression: 'typeof globalThis.__ready',
+        contextId: executionContextId,
+        returnByValue: true,
+      });
+      assertEqual(fromPage.result.value, 'undefined', 'a page global leaked into the world');
+
+      // …and the world's globals are not visible to the page.
+      await client.send('Runtime.evaluate', {
+        expression: 'globalThis.__onlyHere = 1',
+        contextId: executionContextId,
+      });
+      const leaked = await worlds.evaluate(() => typeof globalThis.__onlyHere);
+      assertEqual(leaked, 'undefined', "the world's global leaked into the page");
+
+      // The DOM underneath is the same one.
+      const shared = await client.send('Runtime.evaluate', {
+        expression: "document.getElementById('heading').textContent",
+        contextId: executionContextId,
+        returnByValue: true,
+      });
+      assertEqual(shared.result.value, 'Fixture', 'the world sees a different DOM');
+    } finally {
+      await worlds.close();
+    }
+  });
+
+  await check('an init script with a worldName runs only in that world', async () => {
+    const worlds = await browser.newPage();
+    try {
+      const client = await worlds.createCDPSession();
+      await client.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: 'globalThis.__injected = "yes"',
+        worldName: 'probe',
+      });
+      await worlds.goto(`${base}/index.html`);
+
+      // The world is rebuilt at the commit, so its context id is a new one.
+      const { executionContextId } = await client.send('Page.createIsolatedWorld', {
+        worldName: 'probe',
+      });
+      const inWorld = await client.send('Runtime.evaluate', {
+        expression: 'globalThis.__injected',
+        contextId: executionContextId,
+        returnByValue: true,
+      });
+      assertEqual(inWorld.result.value, 'yes', 'the init script did not run in its world');
+      assertEqual(
+        await worlds.evaluate(() => typeof globalThis.__injected),
+        'undefined',
+        'a worldName init script leaked into the main world',
+      );
+    } finally {
+      await worlds.close();
+    }
+  });
+
+  await check('a binding in a named world is not on the page global', async () => {
+    const worlds = await browser.newPage();
+    try {
+      await worlds.goto(`${base}/index.html`);
+      const client = await worlds.createCDPSession();
+      await client.send('Runtime.addBinding', {
+        name: '__reportFromWorld',
+        executionContextName: 'probe',
+      });
+      assertEqual(
+        await worlds.evaluate(() => typeof globalThis.__reportFromWorld),
+        'undefined',
+        'a world-scoped binding was installed on the page global',
+      );
+
+      const { executionContextId } = await client.send('Page.createIsolatedWorld', {
+        worldName: 'probe',
+      });
+      const called = new Promise((resolve) => client.on('Runtime.bindingCalled', resolve));
+      await client.send('Runtime.evaluate', {
+        expression: '__reportFromWorld("hi")',
+        contextId: executionContextId,
+      });
+      const event = await within(10_000, 'Runtime.bindingCalled', called);
+      assertEqual(event.payload, 'hi', 'binding payload');
+      assertEqual(
+        event.executionContextId,
+        executionContextId,
+        'the call must be attributed to the world it came from',
+      );
+    } finally {
+      await worlds.close();
+    }
+  });
+
   await check('Blob and FileReader', async () => {
     await page.goto(`${base}/index.html`);
     const result = await page.evaluate(async () => {

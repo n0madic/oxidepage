@@ -249,7 +249,11 @@ fn browser_contexts_are_created_listed_and_disposed() {
     let listed = client.call("Target.getBrowserContexts", json!({}));
     assert_eq!(listed["browserContextIds"], json!([context_id.as_str()]));
 
-    // A page created in it reports its context, unlike one in the default.
+    // Every page reports the context it is in, the default one included — which
+    // is what Chrome does, and what Playwright asserts on in
+    // `_onAttachedToTarget` (ADR-0033). What keeps a driver from *disposing* the
+    // default context is that `getBrowserContexts` does not list it, asserted
+    // just above and again below.
     let scoped = client.call(
         "Target.createTarget",
         json!({ "url": "about:blank", "browserContextId": &context_id }),
@@ -268,7 +272,19 @@ fn browser_contexts_are_created_listed_and_disposed() {
         find(&scoped["targetId"])["browserContextId"],
         context_id.as_str()
     );
-    assert_eq!(find(&default["targetId"])["browserContextId"], Value::Null);
+    let default_context = find(&default["targetId"])["browserContextId"].clone();
+    assert!(
+        default_context.is_string(),
+        "every target must report a browserContextId, got {default_context}"
+    );
+    assert_ne!(
+        default_context,
+        Value::String(context_id.clone()),
+        "the default context must not be confused with a created one"
+    );
+    // …and it is still absent from the list a driver may dispose.
+    let listed = client.call("Target.getBrowserContexts", json!({}));
+    assert_eq!(listed["browserContextIds"], json!([context_id.as_str()]));
 
     client.call(
         "Target.disposeBrowserContext",

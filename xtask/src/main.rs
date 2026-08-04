@@ -4,6 +4,8 @@
 //! scaffolded here and error out until their phase lands.
 
 mod golden;
+mod nodeharness;
+mod playwright;
 mod puppeteer;
 mod reftest;
 mod testserver;
@@ -67,6 +69,15 @@ fn main() -> ExitCode {
                 .map(String::as_str);
             puppeteer::run(&workspace_root(), update, filter)
         }
+        Some("playwright") => {
+            let update = args.iter().any(|a| a == "--update");
+            let filter = args
+                .iter()
+                .position(|a| a == "--filter")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            playwright::run(&workspace_root(), update, filter)
+        }
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
             usage();
@@ -94,7 +105,10 @@ fn usage() {
          \x20                    run pixel-compare reftests (tests/reftests)\n\
          \x20 puppeteer [--update] [--filter <substr>]\n\
          \x20                    drive the CDP endpoint with a real Puppeteer\n\
-         \x20                    (tests/automation; needs a Node toolchain)"
+         \x20                    (tests/automation; needs a Node toolchain)\n\
+         \x20 playwright [--update] [--filter <substr>]\n\
+         \x20                    drive the CDP endpoint with a real Playwright\n\
+         \x20                    (tests/playwright; needs a Node toolchain)"
     );
 }
 

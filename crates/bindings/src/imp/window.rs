@@ -87,6 +87,7 @@ pub(crate) fn open(
                 replace: false,
                 body: None,
                 reload: false,
+                download: None,
             });
         }
         // The current window *is* its own `WindowProxy`, which is what a

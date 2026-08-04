@@ -48,6 +48,7 @@ fn navigate_to(cx: &BindCx<'_>, url: String, replace: bool) {
         replace,
         body: None,
         reload: false,
+        download: None,
     });
 }
 
@@ -177,6 +178,7 @@ pub(crate) fn reload(cx: &BindCx<'_>, _this: u64) -> Result<(), JsThrow> {
         replace: true,
         body: None,
         reload: true,
+        download: None,
     });
     Ok(())
 }

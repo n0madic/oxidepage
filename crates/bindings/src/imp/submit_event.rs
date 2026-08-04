@@ -29,28 +29,36 @@ pub(crate) fn constructor(
     {
         // The dictionary member is typed `HTMLElement?`; anything else is a
         // TypeError, as the WebIDL conversion would raise.
-        cx.this_element(&submitter).map_err(|_| {
+        let node = cx.this_element(&submitter).map_err(|_| {
             JsThrow::Type("SubmitEvent constructor: submitter is not an HTMLElement".into())
         })?;
-        data.detail = submitter;
+        data.detail =
+            crate::events::EventDetail::Node(crate::events::PinnedNode::new(&cx.state.dom, node));
     }
     let (value, _) = cx.new_event_object("SubmitEvent", data)?;
     Ok(value)
 }
 
+/// The submitter node, pinned by the event and resolved through **this**
+/// world's wrapper cache.
 pub(crate) fn submitter(cx: &BindCx<'_>, this: EventRef) -> Result<Option<NodeId>, JsThrow> {
-    let value = this.borrow().detail.clone();
-    if value.is_nullish() {
-        return Ok(None);
-    }
-    Ok(cx.this_element(&value).ok())
+    let id = match &this.borrow().detail {
+        crate::events::EventDetail::Node(node) => Some(node.id()),
+        _ => None,
+    };
+    // The pin keeps the node alive, so this can only miss after a navigation
+    // replaced the arena — where `None` is the honest answer.
+    Ok(id.filter(|id| cx.state.dom.borrow().get(*id).is_some()))
 }
 
 /// Builds a trusted `submit` event for [`crate::imp::form_submit`].
-pub(crate) fn new_trusted(
+///
+/// No wrapper is minted here: the dispatch mints one per world that turns out
+/// to have a listener on the path (ADR-0033 D6).
+pub(crate) fn new_trusted_data(
     cx: &BindCx<'_>,
     submitter: Option<NodeId>,
-) -> Result<(JsValue, EventRef), JsThrow> {
+) -> Result<EventRef, JsThrow> {
     let mut data = EventData::new(
         "submit".to_owned(),
         /* bubbles */ true,
@@ -60,7 +68,8 @@ pub(crate) fn new_trusted(
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
     if let Some(node) = submitter {
-        data.detail = cx.node_to_js(node)?;
+        data.detail =
+            crate::events::EventDetail::Node(crate::events::PinnedNode::new(&cx.state.dom, node));
     }
-    cx.new_event_object("SubmitEvent", data)
+    Ok(cx.new_event_data("SubmitEvent", data))
 }

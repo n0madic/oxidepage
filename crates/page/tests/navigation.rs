@@ -208,6 +208,14 @@ fn route(path: &str) -> Vec<u8> {
              <input name='a' value='1'><input id='up' name='doc' type='file'>\
              <button id='btn' type='submit'>go</button></form>",
         ),
+        // A file input under an enctype the author *declared*: the empty-part
+        // rule is HTML's here, not an engine upgrade.
+        "/form-file-multipart.html" => html(
+            "<!doctype html><form id='f' action='/submitted' method='post' \
+                                 enctype='multipart/form-data'>\
+             <input name='a' value='1'><input id='up' name='doc' type='file'>\
+             <button id='btn' type='submit'>go</button></form>",
+        ),
         "/form-multipart.html" => html(
             "<!doctype html><form id='f' action='/submitted' method='post' \
                                  enctype='multipart/form-data'>\
@@ -1067,10 +1075,16 @@ fn a_file_input_forces_multipart_and_sends_the_bytes() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// An **empty** file input still contributes one empty part, per HTML — which
-/// is what lets a server tell "no file chosen" from "field absent".
+/// An **empty** file input does not upgrade the enctype.
+///
+/// ADR-0032 D11's upgrade exists because urlencoded cannot carry bytes, so
+/// honouring the author's enctype would drop an upload. With nothing selected
+/// there are no bytes to lose, and upgrading anyway silently rewrites the wire
+/// format of an ordinary urlencoded post that merely *contains* a file input —
+/// breaking every server that parses the default encoding. Chrome sends the
+/// filename (here, the empty string) as an ordinary urlencoded field.
 #[test]
-fn an_empty_file_input_contributes_an_empty_part() {
+fn an_empty_file_input_does_not_upgrade_the_enctype() {
     let server = spawn_server();
     let page = loopback_page();
     page.navigate(&server.url("/form-file.html"), WaitUntil::Load)
@@ -1082,8 +1096,36 @@ fn an_empty_file_input_contributes_an_empty_part() {
     let seen = server.since(at);
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert!(
+        seen[0]
+            .content_type
+            .starts_with("application/x-www-form-urlencoded"),
+        "the form declared no enctype and chose no file, so it stays \
+         urlencoded: `{}`",
+        seen[0].content_type
+    );
+    // "Field present, no file chosen" still reaches the server — the thing the
+    // empty entry exists to say — just in the encoding that was asked for.
+    assert_eq!(seen[0].body, "a=1&doc=", "got `{}`", seen[0].body);
+}
+
+/// An **empty** file input still contributes one empty part when the form is
+/// genuinely multipart, per HTML — which is what lets a server tell "no file
+/// chosen" from "field absent".
+#[test]
+fn an_empty_file_input_contributes_an_empty_part() {
+    let server = spawn_server();
+    let page = loopback_page();
+    page.navigate(&server.url("/form-file-multipart.html"), WaitUntil::Load)
+        .unwrap();
+
+    let at = server.mark();
+    eval_and_settle(&page, "document.getElementById('btn').click();");
+
+    let seen = server.since(at);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(
         seen[0].content_type.starts_with("multipart/form-data;"),
-        "an empty file input still forces multipart: `{}`",
+        "the author declared multipart: `{}`",
         seen[0].content_type
     );
     assert!(

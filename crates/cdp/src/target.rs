@@ -109,9 +109,9 @@ struct Registry {
     targets: HashMap<String, TargetEntry>,
     /// Insertion order, so `Target.getTargets` is stable across calls.
     order: Vec<String>,
-    /// Protocol id -> engine context. The default context is present under its
-    /// own hex id too, so `Target.getBrowserContexts` can be answered, but
-    /// targets in it report `browser_context_id: None`.
+    /// Protocol id -> engine context, the default context included: every
+    /// target reports the id of the context it is in, and only
+    /// `Target.getBrowserContexts` hides the default one.
     contexts: HashMap<String, BrowserContext>,
     subscribers: Vec<(SubscriptionId, Sender<TargetSignal>)>,
     next_subscription: u64,
@@ -168,11 +168,10 @@ impl TargetRegistry {
         }));
         for context in registry.0.browser.contexts() {
             let id = registry.adopt_context(&context);
-            let reported = (context.id() != default_context).then_some(id);
             for page in context.pages() {
                 // `None`: a pre-existing page may be anywhere, so its URL is
                 // read back by the pump instead of guessed at here.
-                registry.adopt_page(page, context.clone(), reported.clone(), None);
+                registry.adopt_page(page, context.clone(), Some(id.clone()), None);
             }
         }
         registry
@@ -307,11 +306,14 @@ impl TargetRegistry {
             .clone()
             .unwrap_or_else(|| String::from("about:blank"));
         let page = context.new_page(options)?;
-        // A target in the default context omits `browserContextId` entirely;
-        // Puppeteer reads that absence as "this page belongs to the default
-        // context" and will not try to dispose it.
-        let reported = (context.id() != self.0.default_context).then_some(context_id);
-        Ok(self.adopt_page(page, context.clone(), reported, Some(initial_url)))
+        // **Every** page reports a `browserContextId`, the default context's
+        // included, which is what Chrome does — and Playwright asserts on it in
+        // `_onAttachedToTarget`, so an absent one makes `connectOverCDP` throw
+        // before a single check can run. What keeps a driver from *disposing*
+        // the default context is that `Target.getBrowserContexts` still does
+        // not list it (see `context_ids`), and `dispose_context` refuses it
+        // outright.
+        Ok(self.adopt_page(page, context.clone(), Some(context_id), Some(initial_url)))
     }
 
     /// Registers an already-running page and spawns its pump thread.

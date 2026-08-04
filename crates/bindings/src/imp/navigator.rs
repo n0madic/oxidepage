@@ -53,7 +53,7 @@ pub(crate) fn language(_cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<Stri
 }
 
 pub(crate) fn languages(cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<JsValue, JsThrow> {
-    if let Some(value) = this.languages_js.borrow().clone() {
+    if let Some(value) = cx.state.languages_js.borrow().clone() {
         return Ok(value);
     }
     let values: Vec<JsValue> = this
@@ -64,7 +64,7 @@ pub(crate) fn languages(cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<JsVa
         .collect();
     let array = JsValue::Object(cx.scope.new_array(&values).map_err(JsThrow::from)?);
     let frozen = cx.freeze(&array)?;
-    *this.languages_js.borrow_mut() = Some(frozen.clone());
+    *cx.state.languages_js.borrow_mut() = Some(frozen.clone());
     Ok(frozen)
 }
 
@@ -98,21 +98,21 @@ pub(crate) fn pdf_viewer_enabled(
     Ok(false)
 }
 
-pub(crate) fn plugins(cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<JsValue, JsThrow> {
-    if let Some(value) = this.plugins_js.borrow().clone() {
+pub(crate) fn plugins(cx: &BindCx<'_>, _this: Rc<NavigatorData>) -> Result<JsValue, JsThrow> {
+    if let Some(value) = cx.state.plugins_js.borrow().clone() {
         return Ok(value);
     }
     let value = cx.new_plugin_array()?;
-    *this.plugins_js.borrow_mut() = Some(value.clone());
+    *cx.state.plugins_js.borrow_mut() = Some(value.clone());
     Ok(value)
 }
 
-pub(crate) fn mime_types(cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<JsValue, JsThrow> {
-    if let Some(value) = this.mime_types_js.borrow().clone() {
+pub(crate) fn mime_types(cx: &BindCx<'_>, _this: Rc<NavigatorData>) -> Result<JsValue, JsThrow> {
+    if let Some(value) = cx.state.mime_types_js.borrow().clone() {
         return Ok(value);
     }
     let value = cx.new_mime_type_array()?;
-    *this.mime_types_js.borrow_mut() = Some(value.clone());
+    *cx.state.mime_types_js.borrow_mut() = Some(value.clone());
     Ok(value)
 }
 

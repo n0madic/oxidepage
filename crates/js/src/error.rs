@@ -119,6 +119,17 @@ pub enum JsError {
     /// exception value.
     #[error("js engine failure: {0}")]
     Engine(String),
+    /// A failure raised by the host, already phrased for whoever reads it.
+    ///
+    /// `Display` is the message **verbatim** — that is the whole point, and the
+    /// only reason this is not [`JsError::Engine`]. A navigation that fails
+    /// reaches a driver as `Page.navigate.errorText`, where it is compared
+    /// against Chrome's exact `net::ERR_…` names; prefixing it with
+    /// "js engine failure" both mislabels a network error and breaks the
+    /// comparison. Use it only where the host has produced the final text; an
+    /// allocation failure or an unrelated-runtime value is still `Engine`.
+    #[error("{0}")]
+    Host(String),
 }
 
 impl JsError {
@@ -145,7 +156,7 @@ impl JsError {
     pub fn message(&self) -> &str {
         match self {
             JsError::Exception { message, .. } => message,
-            JsError::Engine(message) => message,
+            JsError::Engine(message) | JsError::Host(message) => message,
         }
     }
 
@@ -154,7 +165,7 @@ impl JsError {
     pub fn name(&self) -> Option<&str> {
         match self {
             JsError::Exception { name, .. } => name.as_deref(),
-            JsError::Engine(_) => None,
+            JsError::Engine(_) | JsError::Host(_) => None,
         }
     }
 
@@ -164,7 +175,7 @@ impl JsError {
     pub fn stack(&self) -> &[StackFrame] {
         match self {
             JsError::Exception { stack, .. } => stack,
-            JsError::Engine(_) => &[],
+            JsError::Engine(_) | JsError::Host(_) => &[],
         }
     }
 }
@@ -193,7 +204,7 @@ impl From<JsError> for JsThrow {
                 value: Some(value), ..
             } => JsThrow::Value(value),
             JsError::Exception { message, .. } => JsThrow::Type(message),
-            JsError::Engine(message) => JsThrow::Type(message),
+            JsError::Engine(message) | JsError::Host(message) => JsThrow::Type(message),
         }
     }
 }

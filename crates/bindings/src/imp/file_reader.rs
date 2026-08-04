@@ -83,24 +83,62 @@ fn start(
     this.token.set(token);
 
     let reader = Rc::clone(this);
-    queue_task(cx, "FileReader loadstart", move |cx| {
+    let queued = queue_task(cx, "FileReader loadstart", move |cx| {
         if !still_reading(&reader, token) {
             return;
         }
-        fire(cx, &reader, "loadstart", 0.0, blob.size() as f64);
+        let size = blob.size() as f64;
+        fire(cx, &reader, "loadstart", 0.0, size);
         // Queued from *inside* the first task rather than alongside it: two
         // timers armed at the same instant are only ordered if the embedder's
         // heap is stable, and this makes the ordering structural instead.
-        let reader = Rc::clone(&reader);
+        let inner = Rc::clone(&reader);
         let blob = Rc::clone(&blob);
         let encoding = encoding.clone();
         let queued = queue_task(cx, "FileReader complete", move |cx| {
-            complete(cx, &reader, token, &blob, kind, encoding.as_deref());
+            complete(cx, &inner, token, &blob, kind, encoding.as_deref());
         });
         if let Err(e) = queued {
             cx.warn(&format!("FileReader: could not queue completion: {e:?}"));
+            // The read is over whether or not it got anywhere, so it has to end
+            // like any other failed read. Leaving it at `LOADING` would strand
+            // the reader: no `loadend` for a page awaiting one, and
+            // `InvalidStateError` from every later `readAs*`.
+            fail_read(cx, &reader, size);
         }
-    })
+    });
+    if let Err(e) = queued {
+        // Nothing was queued, so nothing can fire — and firing synchronously
+        // from `readAs*` is not the spec's shape anyway. Rewind instead: the
+        // read never began, the caller gets the failure as a throw, and the
+        // reader stays usable rather than wedged at `LOADING` forever.
+        this.ready_state.set(EMPTY);
+        this.token.set(this.token.get().wrapping_add(1));
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Ends a read that cannot be carried out: DONE, `error` set to the spec's
+/// `NotReadableError`, then `error` and `loadend`.
+///
+/// Every path that abandons a read in flight comes through here. A reader left
+/// at `LOADING` is both unusable and *silent* — no `loadend` ever fires, so a
+/// page awaiting `onloadend` hangs rather than failing.
+fn fail_read(cx: &BindCx<'_>, this: &Reader, size: f64) {
+    this.ready_state.set(DONE);
+    *this.result.borrow_mut() = JsValue::Null;
+    // The exception as a *value*, not a throw: `reader.error` is a property a
+    // handler reads, and nothing here is throwing.
+    *this.error.borrow_mut() = match cx.dom_throw(
+        DomExceptionKind::NotReadableError,
+        "the blob could not be read",
+    ) {
+        JsThrow::Value(value) => value,
+        _ => JsValue::Null,
+    };
+    fire(cx, this, "error", 0.0, size);
+    fire(cx, this, "loadend", 0.0, size);
 }
 
 /// True while the read that issued `token` is still the reader's current one —
@@ -132,19 +170,7 @@ fn complete(
         // does not ship. `NotReadableError` is the spec's own failure reason.
         Err(e) => {
             cx.warn(&format!("FileReader: could not build the result: {e:?}"));
-            this.ready_state.set(DONE);
-            *this.result.borrow_mut() = JsValue::Null;
-            // The exception as a *value*, not a throw: `reader.error` is a
-            // property a handler reads, and nothing here is throwing.
-            *this.error.borrow_mut() = match cx.dom_throw(
-                DomExceptionKind::NotReadableError,
-                "the blob could not be read",
-            ) {
-                JsThrow::Value(value) => value,
-                _ => JsValue::Null,
-            };
-            fire(cx, this, "error", 0.0, size);
-            fire(cx, this, "loadend", 0.0, size);
+            fail_read(cx, this, size);
             return;
         }
     };
@@ -247,10 +273,8 @@ fn fire(cx: &BindCx<'_>, this: &Reader, event_type: &str, loaded: f64, total: f6
     let mut data = super::progress_event::event_data(event_type, true, loaded, total);
     data.is_trusted = true;
     data.time_stamp = cx.now_ms();
-    let Ok((value, data)) = cx.new_event_object("ProgressEvent", data) else {
-        return;
-    };
-    if let Err(e) = crate::events::dispatch_event(cx, key(this), &value, &data) {
+    let data = cx.new_event_data("ProgressEvent", data);
+    if let Err(e) = crate::events::dispatch_event(cx, key(this), &data) {
         cx.warn(&format!("FileReader `{event_type}` dispatch failed: {e:?}"));
     }
 }
@@ -269,7 +293,7 @@ fn queue_task(
     let host: HostFn = Rc::new(move |scope, _call| {
         let cx = BindCx {
             scope,
-            state: crate::cx::page_state(scope)?,
+            state: crate::cx::world_state(scope)?,
         };
         f(&cx);
         Ok(JsValue::Undefined)
@@ -280,7 +304,7 @@ fn queue_task(
         .map_err(JsThrow::from)?;
     cx.state
         .hooks
-        .schedule_timer(JsValue::Object(func), Vec::new(), 0.0, false);
+        .schedule_timer(cx.state.id, JsValue::Object(func), Vec::new(), 0.0, false);
     Ok(())
 }
 

@@ -130,20 +130,17 @@ fn a_failed_request_reports_chromes_error_text() {
     // A failed navigation is not a protocol error: Chrome answers with
     // `errorText`, and Puppeteer turns that into a rejected `page.goto`.
     let outcome = client.collect(navigate).expect("navigate answered");
-    assert!(
-        outcome["errorText"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("net::ERR_BLOCKED_BY_CLIENT"),
-        "a blocked navigation must report the abort reason: {outcome}"
+    // Equality throughout: `errorReason` round-trips to a driver by *name*, and
+    // a substring assertion would pass while a prefixed `blocked: net::ERR_…`
+    // broke every driver comparing it.
+    assert_eq!(
+        outcome["errorText"], "net::ERR_BLOCKED_BY_CLIENT",
+        "a blocked navigation must report the abort reason verbatim: {outcome}"
     );
 
     let failed = client.await_event("Network.loadingFailed");
-    assert!(
-        failed["params"]["errorText"]
-            .as_str()
-            .unwrap()
-            .contains("net::ERR_BLOCKED_BY_CLIENT"),
+    assert_eq!(
+        failed["params"]["errorText"], "net::ERR_BLOCKED_BY_CLIENT",
         "got {}",
         failed["params"]["errorText"]
     );
@@ -295,6 +292,48 @@ fn a_closed_socket_releases_everything_it_was_holding() {
     assert_eq!(title["result"]["value"], "doc");
 }
 
+/// `Browser.close` must not sit out the intercept timeout on a paused page.
+///
+/// `Target.closeTarget` always released first; `Browser.close` went straight to
+/// `Browser::close`. A page parked on the *blocking* pause of its own document
+/// is inside `await_decision`, not at a wait point, so it services no job at all
+/// — the close is answered only when the pause times out, by which point
+/// `join_bounded` has given up and **detached** the thread, leaking it and its
+/// `Page`. Puppeteer closes the browser from a `finally` block, so a driver that
+/// simply errored out mid-interception hits this every time.
+#[test]
+fn closing_the_browser_releases_a_paused_page_instead_of_waiting_it_out() {
+    let fixtures = Fixtures::start(vec![("/index.html", "<title>doc</title>")]);
+    let harness = Harness::start();
+    let (mut driver, driver_session, target) = harness.attached();
+
+    let (mut interceptor, interceptor_session) = harness.attach_existing(&target);
+    intercept(
+        &mut interceptor,
+        &interceptor_session,
+        json!([{ "urlPattern": "*" }]),
+    );
+
+    let _navigate = driver.dispatch(
+        &driver_session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/index.html") }),
+    );
+    let _paused = interceptor.await_event("Fetch.requestPaused");
+
+    // Closed with the pause still outstanding — nobody ever answers it.
+    let started = std::time::Instant::now();
+    driver.call("Browser.close", json!({}));
+    let elapsed = started.elapsed();
+
+    // Comfortably under both the per-page close timeout and the intercept
+    // timeout, either of which the unreleased pause would have burned in full.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "closing a paused browser took {elapsed:?}; the pause was not released"
+    );
+}
+
 #[test]
 fn detaching_releases_everything_the_session_was_holding() {
     // The same release path reached by `Target.detachFromTarget`. A session
@@ -402,12 +441,9 @@ fn offline_emulation_fails_a_navigation() {
         "Page.navigate",
         json!({ "url": fixtures.url("/index.html") }),
     );
-    assert!(
-        outcome["errorText"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("net::ERR_INTERNET_DISCONNECTED"),
-        "an offline navigation must report the disconnection: {outcome}"
+    assert_eq!(
+        outcome["errorText"], "net::ERR_INTERNET_DISCONNECTED",
+        "an offline navigation must report the disconnection verbatim: {outcome}"
     );
 
     // And turning it back off restores the page.
@@ -445,4 +481,41 @@ fn bandwidth_shaping_is_refused_by_name() {
             .contains("downloadThroughput"),
         "the refusal must name the member: {error}"
     );
+}
+
+/// One session's `Fetch.disable` must not turn interception off for another
+/// session attached to the same target.
+///
+/// The intercept config is **page-wide** while `flags.fetch` is per session, so
+/// a `Fetch.disable` used to clear the config for everyone while leaving the
+/// other session's flag `true` — it stopped receiving `Fetch.requestPaused`
+/// with no way to observe why. `Target.attachToTarget` allows two sessions on
+/// one target and Puppeteer's `createCDPSession` produces exactly that.
+#[test]
+fn one_sessions_fetch_disable_leaves_another_sessions_interception_on() {
+    let fixtures = Fixtures::start(vec![("/index.html", "<title>doc</title>")]);
+    let harness = Harness::start();
+    let (mut client, first, target) = harness.attached();
+    let (mut other, second) = harness.attach_existing(&target);
+
+    client.call_on(&first, "Fetch.enable", json!({}));
+    other.call_on(&second, "Fetch.enable", json!({}));
+
+    // The first session bows out; the second still wants interception.
+    client.call_on(&first, "Fetch.disable", json!({}));
+
+    // A navigation must still pause for the session that never disabled.
+    let navigate = other.dispatch(
+        &second,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/index.html") }),
+    );
+    let paused = other.await_event("Fetch.requestPaused");
+    let request_id = paused["params"]["requestId"].as_str().unwrap().to_owned();
+    other.call_on(
+        &second,
+        "Fetch.continueRequest",
+        json!({ "requestId": request_id }),
+    );
+    other.collect(navigate).expect("the navigation completes");
 }

@@ -1,7 +1,7 @@
 //! `CustomElementRegistry` (`window.customElements`), autonomous elements only.
 //!
 //! Definitions and `whenDefined` promises live in
-//! [`PageState::custom_elements`](crate::state::PageState); the DOM tracks only
+//! [`WorldState::custom_elements`](crate::state::WorldState); the DOM tracks only
 //! the set of defined names and a reaction-intent queue. `define` extracts the
 //! constructor's `observedAttributes` and lifecycle callbacks, records the
 //! definition, tells the DOM to upgrade matching existing elements, and

@@ -638,6 +638,23 @@ Conformance work landing outside the phase plan:
   paths. `Blob`/`File`/`FileList`/`FileReader` arrived with it, which also
   closed XHR `responseType: "blob"`, `Response.blob()` and `Blob` request
   bodies. Decisions and v1 limits: ADR-0032.
+- **Isolated worlds**: done, and with it the automation roadmap's stage-9
+  milestone — the gate to Playwright. There are now N execution worlds per page,
+  each a whole `rquickjs::Runtime` with its own global, prototypes, wrapper
+  cache, listener registry and remote-object store, over **one** shared DOM.
+  One runtime per world rather than a second `Context` on a shared one, because
+  `Context::with` is a `RefCell::borrow_mut` (so cross-world event delivery,
+  which is nested by nature, would panic) and `Persistent::restore` compares
+  only the runtime pointer (so a leaked wrapper would go undetected); separate
+  runtimes make nesting legal and turn the leak into a typed error for free.
+  `Runtime.evaluate` routes by `contextId`, `worldName` and
+  `executionContextName` are real, and `DOM.resolveNode`'s `executionContextId`
+  selects the world it mints in. Events reach every world's listeners over one
+  shared payload — main world first, then creation order — with `preventDefault`
+  and `stopImmediatePropagation` shared, and a value created in one world reads
+  as `null` in another. `customElements` is deliberately **not installed**
+  outside the main world. `cargo xtask puppeteer` is 48/48 and the new
+  `cargo xtask playwright` is 13/17. Decisions and v1 limits: ADR-0033.
 
 ## Deliberate limits at the Puppeteer milestone
 
@@ -645,6 +662,29 @@ The roadmap's P6 accounting: the union of every stage's non-goals, so a user of
 `oxidepage serve` can read what will fail before hitting it. Each is a
 *documented rejection* — the protocol method answers `MethodNotFound` or a
 specific error, and the Web API is not installed, so feature detection works.
+
+**Isolated worlds.** `customElements` is not installed in a non-main world:
+a definition's constructor is a main-world function no other world could invoke,
+so a present-but-throwing registry would be the fake P6 forbids (Chrome does
+give isolated worlds a real registry). Microtask ordering is per world — within
+a world ADR-0011's guarantee is untouched, across worlds there is no defined
+order and cannot be with two job queues. Re-entering a world already on the
+stack is refused and reported, not queued. The JS memory cap and stack limit
+apply per world, bounded because only driver commands can create one.
+`Runtime.executionContextDestroyed` is not emitted (a commit's
+`executionContextsCleared` is what both drivers act on), and
+`Page.createIsolatedWorld` is idempotent by name where Chrome mints a fresh
+context per call. No per-world CSP and no per-world prototype-poisoning
+protection: isolation is of globals and wrappers, and the DOM underneath is one
+shared, equally-trusted tree.
+
+**Playwright.** `cargo xtask playwright` is 13 of 17. `page.fill` appends rather
+than replacing (the `Input` domain does not honour a selection);
+`page.setContent`, `page.waitForSelector` and `page.exposeBinding` need the
+injected-script and frame plumbing of the next stage. `Emulation.setEmulatedMedia`
+accepts each media feature's **default** and refuses every other value — and
+note that `matchMedia` reports `prefers-reduced-motion` and `forced-colors` as
+not matching regardless, a pre-existing gap in stylo's media-feature support.
 
 **Interception and network.** Response-stage interception is absent:
 `Fetch.continueResponse`, `Fetch.getResponseBody` and
@@ -673,8 +713,7 @@ already read to completion in memory, so there is no resume and no
 `Browser.cancelDownload`. `deny` is the default, and a download with no
 directory is refused and recorded rather than parsed as HTML.
 
-**Protocol surface.** Isolated worlds are accepted by name and map to the main
-world. No user-agent override, no DOM mutation events over the protocol, no
+**Protocol surface.** No user-agent override, no DOM mutation events over the protocol, no
 touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing
 domain (`Debugger`, `Profiler`, `HeapProfiler`, `CSS`, `Overlay`,
 `Accessibility`). There are no nested browsing contexts, so every frame API

@@ -23,12 +23,21 @@ pub(crate) fn constructor(
         && let Ok(state) = cx.scope.get(obj, "state")
         && !state.is_undefined()
     {
-        data.detail = state;
+        // Serialized on the way in, so the event reads the same in every
+        // world it is dispatched to (ADR-0033 D5).
+        data.detail = match crate::imp::history::serialize_for_event(cx, &state)? {
+            Some(text) => crate::events::EventDetail::Serialized(text),
+            None => crate::events::EventDetail::None,
+        };
     }
     let (value, _) = cx.new_event_object("PopStateEvent", data)?;
     Ok(value)
 }
 
-pub(crate) fn state(_cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
-    Ok(this.borrow().detail.clone())
+pub(crate) fn state(cx: &BindCx<'_>, this: EventRef) -> Result<JsValue, JsThrow> {
+    let serialized = match &this.borrow().detail {
+        crate::events::EventDetail::Serialized(text) => Some(text.clone()),
+        _ => None,
+    };
+    crate::imp::history::deserialize_state(cx, serialized.as_deref())
 }

@@ -100,8 +100,37 @@ impl QuickJsRealm {
     }
 }
 
+impl QuickJsRealm {
+    /// Re-anchors this realm's native-stack budget at the current stack depth.
+    ///
+    /// QuickJS records a runtime's stack ceiling **once, in `JS_NewRuntime`**
+    /// (`quickjs.c:2019`), and rquickjs's own `update_stack_top` compiles to
+    /// nothing without the `parallel` feature (`runtime/raw.rs:194`) — so
+    /// `Context::with`'s call to it is a no-op for us. A realm therefore
+    /// measures `max_stack_size` from wherever it happened to be *created*,
+    /// giving a realm created deep in the page thread's stack an effective
+    /// budget of `max_stack_size + (creation_depth - entry_depth)`: unbounded,
+    /// and anchored to the wrong frame. With one runtime per world a world is
+    /// routinely created deep (inside an embedder job, or from another world's
+    /// host callback), so this is load-bearing rather than theoretical —
+    /// measured at 1.53x the intended budget for a realm created 512 KiB down.
+    ///
+    /// Re-anchoring on entry makes each world's budget exactly
+    /// `max_stack_size` from its own entry point, which is what lets N nested
+    /// worlds be bounded against one thread stack. Nothing needs restoring on
+    /// exit: entering a runtime already on the stack is refused a layer up, so
+    /// every entry is the outermost one for its own runtime.
+    #[allow(unsafe_code)]
+    fn anchor_stack(&self) {
+        // SAFETY: `get_runtime_ptr` returns this realm's live runtime, which
+        // `RealmInner` owns and keeps alive for the call.
+        unsafe { qjs::JS_UpdateStackTop(self.inner.context.get_runtime_ptr()) }
+    }
+}
+
 impl JsRealm for QuickJsRealm {
     fn with_scope<T>(&self, f: impl FnOnce(&dyn JsScope) -> T) -> T {
+        self.anchor_stack();
         self.inner.context.with(|ctx| {
             let scope = QuickScope {
                 ctx,
@@ -126,6 +155,7 @@ impl JsRealm for QuickJsRealm {
     }
 
     fn pump_jobs(&self) -> JobsOutcome {
+        self.anchor_stack();
         let mut out = JobsOutcome::default();
         loop {
             match self.inner.rt.execute_pending_job() {
@@ -364,6 +394,12 @@ impl<'js> QuickScope<'js> {
         if err.is_exception() || self.ctx.has_exception() {
             let caught = self.ctx.catch();
             self.exception_from(caught)
+        } else if matches!(err, rquickjs::Error::UnrelatedRuntime) {
+            // One runtime per world (ADR-0033), so this is always the same
+            // mistake: a value minted in one world reached a scope entered on
+            // another. rquickjs renders it "Restoring Persistent in an
+            // unrelated runtime", which sends the reader looking for a GC bug.
+            JsError::Engine("value belongs to a different JavaScript world".into())
         } else {
             JsError::Engine(err.to_string())
         }

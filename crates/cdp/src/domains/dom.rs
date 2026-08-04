@@ -29,7 +29,7 @@ use oxidepage_engine::page_api::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::domains::runtime::{remote_error, remote_object_json, world_context_id};
+use crate::domains::runtime::{remote_error, remote_object_json};
 use crate::error::{CommandResult, ProtocolError};
 use crate::message::Request;
 use crate::session::Connection;
@@ -178,33 +178,22 @@ fn resolve_node(connection: &Arc<Connection>, request: &Request) -> CommandResul
     let params: Params = request.parse()?;
     let target = params.target.resolve()?;
 
-    // There is one world, named several times (ADR-0030 D8), so the id is
-    // *validated and then ignored*: Puppeteer's `adoptBackendNode` always
-    // passes the utility world's id, and refusing it would break every query.
-    //
-    // Validation is not ceremony. A **stale** id — one minted before a commit —
-    // silently accepted would hand back a handle into the new document while
-    // the driver believes it names the old one: a cross-document alias, which
-    // is the exact failure the handle table exists to prevent. This is stricter
-    // than `Runtime.evaluate`, which ignores `contextId` outright; the
-    // asymmetry is recorded in ADR-0031.
-    if let Some(context_id) = params.execution_context_id {
-        let base = session.page.execution_context_id()?;
-        let known = u64::try_from(context_id).is_ok_and(|id| {
-            id == base
-                || (0..session.isolated_worlds().len())
-                    .any(|index| id == world_context_id(base, index))
-        });
-        if !known {
-            return Err(ProtocolError::server(
-                "Cannot find context with specified id",
-            ));
-        }
-    }
+    // The id now **selects the world** the handle is minted in (ADR-0033 D10),
+    // superseding ADR-0031 D3's "validated, then ignored". A stale id — one
+    // minted before a commit — is still an error rather than a silent
+    // cross-document alias, because context ids are monotonic across documents
+    // *and* worlds: nothing can be mistaken for anything else.
+    let context_id = match params.execution_context_id {
+        None => None,
+        Some(raw) => Some(
+            u64::try_from(raw)
+                .map_err(|_| ProtocolError::server("Cannot find context with specified id"))?,
+        ),
+    };
 
     let object = session
         .page
-        .resolve_node(target, params.object_group)?
+        .resolve_node(target, context_id, params.object_group)?
         .map_err(node_error)?;
     Ok(json!({ "object": remote_object_json(&object) }))
 }

@@ -38,7 +38,10 @@ use oxidepage_style::Viewport;
 pub use console::{ConsoleLevel, ConsoleMessage, ScriptError, ScriptErrorKind};
 pub use cx::BindCx;
 pub use dialog::{DialogEvent, DialogHandler, DialogKind, DialogRequest, DialogResponse};
-pub use events::{EventTargetKey, Modifiers, dispatch_event, fire_pop_state, fire_simple_event};
+pub use events::{
+    EventTargetKey, Modifiers, dispatch_event, dispatch_event_in_this_world, dispatch_event_with,
+    fire_pop_state, fire_simple_event,
+};
 pub use filedata::FileInput;
 pub use imp::input_synth::{
     KeyEventKind, KeyInput, MouseEventKind, MouseInput, WheelInput,
@@ -53,8 +56,9 @@ pub use preview::{
 };
 pub use script::is_classic_script_type;
 pub use state::{
-    HostHooks, MAX_HISTORY_ENTRIES, NavigationBody, NavigatorData, PageState, PendingNavigation,
-    ReadyState, ScreenData, SessionHistory, TimingMilestone,
+    BindingCall, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES, NavigationBody,
+    NavigatorData, PageShared, PendingNavigation, ReadyState, ScreenData, SessionHistory,
+    TimingMilestone, WorldEnter, WorldId, WorldState,
 };
 pub use storage::{
     MAX_STORAGE_ORIGINS, PrivateStorageAreas, QuotaExceeded, STORAGE_QUOTA_BYTES, SharedStorage,
@@ -76,14 +80,14 @@ fn engine_error(throw: JsThrow) -> JsError {
 
 /// Installs the full bindings surface into `realm` over `dom`.
 ///
-/// The returned [`PageState`] is also installed as the realm's host state;
+/// The returned [`WorldState`] is also installed as the realm's host state;
 /// the embedder must drop its own strong reference before the realm.
 pub fn install<R: JsRealm>(
     realm: &R,
     dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
     hooks: Rc<dyn HostHooks>,
     viewport: Viewport,
-) -> Result<Rc<PageState>, JsError> {
+) -> Result<Rc<WorldState>, JsError> {
     install_with_profiles(
         realm,
         dom,
@@ -101,7 +105,7 @@ pub fn install_with_navigator<R: JsRealm>(
     hooks: Rc<dyn HostHooks>,
     viewport: Viewport,
     navigator: NavigatorData,
-) -> Result<Rc<PageState>, JsError> {
+) -> Result<Rc<WorldState>, JsError> {
     install_with_profiles(
         realm,
         dom,
@@ -112,7 +116,11 @@ pub fn install_with_navigator<R: JsRealm>(
     )
 }
 
-/// Installs bindings with embedder-provided immutable Navigator and Screen profiles.
+/// Installs bindings with embedder-provided immutable Navigator and Screen
+/// profiles, creating the page and its main world in one step.
+///
+/// The two halves are [`install_page`] and [`install_world`]; this is the
+/// single-world shorthand every direct embedder and most tests use.
 pub fn install_with_profiles<R: JsRealm>(
     realm: &R,
     dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
@@ -120,8 +128,41 @@ pub fn install_with_profiles<R: JsRealm>(
     viewport: Viewport,
     navigator: NavigatorData,
     screen: ScreenData,
-) -> Result<Rc<PageState>, JsError> {
-    let state = Rc::new(PageState::new(dom, hooks, viewport, navigator, screen));
+) -> Result<Rc<WorldState>, JsError> {
+    let page = install_page(dom, hooks, viewport, navigator, screen);
+    install_world(realm, &page, crate::state::MAIN_WORLD, "")
+}
+
+/// Creates the page-level bindings state (ADR-0033 D3).
+///
+/// One per page. Every world is then installed over it with [`install_world`],
+/// which is what gives N globals one shared DOM, style engine and layout tree.
+#[must_use]
+pub fn install_page(
+    dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
+    hooks: Rc<dyn HostHooks>,
+    viewport: Viewport,
+    navigator: NavigatorData,
+    screen: ScreenData,
+) -> Rc<crate::state::PageShared> {
+    crate::state::PageShared::new(dom, hooks, viewport, navigator, screen)
+}
+
+/// Installs one world's globals into `realm` over shared page state.
+///
+/// `name` is `""` for the main world. An isolated world gets the same
+/// interfaces, prototypes and globals — its own copies of all of them, since it
+/// is a whole separate `Runtime` (ADR-0033 D1) — with exactly one deliberate
+/// omission: `customElements` is **not installed**, because a definition's
+/// constructor is a main-world function that no other world could ever invoke
+/// (D8, and P6 "absent beats fake").
+pub fn install_world<R: JsRealm>(
+    realm: &R,
+    page: &Rc<crate::state::PageShared>,
+    id: crate::state::WorldId,
+    name: &str,
+) -> Result<Rc<WorldState>, JsError> {
+    let state = Rc::new(WorldState::new(Rc::clone(page), id, name.to_owned()));
     realm.set_state(Rc::clone(&state) as Rc<dyn std::any::Any>);
     realm.with_scope(|scope| -> Result<(), JsError> {
         install_bootstrap(scope, &state)?;
@@ -144,10 +185,15 @@ pub fn install_with_profiles<R: JsRealm>(
         install_late_globals(&cx).map_err(engine_error)?;
         Ok(())
     })?;
+    page.worlds.borrow_mut().push(id);
+    // A fresh world holds no wrapper, so it needs none of the log's history —
+    // and starting it at 0 would pin every entry until its first drain, since
+    // the log is trimmed below the *minimum* live cursor.
+    page.set_conn_cursor(id, page.connectivity_seq.get());
     Ok(state)
 }
 
-fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), JsError> {
+fn install_bootstrap(scope: &dyn JsScope, state: &Rc<WorldState>) -> Result<(), JsError> {
     let helpers = scope.eval(BOOTSTRAP_JS, "oxidepage:bootstrap.js")?;
     let JsValue::Object(helpers) = helpers else {
         return Err(JsError::Engine(
@@ -198,6 +244,8 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<PageState>) -> Result<(), J
         set_to_string_tag: get("setToStringTag")?,
         make_dom_exception: get("makeDomException")?,
         structured_clone: get("structuredClone")?,
+        json_stringify: get("jsonStringify")?,
+        json_parse: get("jsonParse")?,
         make_promise: get("makePromise")?,
         resolved_promise: get("resolvedPromise")?,
         record_pairs: get("recordPairs")?,
@@ -337,13 +385,13 @@ fn storage_origin(cx: &BindCx<'_>) -> String {
 /// another origin would keep reading and writing the previous origin's data —
 /// a real bug the JS-`Map` implementation had, and the reason storage moved to
 /// Rust in the first place. Called at every commit.
-/// Takes `&PageState`, not `&BindCx`, on purpose: nothing here needs a JS
+/// Takes `&WorldState`, not `&BindCx`, on purpose: nothing here needs a JS
 /// scope, and entering one would not be free. `Page::with_cx` arms the script
 /// budget and runs `sync_named_properties`, which walks the document's id index
 /// and mutates the global object — at a navigation commit that would sync the
 /// *new* URL's realm against the *outgoing* document, which is both wasted work
 /// and the wrong pairing.
-pub fn refresh_storage(state: &PageState) {
+pub fn refresh_storage(state: &WorldState) {
     let origin = storage_origin_of(
         state.dom.borrow().document_url(),
         state.storage_subscriber().id(),
@@ -414,7 +462,9 @@ pub fn dispatch_storage_event(
     // engine-fired event sets it (`fire_simple_event`, `fire_pop_state`), and a
     // `storage` event the engine dispatched is as trusted as those are.
     data.borrow_mut().is_trusted = true;
-    events::dispatch_event(cx, EventTargetKey::Window, &event, &data)?;
+    // Local: `Page::drain_storage_events` already calls this once per world,
+    // and this event's members live on the wrapper `newStorageEvent` built.
+    events::dispatch_event_in_this_world(cx, EventTargetKey::Window, &data, Some(&event))?;
     // A Rust-driven dispatch at a task boundary: the JS stack is empty now, so
     // the checkpoint `invoke_listeners` skips per-listener happens here.
     microtask_checkpoint(cx);
@@ -582,12 +632,18 @@ fn install_window(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     install_cssom(cx, &global)?;
     install_viewport(cx, &global)?;
     install_named_properties(cx)?;
-    install_custom_elements(cx, &global)?;
+    // Main world only (ADR-0033 D8). A definition's constructor is a main-world
+    // function, so an isolated world's registry could never invoke it — and a
+    // present-but-always-failing `customElements` is exactly the fake P6
+    // forbids. Absent is detectable; feature detection works.
+    if cx.state.is_main() {
+        install_custom_elements(cx, &global)?;
+    }
     Ok(())
 }
 
 /// Installs `window.customElements` — a single `CustomElementRegistry` brand
-/// object (its state lives in `PageState::custom_elements`). Non-writable, like
+/// object (its state lives in `WorldState::custom_elements`). Non-writable, like
 /// `document`.
 fn install_custom_elements(cx: &BindCx<'_>, global: &JsObject) -> Result<(), JsThrow> {
     let registry = cx.new_slab_object("CustomElementRegistry", HostData::CustomElementRegistry)?;
@@ -701,7 +757,7 @@ fn define_named_property(
             Rc::new(move |scope: &dyn JsScope, _call| {
                 let cx = BindCx {
                     scope,
-                    state: cx::page_state(scope)?,
+                    state: cx::world_state(scope)?,
                 };
                 let node = cx.state.dom.borrow().element_by_id(&id);
                 match node {
@@ -1127,6 +1183,8 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
         .map(|u| u.origin().ascii_serialization());
 
     let request = NetRequest {
+        // Script-initiated: no driver override.
+        header_overrides: None,
         method,
         url: absolute,
         headers,
@@ -1153,6 +1211,9 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
         return Ok(promise);
     }
     let id = cx.state.hooks.start_fetch(request);
+    // Tag the request with this world, so its completion is delivered here
+    // and not to whichever world happens to be current (ADR-0033 D10).
+    cx.state.page.note_net_world(id, cx.state.id);
     cx.state.pending_net.borrow_mut().insert(
         id,
         PendingNet::Fetch {
@@ -1479,7 +1540,7 @@ fn record_console(cx: &BindCx<'_>, level: ConsoleLevel, message: String, args: V
         message,
         args,
         location,
-        group_depth: cx.state.console_group_depth.get(),
+        group_depth: cx.state.page.console_group_depth.get(),
         timestamp: cx.state.epoch_now_ms(),
     });
 }
@@ -1541,8 +1602,11 @@ fn install_console(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<(
     define_fn(cx, &console, "group", 0, console_group)?;
     define_fn(cx, &console, "groupCollapsed", 0, console_group)?;
     define_fn(cx, &console, "groupEnd", 0, |cx, _call| {
-        let depth = cx.state.console_group_depth.get();
-        cx.state.console_group_depth.set(depth.saturating_sub(1));
+        let depth = cx.state.page.console_group_depth.get();
+        cx.state
+            .page
+            .console_group_depth
+            .set(depth.saturating_sub(1));
         Ok(JsValue::Undefined)
     })?;
     cx.scope
@@ -1557,8 +1621,11 @@ fn console_group(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     if !call.args.is_empty() {
         console_write(cx, &call.args, ConsoleLevel::Log, true)?;
     }
-    let depth = cx.state.console_group_depth.get();
-    cx.state.console_group_depth.set(depth.saturating_add(1));
+    let depth = cx.state.page.console_group_depth.get();
+    cx.state
+        .page
+        .console_group_depth
+        .set(depth.saturating_add(1));
     Ok(JsValue::Undefined)
 }
 
@@ -1576,7 +1643,10 @@ fn schedule_timer(cx: &BindCx<'_>, call: &HostCall, repeat: bool) -> Result<JsVa
         .get(2..)
         .map(<[JsValue]>::to_vec)
         .unwrap_or_default();
-    let id = cx.state.hooks.schedule_timer(callback, args, delay, repeat);
+    let id = cx
+        .state
+        .hooks
+        .schedule_timer(cx.state.id, callback, args, delay, repeat);
     Ok(JsValue::Number(id))
 }
 
@@ -1601,7 +1671,10 @@ fn install_timers(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<()
     })?;
     define_fn(cx, global, "requestAnimationFrame", 1, |cx, call| {
         let callback = call.arg(0);
-        let id = cx.state.hooks.request_animation_frame(callback);
+        let id = cx
+            .state
+            .hooks
+            .request_animation_frame(cx.state.id, callback);
         Ok(JsValue::Number(id))
     })?;
     define_fn(cx, global, "cancelAnimationFrame", 1, |cx, call| {
@@ -1639,7 +1712,16 @@ pub fn microtask_checkpoint(cx: &BindCx<'_>) {
         // Reactions run before observer delivery: an upgrade or lifecycle
         // callback may mutate the DOM, and those mutations must be visible to
         // the observers delivered in the same checkpoint.
-        let reacted = drain_custom_element_reactions(cx);
+        //
+        // **Main world only** (ADR-0033 D8), for the same reason `cx::native`
+        // gates its own drain: the reaction queue is the *shared DOM's*, while
+        // the definitions live in `WorldState::custom_elements`, which an
+        // isolated world never has. Draining it from another world therefore
+        // pops the page's `connectedCallback`/`attributeChangedCallback`
+        // intents and silently discards them — and since the loop now pumps
+        // every world's job queue, a utility world's settling promise was
+        // enough to eat them.
+        let reacted = cx.state.is_main() && drain_custom_element_reactions(cx);
         let delivered = deliver_mutation_observers(cx);
         if !reacted && !delivered {
             break;
@@ -1653,11 +1735,44 @@ pub fn microtask_checkpoint(cx: &BindCx<'_>) {
 /// there), and the hold is dropped on disconnect so detached subtrees still
 /// free. Returns whether any change was applied.
 pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
-    let changes = cx.state.dom.borrow_mut().take_pinned_connectivity();
-    if changes.is_empty() {
+    let page = Rc::clone(&cx.state.page);
+    // Move whatever the DOM has queued into the page-level log *first*.
+    // `DomTree::take_pinned_connectivity` is `std::mem::take`, so with more than
+    // one world the first to reach it would consume changes every other world
+    // still needs, and ADR-0018's expando guarantee would silently hold for
+    // exactly one world (ADR-0033 D7).
+    {
+        let fresh = cx.state.dom.borrow_mut().take_pinned_connectivity();
+        if !fresh.is_empty() {
+            let mut log = page.connectivity.borrow_mut();
+            let mut seq = page.connectivity_seq.get();
+            for (id, connected) in fresh {
+                seq += 1;
+                log.push_back((seq, id, connected));
+            }
+            page.connectivity_seq.set(seq);
+        }
+    }
+
+    let cursor = page.conn_cursor(cx.state.id);
+    let changes: Vec<(u64, oxidepage_base::NodeId, bool)> = page
+        .connectivity
+        .borrow()
+        .iter()
+        .filter(|(seq, _, _)| *seq > cursor)
+        .copied()
+        .collect();
+
+    // Even with nothing new to apply, a wrapper minted for a node that was
+    // detached at mint time and has since been connected by a path that queued
+    // no change for us must not sit in `pending_conn` forever.
+    let had_provisional = !cx.state.pending_conn.borrow().is_empty();
+    if changes.is_empty() && !had_provisional {
         return false;
     }
-    for (id, connected) in changes {
+
+    for (_, id, connected) in &changes {
+        let (id, connected) = (*id, *connected);
         if connected {
             // Revalidate at the drain boundary (L3): retain only if the node is
             // still connected and still has a live wrapper to hold.
@@ -1674,7 +1789,45 @@ pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
             cx.state.connected_wrappers.borrow_mut().remove(&id);
         }
     }
-    true
+
+    // Settle provisional retentions: a wrapper minted while its node was
+    // detached is promoted if the node is connected now, and released
+    // otherwise — at which point the weak cache governs it again and a detached
+    // subtree can still be freed.
+    if had_provisional {
+        let provisional: Vec<(oxidepage_base::NodeId, JsValue)> =
+            cx.state.pending_conn.borrow_mut().drain().collect();
+        for (id, wrapper) in provisional {
+            let connected = cx
+                .state
+                .dom
+                .borrow()
+                .get(id)
+                .is_some_and(|node| node.is_connected());
+            if connected {
+                cx.state.connected_wrappers.borrow_mut().insert(id, wrapper);
+            }
+        }
+    }
+
+    if let Some((last, _, _)) = changes.last() {
+        page.set_conn_cursor(cx.state.id, *last);
+    }
+    // Trim below the slowest world's cursor. A world that has been torn down
+    // reports no cursor, so a rebuilt world starting at 0 cannot resurrect
+    // entries: `world_ids` only lists live worlds, and a fresh world's caches
+    // name a document whose nodes are all gone anyway.
+    let low = page
+        .world_ids()
+        .into_iter()
+        .map(|w| page.conn_cursor(w))
+        .min()
+        .unwrap_or_else(|| page.conn_cursor(cx.state.id));
+    page.connectivity
+        .borrow_mut()
+        .retain(|(seq, _, _)| *seq > low);
+
+    !changes.is_empty() || had_provisional
 }
 
 /// Invokes the **backup element queue**: every reaction queued with no
@@ -2220,11 +2373,11 @@ struct IoEntryData {
 /// The intersection root rectangle (viewport for an implicit/`Document` root,
 /// else the root element's padding box), in viewport coordinates.
 ///
-/// Under [`PageState::whole_document_visible`] the implicit root spans the whole
+/// Under [`WorldState::whole_document_visible`] the implicit root spans the whole
 /// document instead: the embedder is rendering all of it, so none of it is
 /// below a fold.
 fn io_root_rect(
-    state: &PageState,
+    state: &WorldState,
     dom: &oxidepage_dom::DomTree,
     layout: &oxidepage_layout::LayoutEngine,
     root: Option<oxidepage_base::NodeId>,
@@ -2233,7 +2386,7 @@ fn io_root_rect(
         None => {
             let vp = layout.viewport();
             let (mut width, mut height) = (vp.width, vp.height);
-            if state.whole_document_visible.get()
+            if state.page.whole_document_visible.get()
                 && let Some(root) = dom.document_element()
                 && let Some((scroll_w, scroll_h)) = layout.scroll_size(root)
             {
@@ -2262,7 +2415,7 @@ fn io_root_rect(
 /// Computes the intersection entries for one observer, updating each target's
 /// `last`/`initial_pending`. No JS is called (runs under the layout borrow).
 fn io_compute_entries(
-    state: &PageState,
+    state: &WorldState,
     observer: &state::IntersectionObserverData,
     dom: &oxidepage_dom::DomTree,
     layout: &oxidepage_layout::LayoutEngine,
@@ -2393,7 +2546,13 @@ fn mutation_notify_glue(
     Ok(JsValue::Undefined)
 }
 
-fn deliver_mutation_observers(cx: &BindCx<'_>) -> bool {
+/// Delivers this world's `MutationObserver` records.
+///
+/// Public because the event loop must call it **per world**: a mutation queues
+/// the compound microtask on the queue of the world that made it (ADR-0011),
+/// and with N worlds that leaves every other world's observers untold. Records
+/// are partitioned by observer id, so a world only ever takes its own.
+pub fn deliver_mutation_observers(cx: &BindCx<'_>) -> bool {
     if !cx.state.dom.borrow().observers().has_pending_records() {
         return false;
     }
@@ -2434,7 +2593,7 @@ fn deliver_mutation_observers(cx: &BindCx<'_>) -> bool {
 /// Consumes finalized-wrapper notifications from the engine, decrementing
 /// pins and freeing fully-unpinned detached trees (unless the parser holds
 /// tree handles or observers still reference removed nodes).
-pub fn process_finalized(state: &Rc<PageState>, finalized: Vec<(u32, u64)>) {
+pub fn process_finalized(state: &Rc<WorldState>, finalized: Vec<(u32, u64)>) {
     for (tag, data) in finalized {
         match tag {
             TAG_NODE => {
@@ -2444,7 +2603,7 @@ pub fn process_finalized(state: &Rc<PageState>, finalized: Vec<(u32, u64)>) {
                 {
                     let mut dom = state.dom.borrow_mut();
                     dom.unpin(id);
-                    if !state.parsing.get() && !dom.observers().has_pending_records() {
+                    if !state.page.parsing.get() && !dom.observers().has_pending_records() {
                         dom.free_detached_tree_if_unpinned(id);
                     }
                 }
