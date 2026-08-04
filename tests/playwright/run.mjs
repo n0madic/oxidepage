@@ -28,24 +28,30 @@ if (!endpoint || !base) {
   process.exit(2);
 }
 
-/** Every check that has been run, in order. */
-const results = [];
+/**
+ * How long any one check may take before it is failed instead of left to hang
+ * the whole harness. See `tests/automation/run.mjs` — same contract, same
+ * reason, and it has to be the same in both or the runners diverge.
+ */
+const CHECK_TIMEOUT_MS = 30000;
 
 function report(name, error) {
   if (error) {
     const message = String(error && error.message ? error.message : error)
       .replace(/[\r\n\t]+/g, ' ')
       .slice(0, 300);
-    results.push(`FAIL\t${name}\t${message}`);
+    // Written as it happens rather than collected for the end, so a harness
+    // killed by the runner's backstop still names where it stopped.
+    process.stdout.write(`FAIL\t${name}\t${message}\n`);
   } else {
-    results.push(`PASS\t${name}`);
+    process.stdout.write(`PASS\t${name}\n`);
   }
 }
 
 /** Runs one named check, recording its outcome rather than throwing. */
 async function check(name, body) {
   try {
-    await body();
+    await within(CHECK_TIMEOUT_MS, `check ${name}`, body());
     report(name);
   } catch (error) {
     report(name, error);
@@ -94,7 +100,6 @@ try {
   report('chromium.connectOverCDP');
 } catch (error) {
   report('chromium.connectOverCDP', error);
-  process.stdout.write(`${results.join('\n')}\n`);
   process.exit(0);
 }
 
@@ -211,5 +216,4 @@ try {
   } catch {
     // The socket may already be gone; that is not a check result.
   }
-  process.stdout.write(`${results.join('\n')}\n`);
 }

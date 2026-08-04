@@ -31,24 +31,36 @@ if (!endpoint || !base) {
 // about which directory it is asserting on.
 const downloadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oxidepage-automation-'));
 
-/** Every check that has been run, in order. */
-const results = [];
+/**
+ * How long any one check may take before it is failed instead of left to hang
+ * the whole harness.
+ *
+ * Generous by two orders of magnitude — the entire suite runs in about twelve
+ * seconds — because the only thing this bound has to catch is a check awaiting
+ * something that will never settle. Without it a single protocol hiccup takes
+ * the runner's 180 s backstop and reports nothing at all about where it stopped.
+ */
+const CHECK_TIMEOUT_MS = 30000;
 
 function report(name, error) {
   if (error) {
     const message = String(error && error.message ? error.message : error)
       .replace(/[\r\n\t]+/g, ' ')
       .slice(0, 300);
-    results.push(`FAIL\t${name}\t${message}`);
+    // Written as it happens, not collected for the end: a harness killed by the
+    // runner's backstop has produced nothing at all if its results are still in
+    // an array, and the check it hung on is exactly what the failure needs to
+    // name. The runner parses the stream either way.
+    process.stdout.write(`FAIL\t${name}\t${message}\n`);
   } else {
-    results.push(`PASS\t${name}`);
+    process.stdout.write(`PASS\t${name}\n`);
   }
 }
 
 /** Runs one named check, recording its outcome rather than throwing. */
 async function check(name, body) {
   try {
-    await body();
+    await within(CHECK_TIMEOUT_MS, `check ${name}`, body());
     report(name);
   } catch (error) {
     report(name, error);
@@ -639,5 +651,4 @@ try {
   } catch {
     // The socket may already be gone; that is not a check result.
   }
-  process.stdout.write(`${results.join('\n')}\n`);
 }

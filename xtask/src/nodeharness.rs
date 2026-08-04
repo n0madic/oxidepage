@@ -18,8 +18,10 @@ use std::process::{Command, ExitCode, Stdio};
 
 /// How long the whole Node harness gets before it is killed.
 ///
-/// Every individual check has its own timeout inside `run.mjs`; this is the
-/// backstop for the harness hanging as a whole, which a protocol bug can cause.
+/// Every individual check is bounded inside `run.mjs` by `CHECK_TIMEOUT_MS`, so
+/// a hung check fails as a *check*; this is the backstop for the harness hanging
+/// as a whole, which a protocol bug can cause. Reaching it used to report
+/// nothing but the elapsed time — see [`hang_context`].
 pub const HARNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// The parsed outcome of one harness run: check name -> (status, message).
@@ -77,7 +79,16 @@ pub fn run_harness(dir: &Path, endpoint: &str, base: &str) -> Result<Results, St
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("the harness hung for {HARNESS_TIMEOUT:?}"));
+                // The partial output, *not* a bare "it hung": `run.mjs` writes
+                // each result as it happens, so the last line named is the check
+                // before the one that stopped — which is the whole of what a CI
+                // log has to go on. Discarding it here is how a 180 s timeout
+                // came back saying nothing at all.
+                let partial = reader.join().unwrap_or_default();
+                return Err(format!(
+                    "the harness hung for {HARNESS_TIMEOUT:?}{}",
+                    hang_context(&partial)
+                ));
             }
             Err(error) => return Err(format!("waiting for node failed: {error}")),
         }
@@ -99,6 +110,23 @@ pub fn run_harness(dir: &Path, endpoint: &str, base: &str) -> Result<Results, St
         );
     }
     Ok(results)
+}
+
+/// Says how far a killed harness got, for the error that reports the hang.
+fn hang_context(partial: &str) -> String {
+    let done: Vec<&str> = partial
+        .lines()
+        .filter(|line| line.starts_with("PASS\t") || line.starts_with("FAIL\t"))
+        .filter_map(|line| line.split('\t').nth(1))
+        .collect();
+    match done.last() {
+        Some(last) => format!(
+            "; {} check(s) completed, the last being `{last}` — the hang is in \
+             whichever check follows it",
+            done.len()
+        ),
+        None => String::from("; no check completed at all"),
+    }
 }
 
 /// Reads the expectation file: `name<TAB>status`, `#` comments skipped.
@@ -182,4 +210,33 @@ pub fn compare(runner: &str, path: &Path, results: &Results, filter: Option<&str
         eprintln!("{runner}: STALE {name} — no such check; remove it from expectations.tsv");
     }
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hang_context_names_the_last_completed_check() {
+        let partial = "PASS\tbrowser.version\nPASS\tpage.goto\nFAIL\tpage.pdf\tno\n";
+        let context = hang_context(partial);
+        assert!(context.contains("3 check(s) completed"), "{context}");
+        assert!(context.contains("`page.pdf`"), "{context}");
+    }
+
+    #[test]
+    fn hang_context_says_so_when_nothing_ran() {
+        // The shape a harness that hung before its first check produces — and
+        // the one the runner used to report for *every* hang, having thrown the
+        // partial output away.
+        assert!(hang_context("").contains("no check completed"));
+    }
+
+    #[test]
+    fn hang_context_ignores_lines_that_are_not_results() {
+        // `run.mjs` owns stdout, but a dependency logging a deprecation warning
+        // there would otherwise be reported as the last check that ran.
+        let partial = "PASS\tbrowser.version\n(node:1) DeprecationWarning: whatever\n";
+        assert!(hang_context(partial).contains("`browser.version`"));
+    }
 }
