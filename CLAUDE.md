@@ -14,7 +14,7 @@ Write a new ADR (copy `docs/adr/0000-template.md`) for any change to crate bound
 
 ## Build & test
 
-**Prerequisite:** `python3` must be on `PATH` — stylo's `build.rs` runs a mako code generator. No other native toolchain is needed.
+**Prerequisites:** `python3` must be on `PATH` — stylo's `build.rs` runs a mako code generator. On **Linux** you also need fontconfig's development files (`libfontconfig1-dev` on Debian/Ubuntu): `parley/system`, on by default through `layout`'s `system_fonts`, links it, and its `build.rs` panics rather than degrades when `pkg-config` cannot find it. macOS and Windows use their own font APIs and need nothing.
 
 ```sh
 cargo build --workspace --all-targets
