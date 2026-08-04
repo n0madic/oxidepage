@@ -67,10 +67,7 @@ fn prescan(bytes: &[u8]) -> Option<&'static Encoding> {
             // Skip the comment; the terminating "-->" may share dashes with
             // the opener per spec ("<!-->" is a complete comment).
             pos += 2;
-            match find_subsequence(&bytes[pos..], b"-->") {
-                Some(i) => pos += i + 3,
-                None => return None,
-            }
+            pos += find_subsequence(&bytes[pos..], b"-->")? + 3;
             continue;
         }
         if starts_with_ignore_case(&bytes[pos..], b"<meta")
@@ -104,10 +101,7 @@ fn prescan(bytes: &[u8]) -> Option<&'static Encoding> {
         }
         if bytes[pos] == b'<' && matches!(bytes.get(pos + 1), Some(b'!' | b'/' | b'?')) {
             // Markup declaration or bogus comment: skip to '>'.
-            match bytes[pos..].iter().position(|&b| b == b'>') {
-                Some(i) => pos += i + 1,
-                None => return None,
-            }
+            pos += bytes[pos..].iter().position(|&b| b == b'>')? + 1;
             continue;
         }
         pos += 1;

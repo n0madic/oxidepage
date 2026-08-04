@@ -1,0 +1,16 @@
+# Line endings are content here, not presentation.
+#
+# The display-list goldens are compared byte for byte against output the engine
+# always writes with LF, so a Windows checkout — where git's default is
+# `core.autocrlf=true` — failed all ten of them while every engine test passed.
+# Normalizing the whole tree rather than the goldens alone: the expectation
+# TSVs, the `.dat` suites and the HTML fixtures are read as bytes somewhere too,
+# and a rule that lists today's byte-compared files silently stops covering
+# tomorrow's. No file in the tree contains a CR, so this rewrites nothing.
+* text=auto eol=lf
+
+# The assets git must never touch, stated rather than left to its detection.
+*.png binary
+*.ico binary
+*.ttf binary
+*.woff2 binary
