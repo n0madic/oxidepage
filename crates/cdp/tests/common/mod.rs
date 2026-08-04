@@ -271,6 +271,16 @@ pub struct Client {
     /// kept rather than discarded — a test asserting on `targetCreated` would
     /// otherwise lose it to whichever command happened to be in flight.
     events: Vec<Value>,
+    /// Answers that arrived while waiting for a *different* command's answer.
+    ///
+    /// Kept for the same reason `events` are, and for a sharper one: a command
+    /// on the priority lane and a [`Client::dispatch`]ed one on its session
+    /// lane are answered by different threads (ADR-0032 D4), so the two frames
+    /// race on the wire. Discarding the one not being waited for leaves the
+    /// later [`Client::collect`] reading until the timeout — a hang that
+    /// reproduces only where the scheduler happens to order the two writes the
+    /// other way, which is how it stayed invisible until Windows CI.
+    responses: Vec<Value>,
 }
 
 impl Client {
@@ -287,6 +297,7 @@ impl Client {
             socket,
             next_id: 0,
             events: Vec::new(),
+            responses: Vec::new(),
         }
     }
 
@@ -361,34 +372,39 @@ impl Client {
     /// For frames written with [`Client::send_raw`], where the test picked the
     /// id itself and wants to see the raw envelope rather than a `Result`.
     pub fn await_frame(&mut self, id: i64) -> Value {
+        if let Some(index) = self
+            .responses
+            .iter()
+            .position(|message| message.get("id").and_then(Value::as_i64) == Some(id))
+        {
+            return self.responses.remove(index);
+        }
         let deadline = Instant::now() + TIMEOUT;
         loop {
             let message = self.read_frame(deadline);
             if message.get("id").and_then(Value::as_i64) == Some(id) {
                 return message;
             }
-            if message.get("method").is_some() {
-                self.events.push(message);
-            }
+            self.stash(message);
         }
     }
 
     fn await_response(&mut self, id: i64) -> Result<Value, Value> {
-        let deadline = Instant::now() + TIMEOUT;
-        loop {
-            let message = self.read_frame(deadline);
-            if message.get("id").and_then(Value::as_i64) == Some(id) {
-                return match message.get("error") {
-                    Some(error) => Err(error.clone()),
-                    None => Ok(message.get("result").cloned().unwrap_or(json!({}))),
-                };
-            }
-            if message.get("method").is_some() {
-                self.events.push(message);
-            }
-            // Anything else is a response to a command this test is not waiting
-            // on; dropping it is correct.
+        let message = self.await_frame(id);
+        match message.get("error") {
+            Some(error) => Err(error.clone()),
+            None => Ok(message.get("result").cloned().unwrap_or(json!({}))),
         }
+    }
+
+    /// Keeps a frame this call is not waiting for, so a later one can have it.
+    fn stash(&mut self, message: Value) {
+        if message.get("method").is_some() {
+            self.events.push(message);
+        } else if message.get("id").is_some() {
+            self.responses.push(message);
+        }
+        // Anything else carries neither: a non-text frame read as `{}`.
     }
 
     /// The next event named `method`, from the buffer or the wire.
@@ -411,9 +427,7 @@ impl Client {
             if message.get("method").and_then(Value::as_str) == Some(method) {
                 return Some(message);
             }
-            if message.get("method").is_some() {
-                self.events.push(message);
-            }
+            self.stash(message);
         }
         None
     }
@@ -440,10 +454,11 @@ impl Client {
                 .block_on(async { tokio::time::timeout(remaining, self.socket.next()).await });
             match read {
                 Ok(Some(Ok(Message::Text(text)))) => {
-                    if let Ok(value) = serde_json::from_str::<Value>(&text)
-                        && value.get("method").is_some()
-                    {
-                        self.events.push(value);
+                    // Responses are stashed, not dropped, even here: this
+                    // window is about clearing the *event* baseline, and an
+                    // answer thrown away is a `collect` that never returns.
+                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                        self.stash(value);
                     }
                 }
                 Ok(Some(Ok(_))) => {}

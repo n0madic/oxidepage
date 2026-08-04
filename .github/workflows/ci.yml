@@ -22,6 +22,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+      # `parley/system` (on by default via `layout`'s `system_fonts`) links
+      # fontconfig on Linux, and the runner image ships no `fontconfig.pc`.
+      - name: Fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all --check
@@ -48,6 +52,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+      # See the lint job: the system font source needs fontconfig on Linux.
+      - name: Fontconfig headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace --all-targets
@@ -72,6 +80,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+      # See the lint job: the system font source needs fontconfig on Linux.
+      - name: Fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - uses: Swatinem/rust-cache@v2
       # Release build: each test runs in its own subprocess (via current_exe),
       # so a release xtask runs the JS/style engine at full speed, and the
@@ -95,6 +106,9 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: tests/automation/package.json
+      # See the lint job: the system font source needs fontconfig on Linux.
+      - name: Fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - uses: Swatinem/rust-cache@v2
       # Release for the same reason the WPT job is: this drives the whole engine
       # through a real driver, and a debug build turns minutes into tens of them.

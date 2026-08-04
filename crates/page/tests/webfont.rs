@@ -6,6 +6,8 @@
 //! layout: three `A`s at `font-size: 100px` measure 180px wide (3 × 60px) only
 //! when the web font is used — a fallback font would give a different advance.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use oxidepage_page::{Page, PageOptions, ResourcePolicy, WaitUntil, load_html_page};
@@ -57,6 +59,19 @@ fn width_of(html: &str, selector: &str) -> f64 {
 /// A loopback server: `/index.html`, a 404 at `/missing.woff2`, the real font at
 /// `/real.woff2`, and Ahem at `/ahem.ttf`.
 fn spawn_server(html: String) -> u16 {
+    // An open gate: `/held.woff2` answers at once for every test that does not
+    // care about the window in which the load is still in flight.
+    spawn_gated_server(html, Arc::new(AtomicBool::new(true)))
+}
+
+/// [`spawn_server`], plus `/held.woff2` — which answers only once `gate` is
+/// set.
+///
+/// For the one test that has to observe a font load *while it is in flight*.
+/// Loopback delivers a response as fast as the page can reach the assertion, so
+/// a test that merely hopes to look in time is deciding a race — and it lost it
+/// on Windows CI, where the font had already landed and `status` read "loaded".
+fn spawn_gated_server(html: String, gate: Arc<AtomicBool>) -> u16 {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -72,6 +87,7 @@ fn spawn_server(html: String) -> u16 {
                     return;
                 };
                 let html = html.clone();
+                let gate = Arc::clone(&gate);
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut tmp = [0u8; 2048];
@@ -91,6 +107,15 @@ fn spawn_server(html: String) -> u16 {
                     let path = head.split_whitespace().nth(1).unwrap_or("/");
                     let response = match path {
                         "/index.html" => resp(200, "OK", "text/html", html.as_bytes()),
+                        "/held.woff2" => {
+                            // Polled rather than signalled: a latch a test may
+                            // open before the request even arrives cannot lose
+                            // the wake-up this way.
+                            while !gate.load(Ordering::Relaxed) {
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                            resp(200, "OK", "font/woff2", WOFF2_BYTES)
+                        }
                         "/real.woff2" => resp(200, "OK", "font/woff2", WOFF2_BYTES),
                         "/ahem.ttf" => resp(200, "OK", "font/ttf", AHEM_TTF),
                         _ => resp(404, "Not Found", "text/plain", b"nope"),
@@ -407,7 +432,7 @@ fn document_fonts_load_resolves_with_a_sequence() {
 fn document_fonts_status_and_ready_track_an_in_flight_http_font_load() {
     let html = "<!DOCTYPE html><body style='margin:0'>\
            <style>@font-face { font-family: 'Web'; \
-             src: url(/real.woff2) format('woff2'); }</style>\
+             src: url(/held.woff2) format('woff2'); }</style>\
            <span id='t' style='font:100px Web'>A</span>\
            <script>\
              window.__resolved = false;\
@@ -415,7 +440,11 @@ fn document_fonts_status_and_ready_track_an_in_flight_http_font_load() {
            </script>\
          </body>"
         .to_owned();
-    let port = spawn_server(html);
+    // `/held.woff2`: the font answers only once this test lets it, so "still in
+    // flight" is a fact the fixture enforces rather than a race the assertions
+    // hope to win.
+    let gate = Arc::new(AtomicBool::new(false));
+    let port = spawn_gated_server(html, Arc::clone(&gate));
 
     let page = Page::new(PageOptions {
         policy: Some(ResourcePolicy::permissive_localhost()),
@@ -442,6 +471,8 @@ fn document_fonts_status_and_ready_track_an_in_flight_http_font_load() {
         "false",
         "ready must not resolve before the in-flight load settles"
     );
+
+    gate.store(true, Ordering::Relaxed);
 
     page.settle(Duration::from_secs(5));
 

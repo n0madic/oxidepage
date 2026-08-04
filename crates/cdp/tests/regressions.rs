@@ -745,9 +745,46 @@ fn a_slow_target_cannot_strand_another_targets_dialog() {
         "the dialog answer took {elapsed:?}; another target's load must not delay it"
     );
 
-    // The three commands still in flight are left to finish on their own: their
-    // replies arrive in completion order, and `collect` discards every response
-    // it is not waiting for, so asking for them in dispatch order would drop one
-    // and then block for it.
+    // The three commands still in flight are left to finish on their own. They
+    // answer in completion order rather than dispatch order, which the client
+    // now keeps rather than discards — see
+    // `an_answer_read_while_waiting_for_another_is_kept`.
     let _ = (opening, stop, slow);
+}
+
+#[test]
+fn an_answer_read_while_waiting_for_another_is_kept() {
+    let fixtures = Fixtures::start(vec![("/slow-300", "<title>slow</title>")]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+
+    // Answers are written by the thread that produced them — a session lane, the
+    // shared priority lane, the browser lane — so two commands in flight answer
+    // in *completion* order and a client cannot assume it dispatched them in the
+    // order it will read them. The test client used to drop every frame it was
+    // not waiting for, which turned the reordering into a `collect` that read
+    // until the 20 s timeout: Windows CI hit it on `Fetch.failRequest`
+    // overtaking the `Page.navigate` it released, where the whole point of the
+    // priority lane is that it *can* overtake.
+    let slow = client.dispatch(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/slow-300") }),
+    );
+    // Long enough that the navigation has certainly answered, so its frame is
+    // already on the wire when the next command's answer is awaited — the
+    // client has to read past it to get there. Deterministic, where the
+    // original race was not.
+    std::thread::sleep(Duration::from_millis(800));
+    client.call("Browser.getVersion", json!({}));
+
+    let started = std::time::Instant::now();
+    let result = client.collect(slow);
+    assert!(result.is_ok(), "the navigation failed: {result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "collect took {:?}: an answer read while waiting for another command's \
+         must be kept, not dropped",
+        started.elapsed()
+    );
 }
