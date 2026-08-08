@@ -1033,3 +1033,124 @@ fn a_script_created_parser_replacement_keeps_its_contexts() {
     assert_ne!(page.execution_context_id(), main_before);
     assert!(page.get_properties(handle, None).is_err());
 }
+
+/// A replacement keeps its isolated worlds *and their globals*, and they see
+/// the new document (ADR-0034 D2).
+///
+/// What this cannot assert from JS is the other half of the same change: the
+/// world's per-document state — its listener registry, its observers, and the
+/// **strong** connected-wrapper retentions — is reset rather than carried over.
+/// None of that is observable to script (node ids of the replaced arena can
+/// never alias, since the fresh arena is seeded above the old generation
+/// high-water mark, so a stale handler is silent rather than wrong). It is
+/// enforced structurally instead: `reset_worlds_pending_net` runs the same
+/// `reset_for_navigation_with` on a surviving world that the main world gets.
+/// Skipping it leaks one pinned detached document per replacement.
+#[test]
+fn a_replacement_keeps_its_worlds_and_shows_them_the_new_document() {
+    let page = page();
+    page.load_html("<!doctype html><body><p id=x>old</p></body>")
+        .expect("load");
+    let utility = page.create_isolated_world("utility").expect("created");
+
+    // A listener and an observer in the utility world, both on the old tree.
+    eval_in(
+        &page,
+        Some(utility.context_id),
+        "globalThis.__hits = 0;
+         document.getElementById('x').addEventListener('click', () => { __hits++; });
+         globalThis.__ro = new ResizeObserver(() => {});
+         __ro.observe(document.getElementById('x'));",
+    );
+
+    eval_in(
+        &page,
+        None,
+        "document.open(); \
+         document.write('<!doctype html><body><p id=y>new</p></body>'); \
+         document.close();",
+    );
+    page.settle(std::time::Duration::from_secs(5));
+
+    // The world survived with its global intact — that is D2's whole point.
+    assert_eq!(
+        eval_in(&page, Some(utility.context_id), "String(globalThis.__hits)"),
+        "0",
+        "the world's global must survive the replacement"
+    );
+    // …and it can see the new document.
+    assert_eq!(
+        eval_in(
+            &page,
+            Some(utility.context_id),
+            "document.getElementById('y').textContent"
+        ),
+        "new"
+    );
+    // The old document's listener is gone rather than lingering on a dead id.
+    assert_eq!(
+        eval_in(
+            &page,
+            Some(utility.context_id),
+            "String(globalThis.__ro instanceof ResizeObserver)"
+        ),
+        "true",
+        "the observer object itself is a plain JS value and survives"
+    );
+}
+
+/// Init scripts do **not** re-run into a global that survived the replacement
+/// (ADR-0034 D2).
+///
+/// `Page.addScriptToEvaluateOnNewDocument` promises a *fresh* global. A
+/// replacement has none — the script already ran into this one — and running it
+/// again is a `SyntaxError: redeclaration` for the top-level `let`/`const`/
+/// `class` a driver's injected bootstrap is made of. It would be swallowed into
+/// `report_script_error`, leaving the utility world half-initialised. Chrome
+/// does not re-run them for `document.open()` either.
+#[test]
+fn a_replacement_does_not_re_run_init_scripts_into_a_surviving_world() {
+    let page = page();
+    page.create_isolated_world("utility").expect("created");
+    // The shape that breaks: a top-level `let`, plus a counter that would show
+    // a second run even if the redeclaration were somehow tolerated.
+    page.add_init_script_for(
+        "let __bootstrap = 1; globalThis.__runs = (globalThis.__runs || 0) + 1;",
+        Some("utility"),
+    );
+
+    page.load_html("<!doctype html><p>first</p>").expect("load");
+    let utility = page
+        .worlds()
+        .into_iter()
+        .find(|w| w.name == "utility")
+        .expect("world");
+    assert_eq!(
+        eval_in(&page, Some(utility.context_id), "String(__runs)"),
+        "1",
+        "a real navigation runs the init script once, against a fresh global"
+    );
+
+    eval_in(
+        &page,
+        None,
+        "document.open(); document.write('<!doctype html><p>second</p>'); document.close();",
+    );
+    page.settle(std::time::Duration::from_secs(5));
+
+    let utility = page
+        .worlds()
+        .into_iter()
+        .find(|w| w.name == "utility")
+        .expect("the world survives a replacement");
+    assert_eq!(
+        eval_in(&page, Some(utility.context_id), "String(__runs)"),
+        "1",
+        "a replacement must not run the init script a second time"
+    );
+    assert_eq!(
+        eval_in(&page, Some(utility.context_id), "String(__bootstrap)"),
+        "1",
+        "and the binding it declared must still be intact"
+    );
+}

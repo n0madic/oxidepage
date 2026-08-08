@@ -93,6 +93,18 @@ implemented, deliberately:
 - `open()` is refused on a document with no browsing context, which keeps
   ADR-0017's rule intact.
 
+Three consequences of keeping the contexts, each of which is a bug if missed:
+a surviving isolated world gets the same per-document reset the main world does
+(its listener registry and observers are keyed on the arena that was thrown
+away, and its connected-wrapper retentions are *strong*, so skipping it leaks
+one pinned detached document per replacement); init scripts are **not** re-run,
+because there is no fresh global to run them against and a second run is a
+`SyntaxError: redeclaration` for the top-level `let` a driver's bootstrap is
+made of; and `document.open()` returns early while a parser-inserted script is
+running, as HTML's steps require — otherwise an inline
+`<script>document.open(); document.write(…)</script>` diverts its own writes
+into the buffer and then replaces the document the parser is still building.
+
 **A replacement preserves its execution contexts.** HTML's `document.open()`
 reuses the `Document`, the `Window` and the environment settings object, so the
 realms, their ids, and the handles minted against them all survive: the main
@@ -119,6 +131,16 @@ delivered while suspended resolves the `fetch`/XHR promise waiting on it and
 runs a microtask checkpoint, so page script does run — and an evaluate from the
 driver runs page script by definition. The line is between the page's own
 *scheduling* and the driver's turn, not between script and no script.
+
+**A deferred await is on the driver's side of that line.** A suspended page
+still drains its parked awaits and still wakes for their budget — a reply the
+driver is already waiting on is not the page's own work, and leaving it to the
+resume reproduces inside this decision the exact deadlock D1 was written to
+remove, without even the budget answer. `waitingForDebugger` is likewise read
+from an atomic mirrored on the handle rather than through a control job: the
+caller is a connection's event thread, and a page spinning in script offers no
+wait point, so the round trip could stall every event for every target on that
+connection.
 
 That is what `Target.setAutoAttach { waitForDebuggerOnStart: true }` means: the
 page is stopped so it can be inspected and configured *before* it starts. Under
@@ -186,6 +208,10 @@ threads still reach it, so a claim set decides which one attaches, and the lock
 is held **across** the attach rather than only across the claim — a narrow lock
 leaves the loser returning while the winner has not emitted yet, which is the
 same race one level down.
+
+`Target.targetCreated` leaves with it, from whichever thread claims the target,
+so a driver running discovery *and* auto-attach is never told about an attach
+for a target it has not heard of.
 
 This is the flake the roadmap recorded as `context.newPage` occasionally timing
 out and reporting as sixteen failures. It was never a harness sensitivity.

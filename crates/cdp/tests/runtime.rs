@@ -834,3 +834,62 @@ fn locale_override_moves_navigator_and_the_header() {
         .expect_err("an empty locale is refused");
     assert_eq!(error["code"], -32602);
 }
+
+/// A **suspended** page still answers a deferred await.
+///
+/// `waitForDebuggerOnStart` creates the target suspended (ADR-0034 D3), and a
+/// suspended page runs none of its own sources — so the drain that answers a
+/// parked promise has to be on the driver's side of that line, with the command
+/// drain. Leaving it on the page's side reproduces inside D3 the exact deadlock
+/// D1 was written to remove, and worse: not even the budget answer arrives,
+/// because the loop never wakes for its deadline either.
+#[test]
+fn a_suspended_page_still_answers_a_deferred_await() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    client.call_on(&session, "Page.enable", json!({}));
+    // Suspend through the protocol, as `waitForDebuggerOnStart` does.
+    client.call(
+        "Target.setAutoAttach",
+        json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
+    );
+    // Turning auto-attach on also attaches to the targets that already exist,
+    // so drop those before creating the one this test is about.
+    client.forget_events(Duration::from_millis(200));
+    let target = client.call("Target.createTarget", json!({ "url": "about:blank" }));
+    let attach = loop {
+        let event = client.await_event("Target.attachedToTarget");
+        if event["params"]["targetInfo"]["targetId"] == target["targetId"] {
+            break event;
+        }
+    };
+    assert_eq!(
+        attach["params"]["waitingForDebugger"], true,
+        "the target must actually be waiting"
+    );
+    let suspended = attach["params"]["sessionId"].as_str().unwrap().to_owned();
+
+    let awaiting = client.dispatch(
+        &suspended,
+        "Runtime.evaluate",
+        json!({
+            "expression": "new Promise(resolve => { globalThis.__settle = resolve; })",
+            "awaitPromise": true,
+            "returnByValue": true,
+        }),
+    );
+    // A later command on the same session resolves it — which is the whole
+    // shape D1 exists for, and it must work on a paused page too, because a
+    // driver's session setup runs before `runIfWaitingForDebugger`.
+    client.call_on(
+        &suspended,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__settle(7)" }),
+    );
+
+    let settled = client
+        .collect(awaiting)
+        .expect("a suspended page must still answer");
+    assert_eq!(settled["result"]["value"], 7);
+}

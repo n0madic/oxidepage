@@ -1789,11 +1789,8 @@ impl WorldState {
         std::mem::take(&mut *self.page.pending_parser_write.borrow_mut())
     }
 
-    // === the script-created parser (ADR-0034 D2) ===
+    // === the navigator profile (ADR-0034 D6) ===
 
-    /// `document.open()`: starts collecting markup that will replace the
-    /// document. Re-opening an already-open buffer discards what it held,
-    /// which is what a second `open()` means.
     /// Replaces `navigator.languages` for every world at once.
     ///
     /// The data is page-level (one `Rc<NavigatorData>` shared by all worlds),
@@ -1815,6 +1812,21 @@ impl WorldState {
         *self.mime_types_js.borrow_mut() = None;
     }
 
+    // === the script-created parser (ADR-0034 D2) ===
+
+    /// Whether the HTML parser is running a parser-inserted script right now.
+    ///
+    /// HTML's document-open steps return early in exactly this state, and the
+    /// reason is concrete: the write belongs to the parser that is running, not
+    /// to a buffer that would later replace what it produced.
+    #[must_use]
+    pub fn parser_script_is_active(&self) -> bool {
+        self.page.parsing.get() && self.page.parser_script_active.get()
+    }
+
+    /// `document.open()`: starts collecting markup that will replace the
+    /// document. Re-opening an already-open buffer discards what it held,
+    /// which is what a second `open()` means.
     pub fn open_script_parser(&self) {
         *self.page.script_parser_buffer.borrow_mut() = Some(String::new());
     }
@@ -1823,6 +1835,20 @@ impl WorldState {
     #[must_use]
     pub fn script_parser_is_open(&self) -> bool {
         self.page.script_parser_buffer.borrow().is_some()
+    }
+
+    /// Whether a script-created parser is open **and** has been written to.
+    ///
+    /// The question the task-boundary flush actually asks: an open buffer with
+    /// nothing in it is an `open()` whose writes have not happened yet, and
+    /// committing that would replace the document with nothing.
+    #[must_use]
+    pub fn script_parser_has_content(&self) -> bool {
+        self.page
+            .script_parser_buffer
+            .borrow()
+            .as_ref()
+            .is_some_and(|buffer| !buffer.is_empty())
     }
 
     /// Appends to the script-created parser, if one is open.

@@ -1286,3 +1286,39 @@ fn load_html_records_the_navigation_milestones() {
         );
     }
 }
+
+/// A parser-inserted script cannot hijack the parser it is running inside.
+///
+/// HTML's document-open steps return early when a script of the active parser
+/// is running. Without that, `document.open()` inline in a page being parsed
+/// diverts its own `write`s into the buffer and then replaces the document the
+/// parser is still building.
+#[test]
+fn open_during_parsing_is_a_no_op_and_write_still_reaches_the_parser() {
+    let page = load_html_page(
+        "<!doctype html><p id=before>kept</p>\
+         <script>document.open(); document.write('<p id=written>via parser</p>');</script>\
+         <p id=after>kept too</p>",
+        PageOptions::default(),
+    )
+    .expect("page");
+    page.settle(Duration::from_secs(5));
+
+    // The parsed document survived: `open()` did not queue a replacement.
+    assert_eq!(
+        page.eval_to_string("document.getElementById('before').textContent")
+            .unwrap(),
+        "kept"
+    );
+    assert_eq!(
+        page.eval_to_string("document.getElementById('after').textContent")
+            .unwrap(),
+        "kept too"
+    );
+    // …and the write went to the real parser, in place.
+    assert_eq!(
+        page.eval_to_string("document.getElementById('written').textContent")
+            .unwrap(),
+        "via parser"
+    );
+}

@@ -85,6 +85,14 @@ pub(crate) fn open(cx: &BindCx<'_>, this: NodeId) -> Result<NodeId, JsThrow> {
             "document.open on a document with no browsing context",
         ));
     }
+    // HTML's document-open steps return early when the document has an active
+    // parser and a script of that parser is running. Not a nicety: without it
+    // `<script>document.open(); document.write('…')</script>` inline in a page
+    // being parsed diverts its own writes away from the parser into a buffer,
+    // and the buffer then replaces the very document the parser is building.
+    if cx.state.parser_script_is_active() {
+        return Ok(this);
+    }
     cx.state.open_script_parser();
     // The spec returns the document, so `document.open().write(…)` chains.
     Ok(this)

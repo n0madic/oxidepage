@@ -395,3 +395,55 @@ fn auto_attach_precedes_the_create_target_reply() {
         "the attach must name the target that was just created"
     );
 }
+
+/// With discovery **and** auto-attach both on, `Target.targetCreated` still
+/// precedes `Target.attachedToTarget` for the same target.
+///
+/// Chrome orders them that way, and a driver running both (Puppeteer and
+/// Playwright each do, in some configurations) would otherwise be told about an
+/// attach for a target it has never heard of. Emitting the attach from
+/// `createTarget`'s own lane is what put that ordering at risk, so both events
+/// now leave from whichever thread claims the target.
+#[test]
+fn target_created_precedes_the_attach_when_discovery_is_on() {
+    let harness = Harness::start();
+    let mut client = harness.client();
+
+    client.call("Target.setDiscoverTargets", json!({ "discover": true }));
+    client.call(
+        "Target.setAutoAttach",
+        json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+    );
+    client.forget_events(std::time::Duration::from_millis(200));
+
+    let id = client.dispatch_browser("Target.createTarget", json!({ "url": "about:blank" }));
+    // Four, because marking the target attached publishes a
+    // `targetInfoChanged` that discovery also reports.
+    let frames = client.read_ordered(4);
+    let position = |what: &str| {
+        frames
+            .iter()
+            .position(|f| f["method"] == what)
+            .unwrap_or_else(|| panic!("no {what} in {frames:?}"))
+    };
+    let reply = frames
+        .iter()
+        .position(|f| f["id"] == serde_json::json!(id))
+        .unwrap_or_else(|| panic!("no reply in {frames:?}"));
+
+    assert!(
+        position("Target.targetCreated") < position("Target.attachedToTarget"),
+        "discovery must announce the target before its attach: {frames:?}"
+    );
+    assert!(
+        position("Target.attachedToTarget") < reply,
+        "and the attach must precede the createTarget reply: {frames:?}"
+    );
+    // Exactly one `targetCreated`: the event thread must not announce a second
+    // copy after the lane already did.
+    let extra = client.drain_events(std::time::Duration::from_millis(300));
+    assert!(
+        !extra.iter().any(|e| e["method"] == "Target.targetCreated"),
+        "the target was announced twice: {extra:?}"
+    );
+}

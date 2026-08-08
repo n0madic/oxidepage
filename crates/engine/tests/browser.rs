@@ -227,7 +227,7 @@ fn a_suspended_page_serves_the_driver_but_runs_none_of_its_own_work() {
             ..NewPageOptions::default()
         })
         .unwrap();
-    assert!(page.is_suspended().unwrap());
+    assert!(page.is_suspended());
 
     // The driver is still served (ADR-0034 D3). This is the whole point of
     // `waitForDebuggerOnStart`: a driver sends its entire session setup —
@@ -253,7 +253,7 @@ fn a_suspended_page_serves_the_driver_but_runs_none_of_its_own_work() {
     );
 
     page.resume().unwrap();
-    assert!(!page.is_suspended().unwrap());
+    assert!(!page.is_suspended());
     std::thread::sleep(Duration::from_millis(300));
     let ticks: u32 = page
         .eval_to_string("String(t)")

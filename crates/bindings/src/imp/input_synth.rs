@@ -659,7 +659,11 @@ fn edit_text(
         let Ok(text) = String::from_utf16(&next) else {
             return Ok(());
         };
-        dom.set_form_value(target, text);
+        // `set_form_value_keeping_selection`, then the caret this edit wants:
+        // the value setter's "move the cursor to the end" is for *script*
+        // writes, and paying for it here means counting UTF-16 over the whole
+        // value and writing the selection twice on every keystroke.
+        dom.set_form_value_keeping_selection(target, text);
         dom.collapse_selection_to(target, caret);
         true
     };

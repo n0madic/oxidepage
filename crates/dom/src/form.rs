@@ -58,8 +58,12 @@ pub struct FormState {
     /// driver that selects before it focuses (Playwright's `fill` runs
     /// `input.select(); input.focus();`, in that order) would have its
     /// selection silently erased and its replacement text appended instead.
-    /// The flag's life is closed: [`DomTree::set_form_value`] clears it, so an
-    /// explicit selection survives exactly until the value is rewritten.
+    /// The flag's life is closed by [`DomTree::set_form_value`], which clears
+    /// it whenever the value it writes to a text control actually *differs* —
+    /// the same condition HTML puts on the value setter's cursor move. Writing
+    /// a control's own value back to it changes nothing and so clears nothing,
+    /// which is why `t.select(); t.value = t.value;` leaves the selection
+    /// standing.
     pub(crate) selection_explicit: bool,
     /// The value at the moment the control took focus, kept so that blur can
     /// decide whether to fire `change`. `None` when the control is not focused.
@@ -308,14 +312,24 @@ impl DomTree {
     /// [`collapse_selection_to`](Self::collapse_selection_to).
     pub fn set_form_value(&mut self, id: NodeId, value: String) {
         let moves_cursor = self.is_text_entry(id) && self.form_value(id) != value;
-        let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) else {
-            return;
-        };
-        el.form_state_mut().value = Some(value);
+        self.set_form_value_keeping_selection(id, value);
         if moves_cursor {
             let end = self.form_value(id).encode_utf16().count();
             self.collapse_selection_to(id, end);
         }
+    }
+
+    /// [`Self::set_form_value`] without the cursor move.
+    ///
+    /// For a caller that is about to place the caret itself — a synthesized
+    /// edit, which inserts in the middle. Going through the public setter would
+    /// count UTF-16 over the whole value and write the selection twice per
+    /// keystroke, to land somewhere the next line overwrites.
+    pub fn set_form_value_keeping_selection(&mut self, id: NodeId, value: String) {
+        let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) else {
+            return;
+        };
+        el.form_state_mut().value = Some(value);
         // `:placeholder-shown` and (later) validity depend on the value.
         self.update_element_state(id);
     }

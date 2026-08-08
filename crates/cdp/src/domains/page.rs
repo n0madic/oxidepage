@@ -38,17 +38,26 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "Page.addScriptToEvaluateOnNewDocument" => add_init_script(connection, request),
         "Page.removeScriptToEvaluateOnNewDocument" => remove_init_script(connection, request),
         "Page.createIsolatedWorld" => create_isolated_world(connection, request),
-        // Accepted, not refused. There is no CSP enforcement anywhere in the
-        // engine, so there is nothing to bypass and nothing this could be
-        // lying about — the answer is already what the driver is asking for.
-        // Refusing would break `browser.newContext({ bypassCSP: true })` over a
-        // capability the page does not have in the first place.
-        "Page.setBypassCSP" => Ok(serde_json::json!({})),
+        "Page.setBypassCSP" => set_bypass_csp(connection, request),
         // The metrics are a pure layout read, so the handler lives beside the
         // rest of the geometry vocabulary in `domains::dom`.
         "Page.getLayoutMetrics" => crate::domains::dom::get_layout_metrics(connection, request),
         _ => Err(ProtocolError::method_not_found(&request.method)),
     }
+}
+
+/// Accepted, not refused. There is no CSP enforcement anywhere in the engine,
+/// so there is nothing to bypass and nothing this could be lying about — the
+/// answer is already what the driver is asking for, and refusing would break
+/// `browser.newContext({ bypassCSP: true })` over a capability the page does
+/// not have in the first place.
+///
+/// It still requires a session, like every other `Page` method: a command that
+/// named no target was never routed to one, and answering it `{}` hides exactly
+/// the bookkeeping divergence `require_session` exists to surface.
+fn set_bypass_csp(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    connection.require_session(request)?;
+    Ok(serde_json::json!({}))
 }
 
 fn set_enabled(connection: &Arc<Connection>, request: &Request, enabled: bool) -> CommandResult {

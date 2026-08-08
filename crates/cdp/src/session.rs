@@ -307,10 +307,8 @@ impl Connection {
             match book.waiting.remove(&token) {
                 Some(waiter) => Some(waiter),
                 None => {
-                    let now = std::time::Instant::now();
                     book.settled
-                        .retain(|_, (_, at)| now.duration_since(*at) < ORPHAN_AWAIT_TTL);
-                    book.settled.insert(token, (result.clone(), now));
+                        .insert(token, (result.clone(), std::time::Instant::now()));
                     None
                 }
             }
@@ -320,8 +318,21 @@ impl Connection {
         }
     }
 
+    /// Takes the await book, sweeping answers nobody claimed in time.
+    ///
+    /// Swept here rather than only where an orphan is inserted: once orphans
+    /// stop arriving — the other connection detached, or the page went quiet —
+    /// an insert-only sweep never revisits what is already there, and
+    /// `ORPHAN_AWAIT_TTL` would bound nothing. The results are whole
+    /// `returnByValue` payloads, so "nothing" can be large.
     fn lock_awaits(&self) -> std::sync::MutexGuard<'_, AwaitBook> {
-        self.awaits.lock().unwrap_or_else(|e| e.into_inner())
+        let mut book = self.awaits.lock().unwrap_or_else(|e| e.into_inner());
+        if !book.settled.is_empty() {
+            let now = std::time::Instant::now();
+            book.settled
+                .retain(|_, (_, at)| now.duration_since(*at) < ORPHAN_AWAIT_TTL);
+        }
+        book
     }
 
     /// Queues one frame's work onto the lane that owns it.
@@ -589,8 +600,7 @@ impl Connection {
                     "waitingForDebugger": self
                         .registry
                         .page(target_id)
-                        .and_then(|page| page.is_suspended().ok())
-                        .unwrap_or(false),
+                        .is_some_and(|page| page.is_suspended()),
                 }),
             ));
         }
@@ -673,16 +683,30 @@ impl Connection {
     }
 
     fn on_target_created(self: &Arc<Self>, info: TargetInfo) {
+        // Auto-attach is what Puppeteer and Playwright both use in place of
+        // discovering and then attaching by hand; a target created while it is
+        // on must arrive already attached. It announces `targetCreated` itself
+        // when it wins the claim, so the two events cannot be reordered — and
+        // the `already_claimed` answer is what stops this announcing a second
+        // copy after `Target.createTarget`'s lane got there first.
+        if self.auto_attach_claimed(&info.target_id) {
+            return;
+        }
         if self.discover.load(Ordering::Relaxed) {
             self.emit(Event::browser(
                 "Target.targetCreated",
                 serde_json::json!({ "targetInfo": info }),
             ));
         }
-        // Auto-attach is what Puppeteer and Playwright both use in place of
-        // discovering and then attaching by hand; a target created while it is
-        // on must arrive already attached.
-        self.auto_attach(&info.target_id);
+    }
+
+    /// [`Self::auto_attach`], reporting whether this call owned the target.
+    fn auto_attach_claimed(self: &Arc<Self>, target_id: &str) -> bool {
+        if !self.auto_attach.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.auto_attach(target_id);
+        true
     }
 
     /// Attaches to a newly created target **once**, if this connection asked
@@ -697,6 +721,13 @@ impl Connection {
         if !self.auto_attach.load(Ordering::Relaxed) {
             return;
         }
+        // Chrome orders `targetCreated` before `attachedToTarget`, and a driver
+        // running discovery *and* auto-attach would otherwise be told about an
+        // attach for a target it has not heard of — this path can outrun the
+        // event thread that would have announced it. Emitted here rather than
+        // waited for, because the claim below is what makes it exactly once:
+        // whichever thread wins sends both, in order.
+        let announce_created = self.discover.load(Ordering::Relaxed);
         // The guard is held **across the attach**, not just across the claim.
         // Releasing it in between leaves a window in which the loser sees the
         // target claimed and returns while the winner has not emitted yet — and
@@ -709,6 +740,19 @@ impl Connection {
         let mut claimed = self.auto_attached.lock().unwrap_or_else(|e| e.into_inner());
         if !claimed.insert(target_id.to_owned()) {
             return;
+        }
+        // A target destroyed between its creation and this claim: the id is
+        // already out of the set, so take it back out rather than leaving an
+        // entry `on_target_destroyed` will never see again.
+        let Some(info) = self.registry.info(target_id) else {
+            claimed.remove(target_id);
+            return;
+        };
+        if announce_created {
+            self.emit(Event::browser(
+                "Target.targetCreated",
+                serde_json::json!({ "targetInfo": info }),
+            ));
         }
         let _ = self.attach(target_id);
     }

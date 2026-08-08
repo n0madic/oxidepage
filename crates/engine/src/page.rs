@@ -126,6 +126,22 @@ pub(crate) struct PageInner {
     /// command channel: the page runs no ordinary job while parked in a
     /// dialog, so an answer queued there would never be reached (D11).
     dialog_tx: Sender<DialogResponse>,
+    /// Mirrors [`Page::suspend`]/[`Page::resume`], so `waitingForDebugger` can
+    /// be answered without a round trip.
+    ///
+    /// The same shape as `closed`, and for a sharper reason: this is read while
+    /// building `Target.attachedToTarget` on a connection's **event thread**,
+    /// which must never block. A `with_control` call looks cheap — the closure
+    /// body reads one `Cell` — but it is still a queued job and a reply
+    /// channel, and a page spinning in script offers no wait point, so the
+    /// round trip could stall every event for every target on that connection
+    /// for the whole command timeout.
+    ///
+    /// Authoritative because [`PageHandle`] is the only way the protocol
+    /// suspends or resumes a page; an embedder reaching past it with
+    /// `PageHandle::with` would desynchronize this, exactly as it would
+    /// `closed`.
+    suspended: Arc<AtomicBool>,
     /// Set while the page is inside `run_dialog`.
     ///
     /// The answer channel is a rendezvous, so a send only lands while a receive
@@ -497,11 +513,11 @@ impl PageHandle {
 
     /// Whether the page is suspended, waiting for a debugger to release it.
     ///
-    /// A **control** call for the same reason `execution_context_id` is: it is
-    /// read while building `Target.attachedToTarget`, on the event thread,
-    /// which must never block. It reads a single `Cell`.
-    pub fn is_suspended(&self) -> EngineResult<bool> {
-        self.with_control(Page::is_suspended)
+    /// Read from an atomic — no round trip, for the reason `PageInner::suspended`
+    /// documents: the caller is a connection's event thread.
+    #[must_use]
+    pub fn is_suspended(&self) -> bool {
+        self.0.suspended.load(Ordering::Acquire)
     }
 
     /// Turns this page's HTTP cache use off (or back on).
@@ -801,6 +817,11 @@ impl PageHandle {
     ///
     /// A control call, so it takes effect even while the page is busy.
     pub fn suspend(&self) -> EngineResult<()> {
+        // Set before the job is queued, so a reader between the two sees the
+        // page as suspended rather than as still running — the safe direction:
+        // it is about to be true, and `waitingForDebugger` reporting `true` a
+        // moment early is what a driver is waiting to hear anyway.
+        self.0.suspended.store(true, Ordering::Release);
         self.with_control(Page::suspend)
     }
 
@@ -809,7 +830,11 @@ impl PageHandle {
     /// A control call, so it gets through a page that is otherwise servicing
     /// nothing.
     pub fn resume(&self) -> EngineResult<()> {
-        self.with_control(Page::resume)
+        let result = self.with_control(Page::resume);
+        // Cleared *after* the job lands, the mirror of `suspend`: never report
+        // a page as running before it is.
+        self.0.suspended.store(false, Ordering::Release);
+        result
     }
 
     /// Whether a dialog on this page is *held* for an explicit answer.
@@ -1008,6 +1033,7 @@ pub(crate) fn spawn_page(
 
     let options_dialog_policy = options.resolved_dialog_policy();
     let closed = Arc::new(AtomicBool::new(false));
+    let suspended = Arc::new(AtomicBool::new(options.suspended));
     let exited = Arc::new(AtomicBool::new(false));
     let crash = Arc::new(Mutex::new(None));
 
@@ -1098,6 +1124,7 @@ pub(crate) fn spawn_page(
         event_tx: handle_events,
         dialog_tx,
         dialog_pending,
+        suspended,
         intercept,
         dialog_policy: options_dialog_policy,
         closed,

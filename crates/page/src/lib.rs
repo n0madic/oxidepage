@@ -3222,7 +3222,17 @@ impl Page {
         // the document is parsed. That ordering is the whole contract of
         // `Page.addScriptToEvaluateOnNewDocument`: a driver installs a binding
         // or a stub here precisely so page script sees it already in place.
-        self.run_init_scripts();
+        //
+        // **Not on a replacement that kept its globals** (ADR-0034 D2). There
+        // is no fresh global to run against: the script already ran into this
+        // one, and running it again is a `SyntaxError: redeclaration` for the
+        // top-level `let`/`const`/`class` that a driver's injected bootstrap is
+        // made of — swallowed into `report_script_error`, leaving the utility
+        // world half-initialised. Chrome does not re-run them for
+        // `document.open()` either, and for the same reason.
+        if !self.preserving_contexts.get() {
+            self.run_init_scripts();
+        }
         // The (synchronous) response has fully arrived and parsing begins.
         self.state
             .mark_timing(TimingMilestone::ResponseEndDomLoading);
@@ -3783,23 +3793,24 @@ impl Page {
         // net event is how a driver's own `fetch` interception makes progress.
         // Deregistering the net arm was what made a paused page unable to
         // finish the setup it was paused for.
-        let suspended = false;
         // Cloned out for the same reason `cmd_rx` is: the borrow must be
         // released before the park. A `crossbeam` receiver clone shares the
         // channel rather than duplicating the stream, and every clone feeds the
         // one consumer path, `NetService::apply_decision`.
         let decisions = self.net.decisions();
         let mut select = crossbeam_channel::Select::new();
-        let net_op = (!suspended).then(|| select.recv(&self.net_rx));
+        let net_op = select.recv(&self.net_rx);
         // Always registered, port or not: a `storage` write by a sibling page
         // must wake a page an embedder is driving by hand too.
         let wake_op = select.recv(&self.wake_rx);
         let cmd_op = cmd_rx.as_ref().map(|rx| select.recv(rx));
-        // A driver's decision about a paused request (ADR-0032 D3). Under the
-        // same `!suspended` gate as the net arm: resolving a pause spawns or
-        // synthesizes a response, and a frozen page must run neither. The
-        // decision stays in the channel until it resumes.
-        let decision_op = (!suspended).then(|| select.recv(&decisions));
+        // A driver's decision about a paused request (ADR-0032 D3), registered
+        // for the same reason the net arm is: it *is* the driver's turn, not
+        // the page's. A suspended page resolving a pause is the interception
+        // setup a driver does before `runIfWaitingForDebugger` completing, not
+        // the page running behind its back — and the response it synthesizes
+        // arrives as a net event, which is already allowed through.
+        let decision_op = select.recv(&decisions);
         let op = match deadline {
             Some(deadline) => match select.select_deadline(deadline) {
                 Ok(op) => op,
@@ -3809,7 +3820,7 @@ impl Page {
             None => select.select(),
         };
         let index = op.index();
-        if Some(index) == net_op {
+        if index == net_op {
             match op.recv(&self.net_rx) {
                 Ok(event) => self.dispatch_net_event(event),
                 // Unreachable: `NetService` owns the sender for as long as the
@@ -3826,7 +3837,7 @@ impl Page {
             // A level trigger: the work itself is picked up by the task source
             // that owns it on the next pass.
             let _ = op.recv(&self.wake_rx);
-        } else if Some(index) == decision_op {
+        } else if index == decision_op {
             match op.recv(&decisions) {
                 Ok(command) => self.net.apply_decision(command),
                 // Unreachable: the service owns a sender for as long as the
@@ -4121,13 +4132,17 @@ impl Page {
             // Park until something happens. With no timer, no pending frame and
             // no network, `None` is an indefinite park — the page sleeps until
             // the driver speaks.
-            // A suspended page fires nothing, so waking at a timer deadline it
-            // will not service would spin the loop at the timer's rate — the
-            // busy-wait ADR-0004 exists to prevent, reached through the change
-            // that was meant to freeze the page. It waits for a command.
-            let deadline = (!self.suspended.get())
-                .then(|| self.next_wakeup())
-                .flatten();
+            // A suspended page services none of its own deadlines, so waking at
+            // a timer's would spin the loop at that timer's rate — the busy-wait
+            // ADR-0004 exists to prevent, reached through the change that was
+            // meant to freeze the page. It still wakes for an await whose budget
+            // runs out, because that is a reply the driver is owed and the one
+            // deadline a suspended page does honour.
+            let deadline = if self.suspended.get() {
+                self.next_await_deadline()
+            } else {
+                self.next_wakeup()
+            };
             if !self.wait_for_work(deadline) {
                 break;
             }
@@ -4155,16 +4170,27 @@ impl Page {
             let mut stats = self.stats.get();
             stats.turns += 1;
             self.stats.set(stats);
+            // GC finalization is bookkeeping, not page work, so it keeps
+            // running even suspended — otherwise the wrapper cache would grow
+            // for as long as the page is held.
             self.process_finalized();
-            // A suspended page runs nothing of its own. GC finalization above
-            // is bookkeeping, not page work, and must keep running or the
-            // wrapper cache would grow for as long as the page is held.
             // A suspended page runs none of its **own** sources, but it still
-            // serves the driver (ADR-0034 D3) — so the command drain below
-            // runs and everything after it does not.
+            // serves the driver (ADR-0034 D3): its commands, and the answers it
+            // is owed. Everything below this branch is the page's own work.
             if self.suspended.get() {
-                let ran = self.drain_commands();
-                self.process_finalized();
+                // `process_finalized` already ran at the top of this iteration
+                // and runs again on the next one, so the branch does not repeat
+                // it — the only path it would add coverage for is the `return`
+                // below, and a finalization deferred to the next entry costs
+                // nothing.
+                let mut ran = self.drain_commands();
+                // **Both**, not just commands. A deferred await is a reply the
+                // driver is already waiting on, and skipping it here reproduces
+                // inside D3 the exact deadlock D1 was written to remove — worse,
+                // because not even the budget answer would arrive. A promise on
+                // a suspended page can still settle: a driver command or a net
+                // event is what settles it, and both are still delivered.
+                ran |= self.drain_pending_awaits();
                 if !ran || self.closing.get() || Instant::now() >= deadline {
                     return;
                 }
@@ -4175,8 +4201,13 @@ impl Page {
             // no `close()` is the legacy idiom, and a browser shows that
             // content; queueing the replacement here is what makes it appear.
             // Immediately before the navigation drain, so it commits on this
-            // pass rather than the next.
-            self.flush_unclosed_script_parser();
+            // pass rather than the next — and under the same `parsing` guard,
+            // because this loop is re-entered from *inside* `load_document`
+            // (`await_subresources`, `await_pending_stylesheets`) and closing a
+            // buffer there would replace the document being parsed.
+            if !self.state.parsing() {
+                self.flush_unclosed_script_parser();
+            }
             // A navigation queued by script (ADR-0022). It comes first because
             // it invalidates everything below it: the document, and with it
             // every queued update keyed on a node of the outgoing tree.
@@ -5263,14 +5294,15 @@ impl Page {
     /// `write()`s have not happened yet, and flushing that would replace the
     /// document with nothing and leave the writes with no parser to reach.
     fn flush_unclosed_script_parser(&self) {
-        if !self.state.script_parser_is_open() {
+        // Asked before it is taken. Taking is what *closes* the parser, so the
+        // common case — an `open()` whose writes have not happened yet — would
+        // otherwise close and re-open the buffer on every turn of the loop, with
+        // a window in between where `script_parser_is_open` answers wrongly.
+        if !self.state.script_parser_has_content() {
             return;
         }
-        match self.state.take_script_parser() {
-            Some(html) if !html.is_empty() => self.state.queue_document_replacement(html),
-            // Put an empty buffer back: taking it is what closes the parser.
-            Some(_) => self.state.open_script_parser(),
-            None => {}
+        if let Some(html) = self.state.take_script_parser() {
+            self.state.queue_document_replacement(html);
         }
     }
 
@@ -5845,17 +5877,27 @@ impl Page {
     /// world is about to be destroyed, so only its in-flight requests are
     /// harvested here — `reset_worlds_for_navigation` does the teardown.
     fn reset_worlds_pending_net(&self) -> Vec<RequestId> {
-        // A replacement keeps its contexts, so the main world keeps its id
-        // (ADR-0034 D2); the isolated worlds are not touched at all, which is
-        // why the loop below still only harvests their in-flight requests.
-        let mut ids = self
-            .state
-            .reset_for_navigation_with(!self.preserving_contexts.get());
+        // A replacement keeps its contexts, so the main world keeps its id and
+        // its handles (ADR-0034 D2); everything else in the reset still runs.
+        let preserving = self.preserving_contexts.get();
+        let mut ids = self.state.reset_for_navigation_with(!preserving);
         for world in self.worlds.all() {
             if world.id == oxidepage_bindings::MAIN_WORLD {
                 continue;
             }
-            if let Some(state) = world.state() {
+            let Some(state) = world.state() else { continue };
+            if preserving {
+                // The world **survives**, so its per-document state has to be
+                // reset rather than dropped with it. Harvesting only the
+                // in-flight requests was right while `reset_worlds_for_navigation`
+                // destroyed the world outright; with the world kept, that leaves
+                // its listener registry, its observers and — the part that
+                // actually leaks — its *strong* connected-wrapper retentions
+                // keyed on the arena that was just thrown away. Dead ids, so the
+                // injected script's listeners silently stop firing, and one
+                // pinned detached subtree per replacement forever.
+                ids.extend(state.reset_for_navigation_with(/* new_context */ false));
+            } else {
                 ids.extend(state.take_pending_net());
             }
         }
