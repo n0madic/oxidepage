@@ -101,7 +101,7 @@ fn attr_namespace(name: &QualName) -> Option<String> {
 }
 
 /// Parses `url` for stylo's [`UrlExtraData`], falling back to `about:blank`.
-fn make_url_extra_data(url: &str) -> UrlExtraData {
+pub(crate) fn make_url_extra_data(url: &str) -> UrlExtraData {
     let parsed = ::url::Url::parse(url)
         .unwrap_or_else(|_| ::url::Url::parse("about:blank").expect("about:blank is a valid URL"));
     UrlExtraData::from(parsed)
@@ -163,6 +163,17 @@ type SlotMap = (u64, HashMap<String, NodeId>);
 pub struct DomTree {
     pub(crate) arena: Arena,
     document: NodeId,
+    /// The Document nodes that are being *rendered* — one per live browsing
+    /// context (ADR-0035 D1). [`Self::document`] is the top-level one and is
+    /// always a member.
+    ///
+    /// This set is what `NodeFlags::IS_CONNECTED` means: a parentless node is
+    /// connected iff it is in here. Before nested browsing contexts the
+    /// predicate was `node == self.document`, and a `DOMParser` /
+    /// `createHTMLDocument` / `new Document()` document was inert because it
+    /// could never be that one. It is still inert, for the same reason stated
+    /// differently: nothing ever adds it here.
+    rendered_roots: HashSet<NodeId>,
     pub(crate) listeners: ListenerRegistry,
     pub(crate) observers: MutationObserverRegistry,
     /// JS-wrapper pin counts (design doc §5.3): a live wrapper pins its
@@ -172,9 +183,6 @@ pub struct DomTree {
     /// `style` attributes, stylesheet rules — is read/written under this lock;
     /// the style engine holds a clone.
     style_lock: SharedRwLock,
-    /// The document URL as stylo's URL data, used to resolve relative URLs in
-    /// parsed style attributes and selector parsing. Tracks the document URL.
-    url_extra_data: UrlExtraData,
     /// Element snapshots taken *before* attribute/state mutations, consumed by
     /// stylo's incremental restyle invalidation (design doc §10).
     snapshots: SnapshotMap,
@@ -293,11 +301,11 @@ impl DomTree {
         Self {
             arena,
             document,
+            rendered_roots: HashSet::from([document]),
             listeners: ListenerRegistry::default(),
             observers: MutationObserverRegistry::default(),
             pins: HashMap::new(),
             style_lock: SharedRwLock::new(),
-            url_extra_data: make_url_extra_data("about:blank"),
             snapshots: SnapshotMap::new(),
             style_updates: Vec::new(),
             image_updates: Vec::new(),
@@ -374,32 +382,48 @@ impl DomTree {
         self.id_version.set(self.id_version.get() + 1);
     }
 
-    /// The first connected element in tree order carrying `id`.
+    /// The first connected element of `doc` in tree order carrying `id`.
     ///
     /// O(1) for the overwhelmingly common case of a unique id. A duplicated id
     /// falls back to picking the tree-order minimum via
     /// [`DomTree::compare_document_position`], which is O(n) — the same cost as
     /// the linear scan this index replaces, and only for the duplicates.
+    ///
+    /// `doc` is not optional and not defaulted: the index spans every rendered
+    /// document (ADR-0035 D1), so an unscoped lookup would let a parent's
+    /// `getElementById` reach into an iframe.
     #[must_use]
-    pub fn element_by_id(&self, id: &str) -> Option<NodeId> {
+    pub fn element_by_id(&self, doc: NodeId, id: &str) -> Option<NodeId> {
         let candidates = self.ids.get(id)?;
-        match candidates.as_slice() {
-            [] => None,
-            [only] => Some(*only),
-            [first, rest @ ..] => Some(rest.iter().fold(*first, |best, &other| {
+        // The overwhelmingly common shape: one element, and it is ours.
+        if let [only] = candidates.as_slice() {
+            return (self.node_document(*only) == doc).then_some(*only);
+        }
+        candidates
+            .iter()
+            .copied()
+            .filter(|&c| self.node_document(c) == doc)
+            .reduce(|best, other| {
                 // Bits describe `other` relative to `best` (spec argument order).
                 if self.compare_document_position(best, other) & DOCUMENT_POSITION_PRECEDING != 0 {
                     other
                 } else {
                     best
                 }
-            })),
-        }
+            })
     }
 
-    /// The `id`s currently present in the document, in unspecified order.
-    pub fn id_names(&self) -> impl Iterator<Item = &str> + '_ {
-        self.ids.keys().map(String::as_str)
+    /// The `id`s present in `doc`, in unspecified order.
+    ///
+    /// Backs `window`'s named properties, which are per browsing context — so
+    /// this filters, where the raw index does not.
+    pub fn id_names_in(&self, doc: NodeId) -> impl Iterator<Item = &str> + '_ {
+        self.ids.iter().filter_map(move |(name, candidates)| {
+            candidates
+                .iter()
+                .any(|&c| self.node_document(c) == doc)
+                .then_some(name.as_str())
+        })
     }
 
     /// A counter that increases whenever the set of connected element ids
@@ -434,10 +458,29 @@ impl DomTree {
         &self.style_lock
     }
 
-    /// The document URL as stylo's URL data (for relative-URL resolution).
+    /// The **top-level** document's URL as stylo's URL data.
+    ///
+    /// A nested browsing context resolves against its own address — reach for
+    /// [`Self::url_extra_data_of`] whenever the document is in hand.
     #[must_use]
     pub fn url_extra_data(&self) -> &UrlExtraData {
-        &self.url_extra_data
+        self.url_extra_data_of(self.document)
+    }
+
+    /// `doc`'s URL as stylo's URL data (for relative-URL resolution).
+    ///
+    /// Falls back to the top-level document's for a node that is not a
+    /// Document, which keeps callers that hand over a stale id from panicking
+    /// on a path that only affects URL resolution.
+    #[must_use]
+    pub fn url_extra_data_of(&self, doc: NodeId) -> &UrlExtraData {
+        match self.get(doc).map(Node::data) {
+            Some(NodeData::Document(data)) => data.url_extra(),
+            _ => match self.node(self.document).data() {
+                NodeData::Document(data) => data.url_extra(),
+                _ => unreachable!("document id always refers to a document node"),
+            },
+        }
     }
 
     /// The element snapshots accumulated since the last style resolution.
@@ -446,20 +489,36 @@ impl DomTree {
         &self.snapshots
     }
 
-    /// Drops all snapshots and clears each snapshotted element's `has_snapshot`
-    /// bit. Called by the style engine after a resolution pass consumes them.
-    pub fn clear_snapshots(&mut self) {
-        let ids: Vec<NodeId> = self
-            .snapshots
-            .keys()
-            .map(|opaque| crate::stylo::node_id_from_opaque(*opaque))
-            .collect();
-        for id in ids {
+    /// Drops the snapshots belonging to `doc` and clears each of those
+    /// elements' `has_snapshot` bit. Called by the style engine after a
+    /// resolution pass consumes them.
+    ///
+    /// **Scoped to one document on purpose.** The map is tree-wide but there is
+    /// a style engine per rendered document (ADR-0035 D1), so clearing it
+    /// wholesale would let whichever engine ran first destroy snapshots the
+    /// others have not consumed — losing their invalidation silently, which is
+    /// the worst failure shape available here.
+    ///
+    /// Snapshots of nodes freed since they were taken belong to no document and
+    /// are dropped by whoever passes through, so the map cannot grow unbounded.
+    pub fn clear_snapshots(&mut self, doc: NodeId) {
+        let mut cleared = Vec::new();
+        self.snapshots.retain(|opaque, _| {
+            let id = crate::stylo::node_id_from_opaque(*opaque);
+            let Some(node) = self.arena.get(id) else {
+                return false; // stale: nobody's to consume
+            };
+            if node.owner.unwrap_or(id) != doc {
+                return true;
+            }
+            cleared.push(id);
+            false
+        });
+        for id in cleared {
             if let Some(el) = self.get(id).and_then(Node::as_element) {
                 el.stylo.has_snapshot.set(false);
             }
         }
-        self.snapshots.clear();
     }
 
     /// Removes and returns the queued stylesheet updates.
@@ -817,10 +876,71 @@ impl DomTree {
         }
     }
 
-    /// The document node.
+    /// The top-level document node — the one the page itself navigated.
+    ///
+    /// A nested browsing context's document is *also* rendered; ask
+    /// [`Self::is_rendered_root`] when the question is "is this live", and
+    /// compare against this only when the question is genuinely "is this the
+    /// top-level one".
     #[must_use]
     pub fn document(&self) -> NodeId {
         self.document
+    }
+
+    // === Rendered roots: the browsing contexts (ADR-0035 D1) ===
+
+    /// Makes `doc` a rendered document, connecting its subtree.
+    ///
+    /// The caller owns the browsing context this document belongs to; the tree
+    /// only tracks which documents are live, because that is what
+    /// `IS_CONNECTED` — and therefore style, layout, resource loading,
+    /// custom-element upgrades and the id index — is derived from.
+    ///
+    /// Panics if `doc` is not a Document node: connecting anything else would
+    /// make `propagate_connectedness` answer for a node that has a parent.
+    pub fn add_rendered_root(&mut self, doc: NodeId) {
+        assert_eq!(
+            self.node(doc).data().kind(),
+            NodeKind::Document,
+            "a rendered root must be a Document node",
+        );
+        if self.rendered_roots.insert(doc) {
+            self.set_connectedness_composed(doc, true);
+        }
+    }
+
+    /// Retires `doc` as a rendered document, disconnecting its subtree.
+    ///
+    /// Does **not** free anything: a wrapper the embedder handed out (an
+    /// `iframe.contentDocument` the parent still holds) pins the document, and
+    /// the pin outlives the browsing context. Callers pair this with
+    /// [`Self::free_detached_tree_if_unpinned`].
+    pub fn remove_rendered_root(&mut self, doc: NodeId) {
+        if self.rendered_roots.remove(&doc) {
+            self.set_connectedness_composed(doc, false);
+        }
+    }
+
+    /// Whether `doc` is a document being rendered — i.e. whether it has a
+    /// browsing context.
+    #[must_use]
+    pub fn is_rendered_root(&self, doc: NodeId) -> bool {
+        self.rendered_roots.contains(&doc)
+    }
+
+    /// Every rendered document, in unspecified order.
+    pub fn rendered_roots(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.rendered_roots.iter().copied()
+    }
+
+    /// Whether `id` is in a document that is being rendered.
+    ///
+    /// This is the question `node_document(x) == document()` used to ask back
+    /// when there was one rendered document (ADR-0028 D3), and the one every
+    /// resource hook wants.
+    #[must_use]
+    pub fn in_rendered_document(&self, id: NodeId) -> bool {
+        self.is_rendered_root(self.node_document(id))
     }
 
     /// Number of live nodes in the arena (connected or detached).
@@ -872,7 +992,7 @@ impl DomTree {
     #[must_use]
     pub fn document_url(&self) -> &str {
         match self.node(self.document).data() {
-            NodeData::Document(doc) => &doc.url,
+            NodeData::Document(doc) => doc.url(),
             _ => unreachable!("document id always refers to a document node"),
         }
     }
@@ -918,12 +1038,11 @@ impl DomTree {
     }
 
     pub fn set_document_url(&mut self, url: String) {
-        self.url_extra_data = make_url_extra_data(&url);
         // The base URL derives from the document URL, and this mutation does
         // not move `structure_version` — the cache key cannot see it.
         self.base_url_cache.borrow_mut().take();
         if let NodeData::Document(doc) = &mut self.arena.node_mut(self.document).data {
-            doc.url = url;
+            doc.set_url(url);
         }
     }
 
@@ -977,14 +1096,15 @@ impl DomTree {
 
     #[must_use]
     pub fn document_url_of(&self, doc: NodeId) -> &str {
-        self.document_data(doc).map_or("about:blank", |d| &d.url)
+        self.document_data(doc)
+            .map_or("about:blank", DocumentData::url)
     }
 
     pub fn set_document_url_of(&mut self, doc: NodeId, url: String) {
         if doc == self.document {
             self.set_document_url(url);
         } else if let Some(data) = self.document_data_mut(doc) {
-            data.url = url;
+            data.set_url(url);
         }
     }
 
@@ -1148,7 +1268,11 @@ impl DomTree {
         if is_potential_custom {
             data.custom_state = CustomElementState::Undefined;
         }
-        data.refresh_selector_caches(&self.style_lock, &self.url_extra_data);
+        // `owner` *is* the new element's node document, so a `<style>` or a
+        // `style=""` in a nested browsing context resolves against that frame's
+        // address rather than the top-level one (ADR-0035 D1).
+        let url_extra = self.url_extra_data_of(owner).clone();
+        data.refresh_selector_caches(&self.style_lock, &url_extra);
         let node = self
             .arena
             .alloc(Node::new_in(NodeData::Element(Box::new(data)), owner));
@@ -2819,7 +2943,7 @@ impl DomTree {
     fn propagate_connectedness(&mut self, node: NodeId) {
         let connected = match self.node(node).parent {
             Some(p) => self.node(p).is_connected(),
-            None => node == self.document,
+            None => self.rendered_roots.contains(&node),
         };
         self.set_connectedness_composed(node, connected);
     }
@@ -3012,14 +3136,14 @@ impl DomTree {
         self.snapshot_element(element);
         let attr_local = name.local.clone();
         let old_id = self.indexed_id(element, &attr_local);
-        let lock = &self.style_lock;
-        let url = &self.url_extra_data;
+        let lock = self.style_lock.clone();
+        let url = self.url_extra_data_of(self.node_document(element)).clone();
         if let Some(el) = self.arena.node_mut(element).as_element_mut() {
             match el.attrs.iter_mut().find(|a| a.name == name) {
                 Some(attr) => attr.value = value,
                 None => el.attrs.push(Attribute { name, value }),
             }
-            el.refresh_selector_caches(lock, url);
+            el.refresh_selector_caches(&lock, &url);
         }
         self.reindex_id(element, &attr_local, old_id);
         if !is_style_only_attr(&attr_local) {
@@ -3073,11 +3197,11 @@ impl DomTree {
         self.queue_attribute_record(element, name, Some(old_value.clone()));
         self.snapshot_element(element);
         let old_id = self.indexed_id(element, &name.local);
-        let lock = &self.style_lock;
-        let url = &self.url_extra_data;
+        let lock = self.style_lock.clone();
+        let url = self.url_extra_data_of(self.node_document(element)).clone();
         if let Some(el) = self.arena.node_mut(element).as_element_mut() {
             el.attrs.retain(|a| a.name != *name);
-            el.refresh_selector_caches(lock, url);
+            el.refresh_selector_caches(&lock, &url);
         }
         self.reindex_id(element, &name.local, old_id);
         if !is_style_only_attr(&name.local) {

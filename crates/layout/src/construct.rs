@@ -67,7 +67,10 @@ pub fn build_layout_tree(
         depth: 0,
     };
 
-    if let Some(root) = dom.document_element() {
+    // The style engine names the rendered document this box tree belongs to,
+    // so the two cannot disagree about which frame is being laid out
+    // (ADR-0035 D1).
+    if let Some(root) = dom.document_element_of(style_engine.document()) {
         let root_box = builder.build_box(root);
         builder.tree.set_root(root_box);
     }

@@ -707,14 +707,17 @@ pub fn sync_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         return Ok(());
     };
 
+    // Named properties are per browsing context, so the ids are this realm's
+    // document's — not every rendered document's (ADR-0035 D1).
+    let document = cx.state.page.document();
     let wanted: std::collections::HashSet<String> = cx
         .state
         .dom
         .borrow()
-        .id_names()
+        .id_names_in(document)
         // `<div id="">` carries an id atom but names nothing.
         .filter(|name| !name.is_empty())
-        .map(str::to_owned)
+        .map(|name| name.to_owned())
         .collect();
     let (added, removed) = {
         let live = cx.state.named_prop_keys.borrow();
@@ -759,7 +762,8 @@ fn define_named_property(
                     scope,
                     state: cx::world_state(scope)?,
                 };
-                let node = cx.state.dom.borrow().element_by_id(&id);
+                let document = cx.state.page.document();
+                let node = cx.state.dom.borrow().element_by_id(document, &id);
                 match node {
                     Some(node) => cx.node_to_js(node),
                     None => Ok(JsValue::Undefined),

@@ -26,7 +26,7 @@ fn first(tree: &DomTree, local: &str) -> NodeId {
 }
 
 fn by_id(tree: &DomTree, id: &str) -> NodeId {
-    tree.element_by_id(id)
+    tree.element_by_id(tree.document(), id)
         .unwrap_or_else(|| panic!("no #{id} in document"))
 }
 

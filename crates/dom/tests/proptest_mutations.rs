@@ -153,7 +153,7 @@ fn check_id_index(tree: &DomTree, universe: &[NodeId]) {
             let el_id = tree.node(id).as_element().and_then(|el| el.id());
             if let Some(el_id) = el_id {
                 assert_ne!(
-                    tree.element_by_id(el_id),
+                    tree.element_by_id(tree.document(), el_id),
                     Some(id),
                     "detached {id:?} is still indexed under `{el_id}`"
                 );
@@ -161,7 +161,7 @@ fn check_id_index(tree: &DomTree, universe: &[NodeId]) {
         }
     }
 
-    let mut names: Vec<&str> = tree.id_names().collect();
+    let mut names: Vec<&str> = tree.id_names_in(tree.document()).collect();
     names.sort_unstable();
     let mut expected_names: Vec<&str> = expected.iter().map(|(name, _)| name.as_str()).collect();
     expected_names.sort_unstable();
@@ -174,7 +174,7 @@ fn check_id_index(tree: &DomTree, universe: &[NodeId]) {
             .find(|(n, _)| n == name)
             .map(|(_, node)| *node);
         assert_eq!(
-            tree.element_by_id(name),
+            tree.element_by_id(tree.document(), name),
             first,
             "element_by_id(`{name}`) is not the first match in tree order"
         );

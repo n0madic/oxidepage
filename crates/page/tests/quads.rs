@@ -26,8 +26,8 @@ fn page_with_viewport(html: &str, width: f32, height: f32) -> Page {
 }
 
 fn by_id(page: &Page, id: &str) -> oxidepage_base::NodeId {
-    page.dom()
-        .element_by_id(id)
+    let dom = page.dom();
+    dom.element_by_id(dom.document(), id)
         .unwrap_or_else(|| panic!("no element with id={id}"))
 }
 

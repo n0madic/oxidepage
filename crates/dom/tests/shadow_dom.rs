@@ -168,11 +168,11 @@ fn shadow_ids_do_not_leak_into_document_index() {
     tree.set_attribute(inner, attr_name("id".into()), "scoped".into());
     tree.append_child(sr, inner).unwrap();
     assert!(tree.node(inner).is_connected());
-    assert_eq!(tree.element_by_id("scoped"), None);
+    assert_eq!(tree.element_by_id(tree.document(), "scoped"), None);
     // Setting the id on an already-connected shadow element must not leak
     // either (reindex_id path).
     tree.set_attribute(inner, attr_name("id".into()), "renamed".into());
-    assert_eq!(tree.element_by_id("renamed"), None);
+    assert_eq!(tree.element_by_id(tree.document(), "renamed"), None);
 }
 
 #[test]

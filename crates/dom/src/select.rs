@@ -466,8 +466,12 @@ impl<'a> selectors::Element for NodeRef<'a> {
     }
 }
 
-fn selectors_quirks_mode(tree: &DomTree) -> SelectorsQuirksMode {
-    match tree.quirks_mode() {
+/// `doc`'s quirks mode in the selectors crate's spelling.
+///
+/// Per document, not per tree: with nested browsing contexts an iframe can be
+/// in quirks mode while its embedder is not (ADR-0035 D1).
+pub(crate) fn selectors_quirks_mode_of(tree: &DomTree, doc: NodeId) -> SelectorsQuirksMode {
+    match tree.quirks_mode_of(doc) {
         html5ever::interface::QuirksMode::Quirks => SelectorsQuirksMode::Quirks,
         html5ever::interface::QuirksMode::LimitedQuirks => SelectorsQuirksMode::LimitedQuirks,
         html5ever::interface::QuirksMode::NoQuirks => SelectorsQuirksMode::NoQuirks,
@@ -481,7 +485,7 @@ fn matches_list(tree: &DomTree, element: NodeId, list: &CompiledSelectorList) ->
         MatchingMode::Normal,
         None,
         &mut caches,
-        selectors_quirks_mode(tree),
+        selectors_quirks_mode_of(tree, tree.node_document(element)),
         NeedsSelectorFlags::No,
         MatchingForInvalidation::No,
     );

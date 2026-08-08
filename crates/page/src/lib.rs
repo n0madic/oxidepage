@@ -3097,7 +3097,7 @@ impl Page {
     /// The fragment's target element: `id` first, then a named `<a>`.
     fn fragment_target(&self, fragment: &str) -> Option<NodeId> {
         let dom = self.state.dom.borrow();
-        if let Some(node) = dom.element_by_id(fragment) {
+        if let Some(node) = dom.element_by_id(dom.document(), fragment) {
             return Some(node);
         }
         let document = dom.document();

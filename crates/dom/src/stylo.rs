@@ -84,11 +84,11 @@ impl TDocument for NodeRef<'_> {
     }
 
     fn is_html_document(&self) -> bool {
-        true
+        self.tree().is_html_document(self.node)
     }
 
     fn quirks_mode(&self) -> QuirksMode {
-        QuirksMode::NoQuirks
+        crate::select::selectors_quirks_mode_of(self.tree(), self.node)
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
@@ -158,7 +158,10 @@ impl TNode for NodeRef<'_> {
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
-        self.with(self.tree().document())
+        // The node's *own* document, not the top-level one: with nested
+        // browsing contexts they differ, and stylo asks this to reach the
+        // quirks mode a frame's own cascade must use (ADR-0035 D1).
+        self.with(self.tree().node_document(self.node))
     }
 
     fn is_in_document(&self) -> bool {
@@ -461,9 +464,10 @@ impl<'a> TElement for NodeRef<'a> {
         if self.element().name.local != local_name!("body") {
             return false;
         }
-        // A `<body>` counts only as a direct child of the root `<html>`.
-        self.tree()
-            .document_element()
+        // A `<body>` counts only as a direct child of *its own* document's
+        // root `<html>`.
+        let tree = self.tree();
+        tree.document_element_of(tree.node_document(self.node))
             .and_then(|root| self.raw().parent().map(|p| p == root))
             .unwrap_or(false)
     }

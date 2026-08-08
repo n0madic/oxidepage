@@ -147,6 +147,11 @@ impl ShadowScope {
 
 /// The document's style engine.
 pub struct StyleEngine {
+    /// The rendered document this engine styles (ADR-0035 D1).
+    ///
+    /// One engine per browsing context, so this is both the traversal root's
+    /// document and the scope of the snapshots this engine may consume.
+    document: NodeId,
     stylist: Stylist,
     /// Clone of the document's shared style lock (must be the same lock the
     /// [`DomTree`] uses so locked stylesheet/attribute data is readable here).
@@ -179,6 +184,23 @@ impl StyleEngine {
     /// the built-in user-agent stylesheet.
     #[must_use]
     pub fn new(tree: &DomTree, viewport: Viewport) -> Self {
+        Self::for_document(tree, tree.document(), viewport)
+    }
+
+    /// The rendered document this engine styles.
+    #[must_use]
+    pub fn document(&self) -> NodeId {
+        self.document
+    }
+
+    /// A style engine for one rendered document.
+    ///
+    /// There is one per browsing context (ADR-0035 D1): the viewport is baked
+    /// into the stylist's `Device`, and an iframe has its own. `document` is
+    /// the traversal root's document and the scope of every sheet this engine
+    /// owns.
+    #[must_use]
+    pub fn for_document(tree: &DomTree, document: NodeId, viewport: Viewport) -> Self {
         // Enable the layout features stylo gates behind static prefs so the
         // corresponding CSS parses and cascades (grid, multicol, …).
         style_config::set_pref!("layout.grid.enabled", true);
@@ -194,7 +216,7 @@ impl StyleEngine {
 
         let ua_sheet = make_stylesheet_impl(
             &lock,
-            tree.url_extra_data(),
+            tree.url_extra_data_of(document),
             include_str!("../assets/ua.css"),
             Origin::UserAgent,
             None,
@@ -203,6 +225,7 @@ impl StyleEngine {
         stylist.append_stylesheet(ua_sheet.clone(), &lock.read());
 
         Self {
+            document,
             stylist,
             lock,
             animations: DocumentAnimationSet::default(),
@@ -728,7 +751,7 @@ impl StyleEngine {
     /// data through shared references (interior mutability) and then clears the
     /// snapshot map afterwards.
     pub fn resolve_styles(&mut self, tree: &mut DomTree) {
-        let Some(root_id) = tree.document_element() else {
+        let Some(root_id) = tree.document_element_of(self.document) else {
             return;
         };
 
@@ -772,7 +795,9 @@ impl StyleEngine {
         }
 
         self.stylist.rule_tree().maybe_gc();
-        tree.clear_snapshots();
+        // Only *our* document's snapshots: another frame's engine has not run
+        // yet and clearing them would drop its invalidation (ADR-0035 D1).
+        tree.clear_snapshots(self.document);
         thread_state::exit(ThreadState::LAYOUT);
     }
 }

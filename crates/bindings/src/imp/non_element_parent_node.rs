@@ -15,10 +15,12 @@ pub(crate) fn get_element_by_id(
     }
     let dom = cx.state.dom.borrow();
     // `this` is a Document or a DocumentFragment. The tree's id index only
-    // tracks connected elements, so it can answer for the document directly;
-    // a fragment's contents are detached and need the walk.
-    if this == dom.document() {
-        return Ok(dom.element_by_id(&id));
+    // tracks connected elements, so it can answer for a *rendered* document
+    // directly — scoped to that document, since the index spans every browsing
+    // context (ADR-0035 D1). An inert document's contents are disconnected and
+    // need the walk, exactly like a fragment's.
+    if dom.is_rendered_root(this) {
+        return Ok(dom.element_by_id(this, &id));
     }
     Ok(dom.inclusive_descendants(this).skip(1).find(|&node| {
         dom.node(node)

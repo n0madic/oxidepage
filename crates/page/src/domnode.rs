@@ -424,7 +424,7 @@ impl Page {
                 shadow_root = el.shadow_root();
             }
             NodeData::Document(doc) => {
-                description.document_url = Some(doc.url.clone());
+                description.document_url = Some(doc.url().to_owned());
                 description.base_url = Some(dom.base_url_of(node));
             }
             NodeData::Doctype {

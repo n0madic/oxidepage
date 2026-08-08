@@ -273,7 +273,7 @@ impl LayoutEngine {
             let _scope = enter_active_tree(dom);
             self.tree = build_layout_tree(dom, style, &mut self.fonts, self.viewport, &self.images);
             hoist_out_of_flow(&mut self.tree);
-            self.snapshot = Some(self.take_snapshot(dom));
+            self.snapshot = Some(self.take_snapshot(dom, style.document()));
             self.rebuild_count += 1;
         }
 
@@ -364,11 +364,11 @@ impl LayoutEngine {
 
     /// Records the styled elements (and pseudo styles / IFC contributors)
     /// the current box tree was built from.
-    fn take_snapshot(&self, dom: &DomTree) -> BuildSnapshot {
+    fn take_snapshot(&self, dom: &DomTree, document: NodeId) -> BuildSnapshot {
         let mut element_styles = Vec::new();
         let mut index_by_node = HashMap::new();
         let mut pseudo_styles = HashMap::new();
-        for node in dom.inclusive_descendants(dom.document()) {
+        for node in dom.inclusive_descendants(document) {
             if dom.node(node).data().kind() != NodeKind::Element {
                 continue;
             }

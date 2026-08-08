@@ -18,6 +18,7 @@ use crate::custom_element::CustomElementState;
 use crate::form::FormState;
 use crate::shadow::ShadowMode;
 use crate::stylo_data::StyloElementState;
+use crate::tree::make_url_extra_data;
 
 bitflags! {
     /// Per-node state and dirty bits.
@@ -345,7 +346,16 @@ pub enum DocumentKind {
 pub struct DocumentData {
     pub quirks_mode: QuirksMode,
     /// The document's URL (spec: every document has one).
-    pub url: String,
+    ///
+    /// Private, and paired with [`Self::url_extra`], because the two must not
+    /// drift: stylo resolves every relative URL in a parsed style attribute or
+    /// stylesheet against `url_extra`, so a document whose URL moved without it
+    /// would resolve against the address it used to have. [`Self::set_url`] is
+    /// the only writer.
+    url: String,
+    /// `url` as stylo's URL data. Per document since ADR-0035 D1 — a nested
+    /// browsing context resolves against *its* address, not the top-level one.
+    url_extra: UrlExtraData,
     /// The document's type. `new Document()` and `createDocument()` are XML.
     pub kind: DocumentKind,
     /// The document's content type, verbatim (`document.contentType`).
@@ -364,10 +374,9 @@ impl DocumentData {
     /// of `createHTMLDocument()` / `DOMParser.parseFromString(…, "text/html")`.
     #[must_use]
     pub fn html(url: String) -> Self {
-        Self {
-            url,
-            ..Self::default()
-        }
+        let mut data = Self::default();
+        data.set_url(url);
+        data
     }
 
     /// An XML document: `new Document()`, `createDocument()`, and the XML
@@ -376,11 +385,30 @@ impl DocumentData {
     pub fn xml(url: String, content_type: String, xml_document_interface: bool) -> Self {
         Self {
             quirks_mode: QuirksMode::NoQuirks,
+            url_extra: make_url_extra_data(&url),
             url,
             kind: DocumentKind::Xml,
             content_type,
             xml_document_interface,
         }
+    }
+
+    /// The document's URL.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The document's URL as stylo's URL data, for relative-URL resolution.
+    #[must_use]
+    pub fn url_extra(&self) -> &UrlExtraData {
+        &self.url_extra
+    }
+
+    /// Moves the document's URL, keeping the stylo URL data in step.
+    pub fn set_url(&mut self, url: String) {
+        self.url_extra = make_url_extra_data(&url);
+        self.url = url;
     }
 
     #[must_use]
@@ -395,6 +423,7 @@ impl Default for DocumentData {
         Self {
             quirks_mode: QuirksMode::NoQuirks,
             url: "about:blank".to_owned(),
+            url_extra: make_url_extra_data("about:blank"),
             kind: DocumentKind::Html,
             content_type: "text/html".to_owned(),
             xml_document_interface: false,

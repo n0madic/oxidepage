@@ -941,7 +941,17 @@ pub trait WorldEnter {
 /// the world that created them.
 pub struct PageShared {
     /// The document tree, shared with the parser during loads.
+    ///
+    /// The arena is shared by every browsing context of the page; **this**
+    /// context's document is [`Self::document`] (ADR-0035 D1).
     pub dom: Rc<RefCell<DomTree>>,
+    /// The rendered document of the browsing context this state belongs to.
+    ///
+    /// A `Cell` because a commit replaces the document node. For the top-level
+    /// context that node is always arena slot `(0, gen 1)`, which is what lets
+    /// the JS `document` wrapper survive navigation; a nested context gets a
+    /// fresh id per commit.
+    pub(crate) document: Cell<NodeId>,
     /// The style engine (stylo): document stylesheet set + computed values.
     pub style: Rc<RefCell<StyleEngine>>,
     /// The layout engine (box tree + taffy/parley): backs the geometry APIs.
@@ -1289,6 +1299,7 @@ impl PageShared {
         // `ex`/`ch`/`ic` units resolve against actual fonts (WP-H).
         style_engine.set_font_metrics_provider(layout.borrow().font_metrics_factory());
         let style = Rc::new(RefCell::new(style_engine));
+        let document = dom.borrow().document();
         let initial_url = dom.borrow().document_url().to_owned();
         let start = std::time::Instant::now();
         let time_origin_epoch_ms = std::time::SystemTime::now()
@@ -1298,6 +1309,7 @@ impl PageShared {
             * 1000.0;
         Rc::new(Self {
             dom,
+            document: Cell::new(document),
             style,
             layout,
             hooks,
@@ -1340,6 +1352,21 @@ impl PageShared {
             object_worlds: RefCell::new(HashMap::new()),
             enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
         })
+    }
+
+    /// The rendered document of this browsing context.
+    ///
+    /// Reach for this — not `dom.document()` — wherever the question is "which
+    /// document is this realm's": the arena holds one per browsing context
+    /// (ADR-0035 D1), and `dom.document()` is only ever the top-level one.
+    #[must_use]
+    pub fn document(&self) -> NodeId {
+        self.document.get()
+    }
+
+    /// Points this browsing context at the document a commit produced.
+    pub fn set_document(&self, document: NodeId) {
+        self.document.set(document);
     }
 
     /// Mints the next `Runtime.ExecutionContextId`.
