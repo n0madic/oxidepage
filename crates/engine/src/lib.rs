@@ -68,18 +68,18 @@ pub use page::{PageHandle, PageId};
 /// embedder needs no `oxidepage-page` dependency of its own.
 pub mod page_api {
     pub use oxidepage_page::{
-        AuthChallenge, AuthResponse, AuthSource, BoxQuads, CallArgument, ConsoleLevel,
+        AuthChallenge, AuthResponse, AuthSource, AwaitToken, BoxQuads, CallArgument, ConsoleLevel,
         ConsoleMessage, CookieSource, CookieView, DialogEvent, DialogKind, DialogRequest,
         DialogResponse, DownloadBehavior, DownloadEvent, DownloadState, EvaluateOptions,
-        EvaluationResult, ExceptionDetails, FileChooserEvent, FulfilledResponse, HistoryEntryInfo,
-        ImageFormat, InterceptCommand, InterceptControl, KeyEvent, KeyEventKind, KeyInput,
-        LayoutMetrics, LoopStats, Margins, Modifiers, MouseEventKind, MouseInput, NavigationEvent,
-        NavigationEventKind, NavigationHistory, NavigatorProfile, NetworkEvent, NodeDescription,
-        NodeId, NodeRef, Page, PaintOptions, PaperSize, PdfOptions, Point, PropertyDescriptor,
-        Rect, RemoteError, RemoteObject, RemoteSubtype, RemoteType, RequestId, RequestOverrides,
-        RequestPattern, ResourcePolicy, ResourceType, ScreenProfile, ScreenshotOptions,
-        ScriptError, ScriptErrorKind, Size, StackFrame, ValuePreview, Viewport, WaitUntil,
-        WheelInput, key_for_code, render_preview_top,
+        EvaluateOutcome, EvaluationResult, ExceptionDetails, FileChooserEvent, FulfilledResponse,
+        HistoryEntryInfo, ImageFormat, InterceptCommand, InterceptControl, KeyEvent, KeyEventKind,
+        KeyInput, LayoutMetrics, LoopStats, Margins, Modifiers, MouseEventKind, MouseInput,
+        NavigationEvent, NavigationEventKind, NavigationHistory, NavigatorProfile, NetworkEvent,
+        NodeDescription, NodeId, NodeRef, Page, PaintOptions, PaperSize, PdfOptions, Point,
+        PropertyDescriptor, Rect, RemoteError, RemoteObject, RemoteSubtype, RemoteType, RequestId,
+        RequestOverrides, RequestPattern, ResourcePolicy, ResourceType, ScreenProfile,
+        ScreenshotOptions, ScriptError, ScriptErrorKind, Size, StackFrame, ValuePreview, Viewport,
+        WaitUntil, WheelInput, key_for_code, render_preview_top,
     };
 }
 

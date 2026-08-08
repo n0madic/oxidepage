@@ -593,3 +593,153 @@ fn navigation_invalidates_handles_and_announces_a_new_context() {
         second["params"]["context"]["id"]
     );
 }
+
+// === deferred awaits (ADR-0034 D1) ===
+//
+// A session lane is serial, so an `awaitPromise` that blocked it would deadlock
+// against the very command that resolves the promise. That is not a corner
+// case: it is what `page.exposeBinding` does on every call.
+
+#[test]
+fn a_pending_await_does_not_hold_the_session_lane() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    // Left pending on purpose: only a later command can settle it.
+    let awaiting = client.dispatch(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "new Promise(resolve => { globalThis.__settle = resolve; })",
+            "awaitPromise": true,
+            "returnByValue": true,
+        }),
+    );
+
+    // The lane is free while that promise is pending — this is the assertion
+    // the whole design exists for, and it would time out before ADR-0034.
+    let meanwhile = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "1 + 1", "returnByValue": true }),
+    );
+    assert_eq!(meanwhile["result"]["value"], 2);
+
+    // And a later command on the *same* session can settle it.
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__settle(42)" }),
+    );
+
+    let settled = client.collect(awaiting).expect("the await answers");
+    assert_eq!(settled["result"]["value"], 42);
+    assert!(settled.get("exceptionDetails").is_none());
+}
+
+#[test]
+fn a_deferred_await_reports_a_rejection_as_an_exception() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    let awaiting = client.dispatch(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "new Promise((_, reject) => { globalThis.__fail = reject; })",
+            "awaitPromise": true,
+            "returnByValue": true,
+        }),
+    );
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__fail(new TypeError('boom'))" }),
+    );
+
+    let settled = client.collect(awaiting).expect("the await answers");
+    let text = settled["exceptionDetails"]["text"].as_str().unwrap_or("");
+    assert!(text.contains("boom"), "rejection text: {text}");
+}
+
+/// A promise nothing will ever resolve still answers, with the pending promise
+/// itself — the same thing the blocking path reported. An idle page must wake
+/// for that deadline on its own, which is what `next_wakeup` is for; without it
+/// the page parks indefinitely and the driver waits out its own timeout.
+#[test]
+fn an_await_nobody_resolves_answers_when_its_budget_runs_out() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    let settled = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "new Promise(() => {})",
+            "awaitPromise": true,
+        }),
+    );
+    assert_eq!(settled["result"]["type"], "object");
+    assert_eq!(settled["result"]["subtype"], "promise");
+}
+
+/// Closing the page answers whatever is parked on it. A driver told nothing
+/// waits out its own command timeout instead — and the promise would outlive
+/// the runtime that owns it, which aborts the process.
+#[test]
+fn closing_a_page_answers_its_pending_awaits() {
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+
+    let awaiting = client.dispatch(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "new Promise(() => {})",
+            "awaitPromise": true,
+        }),
+    );
+    client.call("Target.closeTarget", json!({ "targetId": target }));
+
+    // An answer either way — a result or a protocol error — but never silence.
+    match client.collect(awaiting) {
+        Ok(settled) => {
+            let text = settled["exceptionDetails"]["text"].as_str().unwrap_or("");
+            assert!(
+                text.contains("closed") || text.contains("destroyed"),
+                "unexpected close text: {settled}"
+            );
+        }
+        Err(error) => assert_eq!(error["code"], -32000, "unexpected error: {error}"),
+    }
+}
+
+/// A navigation destroys the context the promise belonged to, so the await is
+/// failed rather than left for a document that no longer exists.
+#[test]
+fn a_navigation_answers_the_awaits_of_the_outgoing_document() {
+    let fixtures = Fixtures::start(vec![("/a", "<!doctype html><title>a</title>")]);
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    let awaiting = client.dispatch(
+        &session,
+        "Runtime.evaluate",
+        json!({
+            "expression": "new Promise(() => {})",
+            "awaitPromise": true,
+        }),
+    );
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+
+    let settled = client.collect(awaiting).expect("the await answers");
+    let text = settled["exceptionDetails"]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("destroyed"),
+        "expected a destroyed-context answer, got: {settled}"
+    );
+}

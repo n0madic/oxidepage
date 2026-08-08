@@ -33,6 +33,79 @@ pub struct EvaluateOptions {
     pub group: Option<String>,
     /// Filename shown in stack traces.
     pub source_url: Option<String>,
+    /// Answer *later* rather than blocking on a promise that is still pending
+    /// (ADR-0034 D1).
+    ///
+    /// Off by default, so [`Page::eval`] and the CLI keep the blocking
+    /// behaviour they were written against. A driver turns it on because its
+    /// command channel is serial: a promise only a *later* command can resolve
+    /// deadlocks against the call awaiting it, which is exactly the shape
+    /// `page.exposeBinding` takes — the page calls the binding, the driver is
+    /// told, and it answers with a second command on the same session.
+    pub defer_await: bool,
+}
+
+/// Names one deferred await, so the answer can be matched to the call that
+/// asked for it.
+///
+/// Issued from a process-wide counter rather than a per-page one: an embedder
+/// holds one map across every page it drives, and per-page counters would
+/// collide in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AwaitToken(pub u64);
+
+impl std::fmt::Display for AwaitToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+static NEXT_AWAIT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// What an evaluation produced: an answer, or a promise to answer.
+#[derive(Clone, Debug)]
+pub enum EvaluateOutcome {
+    /// The result, ready now.
+    ///
+    /// Boxed for the same reason `evaluate_in_world`'s exception is: an
+    /// `EvaluationResult` dwarfs a token, and every deferred call would
+    /// otherwise carry its size.
+    Done(Box<EvaluationResult>),
+    /// The value is a promise that has not settled and
+    /// [`EvaluateOptions::defer_await`] was set. The answer arrives later as
+    /// [`PageRecord::AwaitSettled`](crate::PageRecord::AwaitSettled) carrying
+    /// this token.
+    Deferred(AwaitToken),
+}
+
+impl EvaluateOutcome {
+    /// The result of a call that could not have deferred.
+    ///
+    /// `defer_await` is the only thing that produces a [`Self::Deferred`], so
+    /// every caller that leaves it off — [`Page::eval`], the CLI, the library
+    /// API — can unwrap without a reachable panic.
+    #[must_use]
+    pub fn expect_done(self) -> EvaluationResult {
+        match self {
+            Self::Done(result) => *result,
+            Self::Deferred(token) => {
+                unreachable!("await {token} was deferred without defer_await")
+            }
+        }
+    }
+}
+
+/// One evaluation waiting for its promise to settle (ADR-0034 D1).
+///
+/// Holds a `JsValue`, so it is `!Send` and must be released before the runtime
+/// that owns it — which is why the page flushes these on navigation, on close
+/// and in `Drop`, and why the field sits above `worlds` in [`Page`].
+pub(crate) struct PendingAwait {
+    pub(crate) token: AwaitToken,
+    pub(crate) world: oxidepage_bindings::WorldId,
+    pub(crate) promise: JsValue,
+    pub(crate) options: EvaluateOptions,
+    pub(crate) deadline: std::time::Instant,
 }
 
 /// One argument to [`Page::call_function_on`]: either a live handle or a
@@ -100,7 +173,7 @@ impl Page {
     }
 
     /// Evaluates `source` in the main world, CDP's `Runtime.evaluate`.
-    pub fn evaluate(&self, source: &str, options: &EvaluateOptions) -> EvaluationResult {
+    pub fn evaluate(&self, source: &str, options: &EvaluateOptions) -> EvaluateOutcome {
         self.evaluate_in(None, source, options)
             .unwrap_or_else(|_| unreachable!("the main world always exists"))
     }
@@ -117,7 +190,7 @@ impl Page {
         context_id: Option<u64>,
         source: &str,
         options: &EvaluateOptions,
-    ) -> Result<EvaluationResult, String> {
+    ) -> Result<EvaluateOutcome, String> {
         let world = match context_id {
             None => oxidepage_bindings::MAIN_WORLD,
             Some(id) => self
@@ -132,7 +205,7 @@ impl Page {
         world: oxidepage_bindings::WorldId,
         source: &str,
         options: &EvaluateOptions,
-    ) -> EvaluationResult {
+    ) -> EvaluateOutcome {
         let filename = options
             .source_url
             .clone()
@@ -160,10 +233,10 @@ impl Page {
 
         let result = match outcome {
             Ok(value) => self.finish_value(world, value, options),
-            Err(exception) => EvaluationResult {
+            Err(exception) => EvaluateOutcome::Done(Box::new(EvaluationResult {
                 result: RemoteObject::undefined(),
                 exception: Some(*exception),
-            },
+            })),
         };
         // Same contract as `Page::eval`: microtasks and any task the script
         // queued run before the caller sees the answer.
@@ -183,7 +256,7 @@ impl Page {
         context_id: Option<u64>,
         args: &[CallArgument],
         options: &EvaluateOptions,
-    ) -> Result<EvaluationResult, RemoteError> {
+    ) -> Result<EvaluateOutcome, RemoteError> {
         // **The world comes from the handle**, and `executionContextId` selects
         // it when there is no handle (ADR-0033 D10). A driver's utility-world
         // handle must be called in that world: the value is a `Persistent` of
@@ -266,10 +339,10 @@ impl Page {
 
         let result = match outcome {
             Ok(value) => self.finish_value(world, value, options),
-            Err(exception) => EvaluationResult {
+            Err(exception) => EvaluateOutcome::Done(Box::new(EvaluationResult {
                 result: RemoteObject::undefined(),
                 exception: Some(exception),
-            },
+            })),
         };
         self.run_until_stalled();
         Ok(result)
@@ -299,7 +372,7 @@ impl Page {
         &self,
         object_id: u64,
         options: &EvaluateOptions,
-    ) -> Result<EvaluationResult, RemoteError> {
+    ) -> Result<EvaluateOutcome, RemoteError> {
         let world = self.object_world(object_id)?;
         let value = self.lookup(object_id)?;
         if self
@@ -311,7 +384,7 @@ impl Page {
                 "Could not find promise with given id",
             )));
         }
-        Ok(self.settle_promise(world, value, options))
+        Ok(self.settle_or_defer(world, value, options))
     }
 
     /// Releases one handle.
@@ -576,14 +649,75 @@ impl Page {
         world: oxidepage_bindings::WorldId,
         value: JsValue,
         options: &EvaluateOptions,
-    ) -> EvaluationResult {
+    ) -> EvaluateOutcome {
         let is_promise = self
             .with_cx_in(world, |cx| cx.scope.promise_state(&value).is_some())
             .unwrap_or(false);
         if options.await_promise && is_promise {
-            return self.settle_promise(world, value, options);
+            return self.settle_or_defer(world, value, options);
         }
-        self.described(world, &value, options)
+        EvaluateOutcome::Done(Box::new(self.described(world, &value, options)))
+    }
+
+    /// Settles `promise` the way `options` asks for: by blocking, or — with
+    /// [`EvaluateOptions::defer_await`] — by parking it and answering later.
+    ///
+    /// A promise that has **already** settled is described on the spot in both
+    /// modes. That is the common case rather than an optimization: `evaluate`
+    /// and `call_function_on` run a microtask checkpoint before this, so
+    /// anything that did not need a further task is finished by now, and a
+    /// driver only ever sees a token for a genuinely asynchronous wait.
+    fn settle_or_defer(
+        &self,
+        world: oxidepage_bindings::WorldId,
+        promise: JsValue,
+        options: &EvaluateOptions,
+    ) -> EvaluateOutcome {
+        if !options.defer_await {
+            return EvaluateOutcome::Done(Box::new(self.settle_promise(world, promise, options)));
+        }
+        if self.promise_is_settled(world, &promise) {
+            return EvaluateOutcome::Done(Box::new(
+                self.describe_settled(world, &promise, options),
+            ));
+        }
+        let token = AwaitToken(NEXT_AWAIT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        self.pending_awaits.borrow_mut().push(PendingAwait {
+            token,
+            world,
+            promise,
+            options: options.clone(),
+            deadline: std::time::Instant::now() + AWAIT_PROMISE_BUDGET,
+        });
+        EvaluateOutcome::Deferred(token)
+    }
+
+    /// Describes a parked await whose budget ran out: the still-pending
+    /// promise itself, which is what the blocking path reports too.
+    pub(crate) fn describe_pending_await(&self, entry: &PendingAwait) -> EvaluationResult {
+        self.described(entry.world, &entry.promise, &entry.options)
+    }
+
+    /// The earliest moment a parked await must be answered, budget-expired.
+    pub(crate) fn next_await_deadline(&self) -> Option<std::time::Instant> {
+        self.pending_awaits
+            .borrow()
+            .iter()
+            .map(|entry| entry.deadline)
+            .min()
+    }
+
+    /// Whether `promise` has fulfilled or rejected.
+    pub(crate) fn promise_is_settled(
+        &self,
+        world: oxidepage_bindings::WorldId,
+        promise: &JsValue,
+    ) -> bool {
+        matches!(
+            self.with_cx_in(world, |cx| cx.scope.promise_state(promise))
+                .flatten(),
+            Some(PromiseState::Fulfilled | PromiseState::Rejected)
+        )
     }
 
     /// [`Page::describe`] as an `EvaluationResult`, an exhausted handle table
@@ -622,14 +756,7 @@ impl Page {
         options: &EvaluateOptions,
     ) -> EvaluationResult {
         let deadline = std::time::Instant::now() + AWAIT_PROMISE_BUDGET;
-        loop {
-            let state = self
-                .with_cx_in(world, |cx| cx.scope.promise_state(&promise))
-                .flatten();
-            match state {
-                Some(PromiseState::Fulfilled) | Some(PromiseState::Rejected) => break,
-                _ => {}
-            }
+        while !self.promise_is_settled(world, &promise) {
             if std::time::Instant::now() >= deadline {
                 // Still pending after the budget: report the promise itself
                 // rather than hanging the lane on one that never settles.
@@ -637,13 +764,26 @@ impl Page {
             }
             self.settle(AWAIT_PROMISE_STEP);
         }
+        self.describe_settled(world, &promise, options)
+    }
 
+    /// Describes what a **settled** promise settled to.
+    ///
+    /// Split out of [`Self::settle_promise`] so the blocking path and the
+    /// deferred drain report a settled promise identically — two copies of this
+    /// would be two answers to "what did `await` produce".
+    pub(crate) fn describe_settled(
+        &self,
+        world: oxidepage_bindings::WorldId,
+        promise: &JsValue,
+        options: &EvaluateOptions,
+    ) -> EvaluationResult {
         // Every read below is in the promise's **own** world: the value is a
         // `Persistent` of that runtime, so reading it from the main world
         // fails to restore and reports `undefined` for a promise that really
         // did fulfil.
         let rejection = self
-            .with_cx_in(world, |cx| cx.scope.promise_rejection(&promise))
+            .with_cx_in(world, |cx| cx.scope.promise_rejection(promise))
             .flatten();
         if let Some(error) = rejection {
             let exception = self
@@ -670,7 +810,7 @@ impl Page {
                 .ok()?;
             let getter = cx
                 .scope
-                .call(&capture, &global, std::slice::from_ref(&promise))
+                .call(&capture, &global, std::slice::from_ref(promise))
                 .ok()?;
             Some(getter)
         });
@@ -680,8 +820,12 @@ impl Page {
                 exception: None,
             };
         };
-        // The `then` reaction is a microtask; one turn of the loop runs it.
-        self.settle(AWAIT_PROMISE_STEP);
+        // The `then` reaction is a microtask, and the promise is settled — so a
+        // checkpoint in its own world is the whole of what is owed. A turn of
+        // the *event loop* would do the same job and more, and the deferred
+        // drain calls this from inside that loop, where re-entering it is not
+        // an option.
+        self.with_cx_in(world, oxidepage_bindings::microtask_checkpoint);
         let settled = self
             .with_cx_in(world, |cx| {
                 let global = JsValue::Object(cx.scope.global());

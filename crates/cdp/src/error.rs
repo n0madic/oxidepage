@@ -125,6 +125,29 @@ impl From<oxidepage_engine::EngineError> for ProtocolError {
 /// The result of dispatching one command.
 pub type CommandResult = Result<serde_json::Value, ProtocolError>;
 
+/// What dispatching one command produced: an answer, or a promise of one.
+///
+/// Only `Runtime.evaluate`, `Runtime.callFunctionOn` and
+/// `Runtime.awaitPromise` can defer, and only when the driver asked for
+/// `awaitPromise` on a promise that has not settled (ADR-0034 D1). Everything
+/// else is `Ready`, which is why the whole dispatch tree keeps returning
+/// [`CommandResult`] and only the Runtime domain speaks this type.
+pub enum Deferrable {
+    /// Reply now.
+    Ready(CommandResult),
+    /// Reply when [`PageEvent::AwaitSettled`](oxidepage_engine::PageEvent)
+    /// carries this token. The lane sends **no** response — that is the point:
+    /// the session's next command runs while the promise is still pending, and
+    /// resolving it is very often exactly what that command does.
+    Deferred(oxidepage_engine::page_api::AwaitToken),
+}
+
+impl From<CommandResult> for Deferrable {
+    fn from(result: CommandResult) -> Self {
+        Self::Ready(result)
+    }
+}
+
 /// Failures of the transport itself, as opposed to of a command.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {

@@ -22,7 +22,9 @@ fn primitives_come_back_by_value_without_a_handle() {
         ("'hi'", RemoteType::String, "\"hi\""),
         ("true", RemoteType::Boolean, "true"),
     ] {
-        let outcome = page.evaluate(source, &EvaluateOptions::default());
+        let outcome = page
+            .evaluate(source, &EvaluateOptions::default())
+            .expect_done();
         assert!(outcome.exception.is_none(), "{source}: {outcome:?}");
         assert_eq!(outcome.result.kind, Some(kind), "{source}");
         assert_eq!(outcome.result.value_json.as_deref(), Some(json), "{source}");
@@ -42,7 +44,9 @@ fn numbers_json_cannot_carry_are_reported_unserializable() {
         ("-Infinity", "-Infinity"),
         ("-0", "-0"),
     ] {
-        let outcome = page.evaluate(source, &EvaluateOptions::default());
+        let outcome = page
+            .evaluate(source, &EvaluateOptions::default())
+            .expect_done();
         assert_eq!(
             outcome.result.unserializable.as_deref(),
             Some(expected),
@@ -57,7 +61,9 @@ fn numbers_json_cannot_carry_are_reported_unserializable() {
 #[test]
 fn an_object_gets_a_handle_that_survives_between_calls() {
     let page = page();
-    let outcome = page.evaluate("({ a: 1, b: 'two' })", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("({ a: 1, b: 'two' })", &EvaluateOptions::default())
+        .expect_done();
     let id = outcome.result.object_id.expect("objectId");
     assert_eq!(outcome.result.kind, Some(RemoteType::Object));
     assert_eq!(page.retained_object_count(), 1);
@@ -84,6 +90,7 @@ fn releasing_a_handle_makes_it_unusable() {
     let page = page();
     let id = page
         .evaluate("({})", &EvaluateOptions::default())
+        .expect_done()
         .result
         .object_id
         .unwrap();
@@ -104,10 +111,21 @@ fn an_object_group_releases_together() {
         group: Some(String::from("probe")),
         ..EvaluateOptions::default()
     };
-    let first = page.evaluate("({})", &options).result.object_id.unwrap();
-    let second = page.evaluate("[]", &options).result.object_id.unwrap();
+    let first = page
+        .evaluate("({})", &options)
+        .expect_done()
+        .result
+        .object_id
+        .unwrap();
+    let second = page
+        .evaluate("[]", &options)
+        .expect_done()
+        .result
+        .object_id
+        .unwrap();
     let loose = page
         .evaluate("({})", &EvaluateOptions::default())
+        .expect_done()
         .result
         .object_id
         .unwrap();
@@ -134,7 +152,9 @@ fn subtypes_a_driver_branches_on_are_reported() {
         ("new Map()", RemoteSubtype::Map),
         ("new Set()", RemoteSubtype::Set),
     ] {
-        let outcome = page.evaluate(source, &EvaluateOptions::default());
+        let outcome = page
+            .evaluate(source, &EvaluateOptions::default())
+            .expect_done();
         assert_eq!(outcome.result.subtype, Some(subtype), "{source}");
     }
 }
@@ -142,7 +162,9 @@ fn subtypes_a_driver_branches_on_are_reported() {
 #[test]
 fn an_array_description_carries_its_length() {
     let page = page();
-    let outcome = page.evaluate("[1,2,3]", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("[1,2,3]", &EvaluateOptions::default())
+        .expect_done();
     assert_eq!(outcome.result.description.as_deref(), Some("Array(3)"));
     assert_eq!(outcome.result.class_name.as_deref(), Some("Array"));
 }
@@ -150,17 +172,23 @@ fn an_array_description_carries_its_length() {
 #[test]
 fn a_plain_object_is_described_by_its_class_not_as_object_object() {
     let page = page();
-    let outcome = page.evaluate("({})", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("({})", &EvaluateOptions::default())
+        .expect_done();
     assert_eq!(outcome.result.description.as_deref(), Some("Object"));
 
-    let outcome = page.evaluate("class Widget {}; new Widget()", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("class Widget {}; new Widget()", &EvaluateOptions::default())
+        .expect_done();
     assert_eq!(outcome.result.class_name.as_deref(), Some("Widget"));
 }
 
 #[test]
 fn by_value_uses_the_realms_own_json_stringify() {
     let page = page();
-    let outcome = page.evaluate("({ a: [1, 2], b: 'x' })", &by_value());
+    let outcome = page
+        .evaluate("({ a: [1, 2], b: 'x' })", &by_value())
+        .expect_done();
     assert!(outcome.result.object_id.is_none());
     assert_eq!(
         outcome.result.value_json.as_deref(),
@@ -169,7 +197,9 @@ fn by_value_uses_the_realms_own_json_stringify() {
 
     // `toJSON` is honored, because the engine's own stringify is doing it — a
     // Rust re-implementation would have to re-derive this and would drift.
-    let outcome = page.evaluate("({ toJSON: () => 'custom' })", &by_value());
+    let outcome = page
+        .evaluate("({ toJSON: () => 'custom' })", &by_value())
+        .expect_done();
     assert_eq!(outcome.result.value_json.as_deref(), Some("\"custom\""));
 }
 
@@ -178,7 +208,9 @@ fn a_cycle_yields_no_value_rather_than_a_hang() {
     let page = page();
     // `JSON.stringify` throws on a cycle. The result must simply carry no
     // value; looping or panicking here would be reachable from any page.
-    let outcome = page.evaluate("const a = {}; a.self = a; a", &by_value());
+    let outcome = page
+        .evaluate("const a = {}; a.self = a; a", &by_value())
+        .expect_done();
     assert!(outcome.result.value_json.is_none());
     assert!(outcome.exception.is_none());
 }
@@ -186,7 +218,9 @@ fn a_cycle_yields_no_value_rather_than_a_hang() {
 #[test]
 fn a_thrown_error_becomes_exception_details() {
     let page = page();
-    let outcome = page.evaluate("throw new TypeError('boom')", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("throw new TypeError('boom')", &EvaluateOptions::default())
+        .expect_done();
     let exception = outcome.exception.expect("exception");
     assert!(
         exception.text.contains("boom"),
@@ -206,7 +240,9 @@ fn a_thrown_error_becomes_exception_details() {
 #[test]
 fn a_syntax_error_is_an_exception_not_a_silent_undefined() {
     let page = page();
-    let outcome = page.evaluate("this is not javascript", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("this is not javascript", &EvaluateOptions::default())
+        .expect_done();
     assert!(outcome.exception.is_some(), "{outcome:?}");
 }
 
@@ -215,6 +251,7 @@ fn call_function_on_binds_this_to_a_handle() {
     let page = page();
     let id = page
         .evaluate("({ n: 7 })", &EvaluateOptions::default())
+        .expect_done()
         .result
         .object_id
         .unwrap();
@@ -227,7 +264,8 @@ fn call_function_on_binds_this_to_a_handle() {
             &[],
             &by_value(),
         )
-        .expect("call");
+        .expect("call")
+        .expect_done();
     assert!(outcome.exception.is_none(), "{outcome:?}");
     assert_eq!(outcome.result.value_json.as_deref(), Some("14"));
 }
@@ -254,7 +292,8 @@ fn call_function_on_accepts_arrow_functions_and_literal_arguments() {
             ],
             &by_value(),
         )
-        .expect("call");
+        .expect("call")
+        .expect_done();
     assert_eq!(outcome.result.value_json.as_deref(), Some("42"));
 }
 
@@ -263,6 +302,7 @@ fn call_function_on_accepts_a_handle_as_an_argument() {
     let page = page();
     let id = page
         .evaluate("({ v: 'passed' })", &EvaluateOptions::default())
+        .expect_done()
         .result
         .object_id
         .unwrap();
@@ -277,7 +317,8 @@ fn call_function_on_accepts_a_handle_as_an_argument() {
             }],
             &by_value(),
         )
-        .expect("call");
+        .expect("call")
+        .expect_done();
     assert_eq!(outcome.result.value_json.as_deref(), Some("\"passed\""));
 }
 
@@ -301,7 +342,8 @@ fn a_function_that_throws_reports_the_exception() {
             &[],
             &by_value(),
         )
-        .expect("call");
+        .expect("call")
+        .expect_done();
     assert!(
         outcome
             .exception
@@ -314,14 +356,16 @@ fn a_function_that_throws_reports_the_exception() {
 #[test]
 fn await_promise_settles_an_already_resolved_promise() {
     let page = page();
-    let outcome = page.evaluate(
-        "Promise.resolve(5)",
-        &EvaluateOptions {
-            await_promise: true,
-            by_value: true,
-            ..EvaluateOptions::default()
-        },
-    );
+    let outcome = page
+        .evaluate(
+            "Promise.resolve(5)",
+            &EvaluateOptions {
+                await_promise: true,
+                by_value: true,
+                ..EvaluateOptions::default()
+            },
+        )
+        .expect_done();
     assert!(outcome.exception.is_none(), "{outcome:?}");
     assert_eq!(outcome.result.value_json.as_deref(), Some("5"));
 }
@@ -332,14 +376,16 @@ fn await_promise_settles_one_resolved_by_a_timer() {
     // The point of running the event loop rather than reading promise state:
     // this settles in a *later* task, and a state read would say `pending`
     // forever.
-    let outcome = page.evaluate(
-        "new Promise(r => setTimeout(() => r('late'), 10))",
-        &EvaluateOptions {
-            await_promise: true,
-            by_value: true,
-            ..EvaluateOptions::default()
-        },
-    );
+    let outcome = page
+        .evaluate(
+            "new Promise(r => setTimeout(() => r('late'), 10))",
+            &EvaluateOptions {
+                await_promise: true,
+                by_value: true,
+                ..EvaluateOptions::default()
+            },
+        )
+        .expect_done();
     assert!(outcome.exception.is_none(), "{outcome:?}");
     assert_eq!(outcome.result.value_json.as_deref(), Some("\"late\""));
 }
@@ -347,13 +393,15 @@ fn await_promise_settles_one_resolved_by_a_timer() {
 #[test]
 fn a_rejected_promise_becomes_an_exception() {
     let page = page();
-    let outcome = page.evaluate(
-        "Promise.reject(new Error('nope'))",
-        &EvaluateOptions {
-            await_promise: true,
-            ..EvaluateOptions::default()
-        },
-    );
+    let outcome = page
+        .evaluate(
+            "Promise.reject(new Error('nope'))",
+            &EvaluateOptions {
+                await_promise: true,
+                ..EvaluateOptions::default()
+            },
+        )
+        .expect_done();
     assert!(
         outcome
             .exception
@@ -368,6 +416,7 @@ fn await_promise_on_a_non_promise_is_refused() {
     let page = page();
     let id = page
         .evaluate("({})", &EvaluateOptions::default())
+        .expect_done()
         .result
         .object_id
         .unwrap();
@@ -419,6 +468,7 @@ fn navigation_invalidates_every_handle_and_bumps_the_context() {
     let page = page();
     let id = page
         .evaluate("({ a: 1 })", &EvaluateOptions::default())
+        .expect_done()
         .result
         .object_id
         .unwrap();
@@ -445,7 +495,9 @@ fn integral_numbers_beyond_i64_are_not_saturated() {
     let page = page();
     // `f64 as i64` saturates in Rust, so an unguarded cast printed `2**64` as
     // `9223372036854775807` — a wrong number, silently.
-    let outcome = page.evaluate("2**64", &EvaluateOptions::default());
+    let outcome = page
+        .evaluate("2**64", &EvaluateOptions::default())
+        .expect_done();
     assert_eq!(
         outcome.result.description.as_deref(),
         Some("18446744073709551616")
@@ -454,6 +506,7 @@ fn integral_numbers_beyond_i64_are_not_saturated() {
     // what JavaScript does and what a driver compares against.
     assert_eq!(
         page.evaluate("7", &EvaluateOptions::default())
+            .expect_done()
             .result
             .description
             .as_deref(),
@@ -468,7 +521,10 @@ fn an_exhausted_handle_table_reports_an_exception() {
     // but names nothing — exactly what the cap exists to prevent.
     let mut last = None;
     for _ in 0..(oxidepage_page::MAX_REMOTE_OBJECTS + 2) {
-        last = Some(page.evaluate("({})", &EvaluateOptions::default()));
+        last = Some(
+            page.evaluate("({})", &EvaluateOptions::default())
+                .expect_done(),
+        );
     }
     let outcome = last.expect("at least one evaluation");
     assert!(

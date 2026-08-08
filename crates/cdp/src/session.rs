@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::transport::Shutdown;
 
-use crate::error::{CommandResult, ProtocolError};
+use crate::error::{Deferrable, ProtocolError};
 use crate::message::{Event, Outbound, Request, Response};
 use crate::target::{TargetInfo, TargetRegistry, TargetSignal};
 use crate::token::random_hex;
@@ -202,7 +202,35 @@ pub struct Connection {
     /// position. Per connection, because a handle is only meaningful to the
     /// socket it was minted on.
     streams: Mutex<HashMap<String, Stream>>,
+    /// Commands whose reply is waiting on a promise (ADR-0034 D1).
+    awaits: Mutex<AwaitBook>,
 }
+
+/// The two sides of a deferred reply, under one lock.
+///
+/// Both directions are real races, and the lock is what makes them decidable.
+/// The lane learns a command deferred only *after* `dispatch` returns, and the
+/// page can settle the promise and emit `AwaitSettled` before that — so an
+/// answer with no waiter is parked in `settled` rather than dropped, and the
+/// lane checks `settled` before it parks itself in `waiting`.
+#[derive(Default)]
+struct AwaitBook {
+    /// Token → the request left unanswered.
+    waiting: HashMap<u64, (i64, Option<String>)>,
+    /// Token → an answer that arrived before its waiter, and when.
+    ///
+    /// The event bus fans out to **every** connection attached to the target,
+    /// so a second driver's connection sees tokens it will never claim. The
+    /// timestamp is what keeps that from growing without bound.
+    settled: HashMap<u64, (serde_json::Value, std::time::Instant)>,
+}
+
+/// How long an unclaimed answer is kept before it is swept.
+///
+/// Comfortably longer than the page's own await budget, so a real waiter is
+/// never swept out from under a lane that is about to claim it, and short
+/// enough that another connection's tokens do not accumulate.
+const ORPHAN_AWAIT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Stamps every request the endpoint receives, on any connection, with its
 /// receive order (see [`Request::seq`] and [`Connection::submit`]).
@@ -241,7 +269,51 @@ impl Connection {
             auto_attach: AtomicBool::new(false),
             wait_for_debugger: AtomicBool::new(false),
             streams: Mutex::new(HashMap::new()),
+            awaits: Mutex::new(AwaitBook::default()),
         })
+    }
+
+    /// Parks a deferred command's reply, or sends it if the answer beat it here
+    /// (ADR-0034 D1).
+    fn defer_reply(&self, token: u64, request_id: i64, session_id: Option<String>) {
+        let ready = {
+            let mut book = self.lock_awaits();
+            match book.settled.remove(&token) {
+                Some((result, _)) => Some(result),
+                None => {
+                    book.waiting.insert(token, (request_id, session_id.clone()));
+                    None
+                }
+            }
+        };
+        if let Some(result) = ready {
+            self.send(Response::ok(request_id, session_id, result));
+        }
+    }
+
+    /// Delivers a settled await to the command that is waiting for it, or parks
+    /// it for a lane that has not registered yet.
+    pub fn resolve_await(&self, token: u64, result: serde_json::Value) {
+        let waiter = {
+            let mut book = self.lock_awaits();
+            match book.waiting.remove(&token) {
+                Some(waiter) => Some(waiter),
+                None => {
+                    let now = std::time::Instant::now();
+                    book.settled
+                        .retain(|_, (_, at)| now.duration_since(*at) < ORPHAN_AWAIT_TTL);
+                    book.settled.insert(token, (result.clone(), now));
+                    None
+                }
+            }
+        };
+        if let Some((request_id, session_id)) = waiter {
+            self.send(Response::ok(request_id, session_id, result));
+        }
+    }
+
+    fn lock_awaits(&self) -> std::sync::MutexGuard<'_, AwaitBook> {
+        self.awaits.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Queues one frame's work onto the lane that owns it.
@@ -295,8 +367,18 @@ impl Connection {
                 return;
             }
             let session_id = request.session_id.clone();
-            let result = connection.dispatch(&request);
-            connection.send(Response::from_result(request.id, session_id, result));
+            match connection.dispatch(&request) {
+                Deferrable::Ready(result) => {
+                    connection.send(Response::from_result(request.id, session_id, result));
+                }
+                // No `Response` — and, crucially, the lane returns anyway, so
+                // the next command on this session runs while the promise is
+                // still pending. That is the whole of ADR-0034 D1: the command
+                // that resolves the promise very often *is* the next one.
+                Deferrable::Deferred(token) => {
+                    connection.defer_reply(token.0, request.id, session_id);
+                }
+            }
             // Fired only after the reply is queued to the writer — see
             // `domains::browser::close` for why the order is load-bearing.
             if connection.shutdown_armed.load(Ordering::Acquire) {
@@ -411,17 +493,22 @@ impl Connection {
     /// The `MethodNotFound` default is the P6 contract: a domain we have not
     /// implemented is *absent*, not stubbed, so `page.setGeolocation()` fails
     /// loudly instead of appearing to work.
-    fn dispatch(self: &Arc<Self>, request: &Request) -> CommandResult {
+    fn dispatch(self: &Arc<Self>, request: &Request) -> Deferrable {
         // A `sessionId` naming a session this connection never opened is an
         // error even for a browser-level domain: it means the driver's view of
         // its own attachments has diverged, and answering anyway hides that.
         if let Some(session_id) = &request.session_id
             && self.session(session_id).is_none()
         {
-            return Err(ProtocolError::no_session(session_id));
+            return Deferrable::Ready(Err(ProtocolError::no_session(session_id)));
         }
 
-        match request.domain() {
+        // The one domain that can answer later; every other returns a
+        // `CommandResult` and is wrapped.
+        if request.domain() == "Runtime" {
+            return crate::domains::runtime::dispatch(self, request);
+        }
+        Deferrable::Ready(match request.domain() {
             "Browser" => crate::domains::browser::dispatch(self, request),
             "DOM" => crate::domains::dom::dispatch(self, request),
             "Emulation" => crate::domains::emulation::dispatch(self, request),
@@ -432,11 +519,10 @@ impl Connection {
             "Network" => crate::domains::network::dispatch(self, request),
             "Page" => crate::domains::page::dispatch(self, request),
             "Performance" => crate::domains::performance::dispatch(self, request),
-            "Runtime" => crate::domains::runtime::dispatch(self, request),
             "Security" => crate::domains::emulation::dispatch_security(self, request),
             "Target" => crate::domains::target::dispatch(self, request),
             _ => Err(ProtocolError::method_not_found(&request.method)),
-        }
+        })
     }
 
     #[must_use]

@@ -10,29 +10,49 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use oxidepage_engine::page_api::{
-    CallArgument, EvaluateOptions, EvaluationResult, ExceptionDetails, PropertyDescriptor,
-    RemoteError, RemoteObject,
+    CallArgument, EvaluateOptions, EvaluateOutcome, EvaluationResult, ExceptionDetails,
+    PropertyDescriptor, RemoteError, RemoteObject,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::{CommandResult, ProtocolError};
+use crate::error::{CommandResult, Deferrable, ProtocolError};
 use crate::message::Request;
 use crate::session::{Connection, SessionState};
 
-pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+/// The one domain that can answer later (ADR-0034 D1).
+///
+/// The three methods that take `awaitPromise` return [`Deferrable`]; the rest
+/// answer immediately and are wrapped.
+pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> Deferrable {
+    match request.method.as_str() {
+        "Runtime.evaluate" => evaluate(connection, request),
+        "Runtime.callFunctionOn" => call_function_on(connection, request),
+        "Runtime.awaitPromise" => await_promise(connection, request),
+        _ => Deferrable::Ready(dispatch_ready(connection, request)),
+    }
+}
+
+fn dispatch_ready(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     match request.method.as_str() {
         "Runtime.enable" => set_enabled(connection, request, true),
         "Runtime.disable" => set_enabled(connection, request, false),
-        "Runtime.evaluate" => evaluate(connection, request),
-        "Runtime.callFunctionOn" => call_function_on(connection, request),
         "Runtime.getProperties" => get_properties(connection, request),
         "Runtime.releaseObject" => release_object(connection, request),
         "Runtime.releaseObjectGroup" => release_object_group(connection, request),
-        "Runtime.awaitPromise" => await_promise(connection, request),
         "Runtime.runIfWaitingForDebugger" => run_if_waiting_for_debugger(connection, request),
         "Runtime.addBinding" => add_binding(connection, request),
         _ => Err(ProtocolError::method_not_found(&request.method)),
+    }
+}
+
+/// Renders a finished evaluation, or hands the token back so the lane can park
+/// the reply.
+fn answer(outcome: Result<EvaluateOutcome, ProtocolError>) -> Deferrable {
+    match outcome {
+        Ok(EvaluateOutcome::Done(result)) => Deferrable::Ready(Ok(evaluation_json(&result))),
+        Ok(EvaluateOutcome::Deferred(token)) => Deferrable::Deferred(token),
+        Err(error) => Deferrable::Ready(Err(error)),
     }
 }
 
@@ -128,10 +148,22 @@ fn options_from(
         await_promise: await_promise.unwrap_or(false),
         group,
         source_url: None,
+        // Always, for every driver command that can await (ADR-0034 D1). A
+        // session lane is serial, so blocking here on a promise the driver's
+        // *next* command would resolve is a deadlock — the shape
+        // `page.exposeBinding` takes on every call.
+        defer_await: true,
     }
 }
 
-fn evaluate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+fn evaluate(connection: &Arc<Connection>, request: &Request) -> Deferrable {
+    answer(evaluate_inner(connection, request))
+}
+
+fn evaluate_inner(
+    connection: &Arc<Connection>,
+    request: &Request,
+) -> Result<EvaluateOutcome, ProtocolError> {
     let session = connection.require_session(request)?;
     let params: EvaluateParams = request.parse()?;
     let _ = (params.user_gesture, params.silent);
@@ -156,7 +188,7 @@ fn evaluate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
         .page
         .evaluate_in(context_id, params.expression.clone(), options)?
         .map_err(ProtocolError::server)?;
-    Ok(evaluation_json(&outcome))
+    Ok(outcome)
 }
 
 #[derive(Deserialize)]
@@ -199,7 +231,14 @@ fn parse_object_id(id: &str) -> Result<u64, ProtocolError> {
         .map_err(|_| ProtocolError::server(format!("Could not find object with given id: {id}")))
 }
 
-fn call_function_on(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+fn call_function_on(connection: &Arc<Connection>, request: &Request) -> Deferrable {
+    answer(call_function_on_inner(connection, request))
+}
+
+fn call_function_on_inner(
+    connection: &Arc<Connection>,
+    request: &Request,
+) -> Result<EvaluateOutcome, ProtocolError> {
     let session = connection.require_session(request)?;
     let params: CallFunctionOnParams = request.parse()?;
     // Selects the world when no `objectId` is given; checked against the
@@ -253,7 +292,7 @@ fn call_function_on(connection: &Arc<Connection>, request: &Request) -> CommandR
             options,
         )?
         .map_err(remote_error)?;
-    Ok(evaluation_json(&outcome))
+    Ok(outcome)
 }
 
 fn get_properties(connection: &Arc<Connection>, request: &Request) -> CommandResult {
@@ -309,7 +348,14 @@ fn release_object_group(connection: &Arc<Connection>, request: &Request) -> Comm
     Ok(json!({}))
 }
 
-fn await_promise(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+fn await_promise(connection: &Arc<Connection>, request: &Request) -> Deferrable {
+    answer(await_promise_inner(connection, request))
+}
+
+fn await_promise_inner(
+    connection: &Arc<Connection>,
+    request: &Request,
+) -> Result<EvaluateOutcome, ProtocolError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Params {
@@ -324,7 +370,7 @@ fn await_promise(connection: &Arc<Connection>, request: &Request) -> CommandResu
         .page
         .await_promise(id, options_from(params.return_by_value, Some(true), None))?
         .map_err(remote_error)?;
-    Ok(evaluation_json(&outcome))
+    Ok(outcome)
 }
 
 fn run_if_waiting_for_debugger(connection: &Arc<Connection>, request: &Request) -> CommandResult {
@@ -432,7 +478,7 @@ pub fn exception_json(details: &ExceptionDetails) -> Value {
     out
 }
 
-fn evaluation_json(outcome: &EvaluationResult) -> Value {
+pub(crate) fn evaluation_json(outcome: &EvaluationResult) -> Value {
     let mut out = json!({ "result": remote_object_json(&outcome.result) });
     if let Some(exception) = &outcome.exception {
         out["exceptionDetails"] = exception_json(exception);

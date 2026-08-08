@@ -31,6 +31,15 @@ fn seconds(epoch_ms: f64) -> f64 {
 
 /// Fans one page event out to every session of `target_id` on this connection.
 pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event: &PageEvent) {
+    // A settled await is a **response**, not an event: it completes a command
+    // this connection left unanswered (ADR-0034 D1). So it is handled once per
+    // connection, before the per-session fan-out — and before the
+    // `sessions.is_empty()` early-out, because a session detached while its
+    // promise was pending still has a request id waiting for a reply.
+    if let PageEvent::AwaitSettled { token, result } = event {
+        connection.resolve_await(token.0, crate::domains::runtime::evaluation_json(result));
+        return;
+    }
     let sessions = connection.sessions_for(target_id);
     if sessions.is_empty() {
         return;

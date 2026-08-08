@@ -54,7 +54,9 @@ use oxidepage_js::{
 use oxidepage_layout::{LayoutEngine, PaintStamp};
 use oxidepage_net::{FetchOutcome, NetEvent, NetRequest, NetService, decode_charset};
 use oxidepage_style::{BlockingImportLoader, CssFetcher, StyleEngine};
-pub use remote::{CallArgument, EvaluateOptions, MAX_PROPERTIES, RemoteError};
+pub use remote::{
+    AwaitToken, CallArgument, EvaluateOptions, EvaluateOutcome, MAX_PROPERTIES, RemoteError,
+};
 use style::selector_parser::PseudoElement;
 use style::stylesheets::Origin;
 
@@ -313,6 +315,19 @@ pub enum PageRecord {
         /// The execution context the call came from, so a binding installed
         /// in an isolated world is attributed to that world (ADR-0033 D10).
         context_id: u64,
+    },
+    /// A promise a deferred evaluation was parked on has settled, or its
+    /// budget ran out (ADR-0034 D1).
+    ///
+    /// The answer to a [`Runtime.evaluate`](Page::evaluate_in) /
+    /// `callFunctionOn` / `awaitPromise` that returned
+    /// [`EvaluateOutcome::Deferred`](crate::EvaluateOutcome::Deferred). The
+    /// embedder matches it back to the call by `token` and replies then — which
+    /// is what frees the command channel to carry the very command that
+    /// resolves the promise.
+    AwaitSettled {
+        token: remote::AwaitToken,
+        result: oxidepage_bindings::remote::EvaluationResult,
     },
     /// An `<input type=file>` was activated and a driver asked to intercept
     /// the chooser (ADR-0032 D12).
@@ -1505,6 +1520,12 @@ pub struct Page {
     // world's module loader holds an `Rc<NetService>`, so `net` outlives them
     // all. `shared` deliberately holds no `JsValue` at all.
     hooks: Rc<LoopHooks>,
+    /// Evaluations parked on a promise that had not settled (ADR-0034 D1).
+    ///
+    /// **Above `worlds` on purpose**: each entry holds a `JsValue` of some
+    /// world's runtime, and a `Persistent` outliving its `Runtime` aborts the
+    /// process. `Drop` clears it first for the same reason.
+    pending_awaits: RefCell<Vec<remote::PendingAwait>>,
     state: Rc<WorldState>,
     shared: Rc<oxidepage_bindings::PageShared>,
     worlds: Rc<worlds::WorldTable>,
@@ -1698,6 +1719,10 @@ impl Drop for Page {
     /// (ADR-0033 D4). `dropping_a_page_with_live_worlds_is_clean` exists
     /// because the failure mode is an abort rather than a test failure.
     fn drop(&mut self) {
+        // 0. Promises a deferred `awaitPromise` is parked on (ADR-0034 D1).
+        //    Nobody is left to answer, but the values are `Persistent`s of
+        //    worlds `teardown` is about to free.
+        self.pending_awaits.borrow_mut().clear();
         // 1. Page-level JS: timer callbacks and their arguments, rAF
         //    callbacks. `LoopHooks` is the only page-level owner left, and
         //    every value it holds belongs to some world's runtime.
@@ -1849,6 +1874,7 @@ impl Page {
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let page = Self {
             hooks,
+            pending_awaits: RefCell::new(Vec::new()),
             state,
             shared,
             worlds: world_table,
@@ -3005,6 +3031,13 @@ impl Page {
         }
         // Timers, intervals and animation frames belong to the old document too.
         self.hooks.reset_for_navigation();
+        // Evaluations parked on a promise of the outgoing document (ADR-0034
+        // D1). **Before** the worlds are torn down: an isolated world's
+        // `JsValue` would otherwise outlive its runtime, which aborts the
+        // process rather than failing a test. Every world, not only the ones
+        // about to be destroyed — a main-world promise belongs to the dead
+        // document just as much, and nothing will ever settle it.
+        self.fail_pending_awaits(None, "Execution context was destroyed.");
         // Every isolated world is destroyed and rebuilt against a fresh global
         // before any init script runs (ADR-0033 D9).
         self.reset_worlds_for_navigation();
@@ -3848,6 +3881,11 @@ impl Page {
             self.hooks.next_deadline(),
             render_at,
             self.net.next_pause_deadline(),
+            // A deferred await is the same shape of work as a paused request:
+            // nothing is waiting on a clock, so an otherwise idle page would
+            // park indefinitely and answer only when something unrelated woke
+            // it. The driver would see a command that never returns.
+            self.next_await_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -3979,6 +4017,10 @@ impl Page {
                 break;
             }
         }
+        // Answer whatever is still parked on a promise before the port goes
+        // (ADR-0034 D1). The thread is ending, so nothing will settle these —
+        // and a driver told nothing waits out its own command timeout instead.
+        self.fail_pending_awaits(None, "Target closed");
         // Drop the port so a late `send` fails fast rather than queueing into a
         // channel nobody will read.
         self.cmd_rx.borrow_mut().take();
@@ -4085,6 +4127,11 @@ impl Page {
             progressed |= self.drain_scroll_events();
             // Payloads page script handed to an `add_binding` function.
             progressed |= self.drain_binding_events();
+            // Evaluations parked on a promise (ADR-0034 D1). **After** the
+            // binding drain: `exposeBinding` is the shape this exists for, and
+            // the driver cannot resolve the promise before it has been told the
+            // binding was called.
+            progressed |= self.drain_pending_awaits();
             // File-input activations, announced with a protocol handle for the
             // input (ADR-0032 D12).
             progressed |= self.drain_file_choosers();
@@ -5077,6 +5124,80 @@ impl Page {
             });
         }
         true
+    }
+
+    /// Answers the evaluations parked on a promise (ADR-0034 D1).
+    ///
+    /// A settled promise is described **in its own world** — the value is a
+    /// `Persistent` of that runtime, and reading it from the main world reports
+    /// `undefined` for a promise that really did fulfil (ADR-0033 D4). One that
+    /// outlived its budget reports the pending promise itself, exactly as the
+    /// blocking path does, so a driver waiting on a promise nothing will
+    /// resolve gets an answer rather than silence.
+    fn drain_pending_awaits(&self) -> bool {
+        if self.pending_awaits.borrow().is_empty() {
+            return false;
+        }
+        // Swapped out rather than held: describing a settled promise runs a
+        // microtask checkpoint, which runs author JS, which can defer another
+        // await — and that would be a `BorrowMutError` against this borrow.
+        let parked = std::mem::take(&mut *self.pending_awaits.borrow_mut());
+        let now = Instant::now();
+        let mut answered = false;
+        let mut still_waiting = Vec::new();
+        for entry in parked {
+            let settled = self.promise_is_settled(entry.world, &entry.promise);
+            if !settled && now < entry.deadline {
+                still_waiting.push(entry);
+                continue;
+            }
+            let result = if settled {
+                self.describe_settled(entry.world, &entry.promise, &entry.options)
+            } else {
+                self.describe_pending_await(&entry)
+            };
+            self.hooks.emit(PageRecord::AwaitSettled {
+                token: entry.token,
+                result,
+            });
+            answered = true;
+        }
+        // Appended, not assigned: a checkpoint above may have parked a new
+        // entry, and overwriting would drop it — silently, since the only
+        // symptom is a driver that never hears back.
+        self.pending_awaits.borrow_mut().extend(still_waiting);
+        answered
+    }
+
+    /// Reports every parked await with `text` as its exception, releasing the
+    /// promises (ADR-0034 D1).
+    ///
+    /// Called wherever the answer can no longer arrive: the world is being torn
+    /// down for a navigation, or the page is closing. Both halves matter — the
+    /// driver would otherwise wait out its own timeout, and the `JsValue` would
+    /// outlive the runtime that owns it, which aborts the process.
+    fn fail_pending_awaits(&self, world: Option<oxidepage_bindings::WorldId>, text: &str) {
+        let parked = std::mem::take(&mut *self.pending_awaits.borrow_mut());
+        let mut kept = Vec::new();
+        for entry in parked {
+            if world.is_some_and(|only| only != entry.world) {
+                kept.push(entry);
+                continue;
+            }
+            self.hooks.emit(PageRecord::AwaitSettled {
+                token: entry.token,
+                result: oxidepage_bindings::remote::EvaluationResult {
+                    result: oxidepage_bindings::remote::RemoteObject::undefined(),
+                    exception: Some(oxidepage_bindings::remote::ExceptionDetails {
+                        text: text.to_owned(),
+                        ..Default::default()
+                    }),
+                },
+            });
+            // `entry` drops here, releasing the promise while its runtime is
+            // still alive.
+        }
+        self.pending_awaits.borrow_mut().extend(kept);
     }
 
     /// Dispatches `scroll` events for the targets whose position changed

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use oxidepage_page::{
-    BoxQuads, CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluationResult,
+    BoxQuads, CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluateOutcome,
     InterceptControl, KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput, NavigationHistory,
     NodeDescription, NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions,
     PageRecord, PaintOptions, PdfOptions, Point, PropertyDescriptor, Rect, RemoteError,
@@ -395,7 +395,7 @@ impl PageHandle {
         &self,
         source: &str,
         options: EvaluateOptions,
-    ) -> EngineResult<EvaluationResult> {
+    ) -> EngineResult<EvaluateOutcome> {
         let source = source.to_owned();
         self.with(move |page| page.evaluate(&source, &options))
     }
@@ -408,7 +408,7 @@ impl PageHandle {
         context_id: Option<u64>,
         args: Vec<CallArgument>,
         options: EvaluateOptions,
-    ) -> EngineResult<Result<EvaluationResult, RemoteError>> {
+    ) -> EngineResult<Result<EvaluateOutcome, RemoteError>> {
         self.with(move |page| {
             page.call_function_on(&declaration, object_id, context_id, &args, &options)
         })
@@ -428,7 +428,7 @@ impl PageHandle {
         &self,
         object_id: u64,
         options: EvaluateOptions,
-    ) -> EngineResult<Result<EvaluationResult, RemoteError>> {
+    ) -> EngineResult<Result<EvaluateOutcome, RemoteError>> {
         self.with(move |page| page.await_promise(object_id, &options))
     }
 
@@ -491,7 +491,7 @@ impl PageHandle {
         context_id: Option<u64>,
         source: String,
         options: EvaluateOptions,
-    ) -> EngineResult<Result<EvaluationResult, String>> {
+    ) -> EngineResult<Result<EvaluateOutcome, String>> {
         self.with(move |page| page.evaluate_in(context_id, &source, &options))
     }
 

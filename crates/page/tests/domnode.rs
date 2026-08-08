@@ -319,7 +319,9 @@ fn a_node_object_round_trips_and_a_non_node_does_not() {
     assert_eq!(page.node_for_object(again).unwrap(), a);
 
     // A live handle to something that is not a node is a WrongType, not a panic.
-    let plain = page.evaluate("({})", &EvaluateOptions::default());
+    let plain = page
+        .evaluate("({})", &EvaluateOptions::default())
+        .expect_done();
     let plain_id = plain.result.object_id.expect("an object gets a handle");
     assert!(matches!(
         page.node_for_object(plain_id),

@@ -1,7 +1,7 @@
 //! Isolated worlds at the `Page` level (ADR-0033): lifecycle, per-world task
 //! sources, and the teardown whose failure mode is a process abort.
 
-use oxidepage_page::{EvaluateOptions, Page, PageOptions};
+use oxidepage_page::{EvaluateOptions, EvaluateOutcome, Page, PageOptions};
 
 fn page() -> Page {
     Page::new(PageOptions::default()).expect("page")
@@ -10,7 +10,8 @@ fn page() -> Page {
 fn eval_in(page: &Page, context_id: Option<u64>, source: &str) -> String {
     let result = page
         .evaluate_in(context_id, source, &EvaluateOptions::default())
-        .expect("the context exists");
+        .expect("the context exists")
+        .expect_done();
     assert!(
         result.exception.is_none(),
         "{source} threw: {:?}",
@@ -348,8 +349,30 @@ fn dropping_a_page_with_live_worlds_is_clean() {
     for context in [None, Some(a.context_id), Some(b.context_id)] {
         let handle = page
             .evaluate_in(context, "({ retained: true })", &EvaluateOptions::default())
-            .expect("context");
+            .expect("context")
+            .expect_done();
         assert!(handle.result.object_id.is_some());
+    }
+    // A deferred `awaitPromise` parked in each world (ADR-0034 D1). `Page`
+    // holds the promise itself, not a handle to it, so this is the one owner
+    // of a `JsValue` that lives outside `WorldState` — and a `Persistent`
+    // outliving its `Runtime` aborts the process rather than failing a test.
+    for context in [None, Some(a.context_id), Some(b.context_id)] {
+        let outcome = page
+            .evaluate_in(
+                context,
+                "new Promise(() => {})",
+                &EvaluateOptions {
+                    await_promise: true,
+                    defer_await: true,
+                    ..EvaluateOptions::default()
+                },
+            )
+            .expect("context");
+        assert!(
+            matches!(outcome, EvaluateOutcome::Deferred(_)),
+            "a promise nothing resolves must defer, not answer"
+        );
     }
     // History state is page-level and must be serialized, not a live handle.
     eval_in(&page, None, "history.pushState({ a: 1 }, '', '#one')");
@@ -889,7 +912,8 @@ fn a_commit_forgets_the_handles_it_invalidates() {
         for _ in 0..20 {
             let handle = page
                 .evaluate_in(context, "({})", &EvaluateOptions::default())
-                .expect("context");
+                .expect("context")
+                .expect_done();
             assert!(handle.result.object_id.is_some());
         }
     }

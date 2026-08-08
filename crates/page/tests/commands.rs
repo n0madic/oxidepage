@@ -16,7 +16,10 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use oxidepage_page::{Page, PageJob, PageOptions, ResourcePolicy, WaitUntil, load_html_page};
+use oxidepage_page::{
+    EvaluateOptions, EvaluateOutcome, Page, PageJob, PageOptions, ResourcePolicy, WaitUntil,
+    load_html_page,
+};
 
 /// Runs `page` on this thread from a fresh port, handing the sender back so the
 /// test thread can drive it.
@@ -148,6 +151,50 @@ fn an_idle_page_parks_instead_of_spinning() {
     assert!(
         after.turns - before.turns <= 40,
         "an idle page must not churn the loop: {} extra turns",
+        after.turns - before.turns
+    );
+
+    tx.send(PageJob::control(Page::request_close)).unwrap();
+    handle.join().unwrap();
+}
+
+/// A page holding a deferred await still **parks** (ADR-0034 D1).
+///
+/// The drain is a task source, and a task source that always reports progress
+/// turns the loop into a spin — which is exactly the busy-wait ADR-0004 exists
+/// to forbid, and it would be visible only as a pegged core. A parked await is
+/// not progress until its promise settles or its budget runs out.
+#[test]
+fn a_page_with_a_deferred_await_still_parks() {
+    let (tx, handle) = spawn_loop("<p>quiet</p>");
+
+    let deferred = call(&tx, Duration::from_secs(5), |page| {
+        matches!(
+            page.evaluate(
+                "new Promise(() => {})",
+                &EvaluateOptions {
+                    await_promise: true,
+                    defer_await: true,
+                    ..EvaluateOptions::default()
+                },
+            ),
+            EvaluateOutcome::Deferred(_)
+        )
+    });
+    assert!(deferred, "a promise nothing resolves must defer");
+
+    let before = call(&tx, Duration::from_secs(5), Page::loop_stats);
+    std::thread::sleep(Duration::from_millis(300));
+    let after = call(&tx, Duration::from_secs(5), Page::loop_stats);
+
+    assert!(
+        after.blocking_waits - before.blocking_waits <= 4,
+        "a page holding a deferred await must park, not spin: {} extra waits",
+        after.blocking_waits - before.blocking_waits
+    );
+    assert!(
+        after.turns - before.turns <= 40,
+        "a deferred await must not churn the loop: {} extra turns",
         after.turns - before.turns
     );
 

@@ -36,6 +36,18 @@ pub enum PageEvent {
     },
     /// One step of a network request's life (ADR-0030).
     Network(oxidepage_page::NetworkEvent),
+    /// The answer to an evaluation that returned
+    /// [`EvaluateOutcome::Deferred`](oxidepage_page::EvaluateOutcome::Deferred)
+    /// (ADR-0034 D1).
+    ///
+    /// A driver matches `token` back to the command it left unanswered and
+    /// replies then. Always arrives exactly once per deferred call: the page
+    /// answers a settled promise, a budget-expired one, a navigation that
+    /// destroyed its context, and its own close.
+    AwaitSettled {
+        token: oxidepage_page::AwaitToken,
+        result: oxidepage_page::EvaluationResult,
+    },
     /// An `<input type=file>` was activated with
     /// `Page.setInterceptFileChooserDialog` on (ADR-0032 D12).
     ///
@@ -91,6 +103,7 @@ impl PageEvent {
                 context_id,
             },
             PageRecord::Network(event) => Self::Network(event),
+            PageRecord::AwaitSettled { token, result } => Self::AwaitSettled { token, result },
             PageRecord::FileChooser(event) => Self::FileChooser(event),
             PageRecord::Download(event) => Self::Download(event),
         }
