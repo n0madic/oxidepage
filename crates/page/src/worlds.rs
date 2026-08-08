@@ -180,10 +180,10 @@ impl WorldTable {
             state.release_js();
             // Its cursor must not hold the connectivity log back once the
             // world is gone.
-            state.frame.forget_world_cursor(world.id);
+            state.frame.global.forget_world_cursor(world.id);
             // Its handles are gone with its store; the page index must not keep
             // routing an `objectId` at a world that no longer exists.
-            state.frame.forget_objects_of(world.id);
+            state.frame.global.forget_objects_of(world.id);
         }
     }
 

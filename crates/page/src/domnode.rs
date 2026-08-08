@@ -161,6 +161,7 @@ impl Page {
         // brand check (ADR-0033 D1).
         let world = self
             .shared
+            .global
             .object_world(object_id)
             .ok_or(RemoteError::NoSuchObject(object_id))?;
         let value = self

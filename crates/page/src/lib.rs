@@ -1862,6 +1862,7 @@ impl Page {
         }
         install_rejection_tracker(&realm, &hooks);
         let shared = oxidepage_bindings::install_frame(
+            oxidepage_bindings::PageGlobal::new(),
             dom,
             Rc::clone(&hooks) as Rc<dyn HostHooks>,
             viewport,
@@ -1875,7 +1876,9 @@ impl Page {
         // The hop a host callback in one world uses to reach another. Weak, so
         // the `Page -> WorldTable -> realm -> WorldState -> FrameShared` chain
         // stays acyclic and every runtime is freed on drop.
-        shared.set_world_enter(Rc::downgrade(&world_table) as std::rc::Weak<dyn WorldEnter>);
+        shared
+            .global
+            .set_world_enter(Rc::downgrade(&world_table) as std::rc::Weak<dyn WorldEnter>);
         state.set_whole_document_visible(whole_document_visible);
         hooks.adopt_time_origin(state.time_origin());
 
@@ -2072,10 +2075,11 @@ impl Page {
     /// returning its identifier. CDP's
     /// `Page.addScriptToEvaluateOnNewDocument`.
     pub fn add_init_script(&self, source: &str) -> u64 {
-        let id = self.state.frame.next_init_script.get() + 1;
-        self.state.frame.next_init_script.set(id);
+        let id = self.state.frame.global.next_init_script.get() + 1;
+        self.state.frame.global.next_init_script.set(id);
         self.state
             .frame
+            .global
             .init_scripts
             .borrow_mut()
             .push(oxidepage_bindings::InitScript {
@@ -2099,10 +2103,11 @@ impl Page {
             self.hooks
                 .report_resource_error(format!("could not create world {name:?}: {error}"));
         }
-        let id = self.state.frame.next_init_script.get() + 1;
-        self.state.frame.next_init_script.set(id);
+        let id = self.state.frame.global.next_init_script.get() + 1;
+        self.state.frame.global.next_init_script.set(id);
         self.state
             .frame
+            .global
             .init_scripts
             .borrow_mut()
             .push(oxidepage_bindings::InitScript {
@@ -2115,7 +2120,7 @@ impl Page {
 
     /// Removes an init script. `false` if no script has that id.
     pub fn remove_init_script(&self, id: u64) -> bool {
-        let mut scripts = self.state.frame.init_scripts.borrow_mut();
+        let mut scripts = self.state.frame.global.init_scripts.borrow_mut();
         let before = scripts.len();
         scripts.retain(|script| script.id != id);
         scripts.len() != before
@@ -2128,7 +2133,7 @@ impl Page {
     /// stop the others from running either.
     fn run_init_scripts(&self) {
         let scripts: Vec<oxidepage_bindings::InitScript> =
-            self.state.frame.init_scripts.borrow().clone();
+            self.state.frame.global.init_scripts.borrow().clone();
         for script in scripts {
             // Routed to its own world: a `worldName` init script is the
             // driver's own code and must not run against page globals.
@@ -3162,7 +3167,7 @@ impl Page {
         }
         // A request the outgoing document started must not be routed into the
         // new one; the ids were aborted just above.
-        self.shared.clear_net_worlds();
+        self.shared.global.clear_net_worlds();
         self.deferred.borrow_mut().clear();
         self.ordered_dynamic_ready.borrow_mut().clear();
         self.next_dynamic_order.set(0);
@@ -4440,11 +4445,12 @@ impl Page {
         // `deliver_net_event` finds no pending entry and drops it.
         let world = self
             .shared
+            .global
             .net_world_of(id)
             .unwrap_or(oxidepage_bindings::MAIN_WORLD);
         self.with_cx_in(world, |cx| oxidepage_bindings::deliver_net_event(cx, event));
         if terminal {
-            self.shared.forget_net_world(id);
+            self.shared.global.forget_net_world(id);
             self.net.finish(id);
         }
     }
@@ -5319,6 +5325,7 @@ impl Page {
         let calls: Vec<oxidepage_bindings::BindingCall> = self
             .state
             .frame
+            .global
             .binding_calls
             .borrow_mut()
             .drain(..)

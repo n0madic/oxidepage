@@ -929,6 +929,212 @@ pub trait WorldEnter {
     ) -> bool;
 }
 
+/// State shared by every browsing context of one page (ADR-0035 D2).
+///
+/// A page holds one [`FrameShared`] per frame; this is what those frames share.
+/// The rule for what belongs here is "would two frames disagreeing about it be
+/// a bug?" — id minting must be page-unique or a handle would reach the wrong
+/// frame's object; a driver's `addScriptToEvaluateOnNewDocument` and
+/// `addBinding` apply to every frame, as they do in Chrome; and the
+/// connectivity log tracks nodes of one shared arena.
+///
+/// Everything that is genuinely per-document — the engines, the session
+/// history, the parser flags, the ready state — stays on [`FrameShared`].
+///
+/// Like [`FrameShared`], this **holds no `JsValue`**.
+pub struct PageGlobal {
+    /// Scripts run at the start of every new document, in insertion order.
+    ///
+    /// Deliberately **not** cleared by `reset_for_navigation`: the whole point
+    /// is that they survive navigation. That is what makes a driver's
+    /// `exposeFunction` and `evaluateOnNewDocument` still be there on the next
+    /// page (CDP `Page.addScriptToEvaluateOnNewDocument`).
+    pub init_scripts: RefCell<Vec<InitScript>>,
+    pub next_init_script: Cell<u64>,
+    /// Payloads delivered by `Runtime.addBinding` functions, drained by the
+    /// page into `Runtime.bindingCalled`.
+    pub binding_calls: RefCell<VecDeque<BindingCall>>,
+    /// Mints `Runtime.ExecutionContextId`s. Monotonic across documents, frames
+    /// *and* worlds, which is what `ISOLATED_WORLD_ID_OFFSET` was faking (D10).
+    pub(crate) next_context_id: Cell<u64>,
+    /// `Runtime.addBinding` registrations, `(name, world name)`. Re-applied to
+    /// every world at every commit, because a commit rebuilds the worlds.
+    pub(crate) bindings: RefCell<Vec<(String, Option<String>)>>,
+    /// Which world started each in-flight `fetch`/XHR, so a `NetEvent` is
+    /// delivered to the world whose promise is waiting on it.
+    pub(crate) net_world: RefCell<HashMap<RequestId, WorldId>>,
+    /// Append-only connectivity log behind ADR-0018's retention guarantee.
+    ///
+    /// `DomTree::take_pinned_connectivity` is destructive, so with N worlds the
+    /// first to drain would starve every other and the expando guarantee would
+    /// silently break for the rest (ADR-0033 D7). Each entry is
+    /// `(sequence, node, connected)`; a world consumes from its own cursor and
+    /// the log is trimmed below the minimum live cursor. Page-level rather than
+    /// per-frame because the arena it describes is one.
+    pub(crate) connectivity: RefCell<VecDeque<(u64, NodeId, bool)>>,
+    pub(crate) connectivity_seq: Cell<u64>,
+    /// How far each live world has consumed the log. Kept here rather than on
+    /// `WorldState` because trimming needs the *minimum* across worlds, and a
+    /// world cannot read another world's state. A torn-down world's entry is
+    /// removed, so it never holds the trim back.
+    pub(crate) conn_cursors: RefCell<HashMap<WorldId, u64>>,
+    /// Mints page-unique `objectId`s (see `next_object_id`).
+    pub(crate) next_object_id: Cell<u64>,
+    /// Which world's object store holds each live `objectId`, so a handle is
+    /// always called in the world that owns it (ADR-0033 D10).
+    pub(crate) object_worlds: RefCell<HashMap<u64, WorldId>>,
+    /// Reaches another world's realm from a host callback. **Weak**: a strong
+    /// edge would close the `Page -> WorldTable -> realm -> WorldState ->
+    /// FrameShared -> PageGlobal` cycle and leak every runtime (D4).
+    pub(crate) enter: RefCell<Weak<dyn WorldEnter>>,
+}
+
+impl PageGlobal {
+    #[must_use]
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self {
+            init_scripts: RefCell::new(Vec::new()),
+            next_init_script: Cell::new(0),
+            binding_calls: RefCell::new(VecDeque::new()),
+            // 0 is never handed out: the first world takes 1, matching the id
+            // the protocol has always reported for the main context.
+            next_context_id: Cell::new(0),
+            bindings: RefCell::new(Vec::new()),
+            net_world: RefCell::new(HashMap::new()),
+            connectivity: RefCell::new(VecDeque::new()),
+            connectivity_seq: Cell::new(0),
+            conn_cursors: RefCell::new(HashMap::new()),
+            next_object_id: Cell::new(0),
+            object_worlds: RefCell::new(HashMap::new()),
+            enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
+        })
+    }
+
+    /// Mints the next `Runtime.ExecutionContextId`.
+    pub(crate) fn next_context_id(&self) -> u64 {
+        let id = self.next_context_id.get() + 1;
+        self.next_context_id.set(id);
+        id
+    }
+
+    /// Installs the hop into other worlds. Called once, by the page, after the
+    /// main world exists — the table cannot exist before its first world does.
+    pub fn set_world_enter(&self, enter: Weak<dyn WorldEnter>) {
+        *self.enter.borrow_mut() = enter;
+    }
+
+    /// Runs `f` in `world`. See [`WorldEnter::enter`] for when this is skipped.
+    pub(crate) fn in_world(
+        &self,
+        world: WorldId,
+        mut f: impl FnMut(&crate::cx::BindCx<'_>),
+    ) -> bool {
+        let Some(table) = self.enter.borrow().upgrade() else {
+            return false;
+        };
+        table.enter(world, &mut f)
+    }
+
+    /// Whether `world` has a listener for `event_type` on `target`.
+    #[must_use]
+    pub(crate) fn world_has_listener(
+        &self,
+        world: WorldId,
+        target: crate::events::EventTargetKey,
+        event_type: &str,
+    ) -> bool {
+        self.enter
+            .borrow()
+            .upgrade()
+            .is_some_and(|table| table.has_listener(world, target, event_type))
+    }
+
+    /// Mints `objectId`s for **every** world's object store.
+    ///
+    /// Page-unique rather than per-store: an id names one value, and two
+    /// worlds handing out `1` would let `Runtime.callFunctionOn` reach the
+    /// wrong world's object. Monotonic and never recycled, so a stale id names
+    /// nothing.
+    pub(crate) fn next_object_id(&self) -> u64 {
+        let id = self.next_object_id.get() + 1;
+        self.next_object_id.set(id);
+        id
+    }
+
+    /// The world whose store holds `object_id`.
+    #[must_use]
+    pub fn object_world(&self, object_id: u64) -> Option<WorldId> {
+        self.object_worlds.borrow().get(&object_id).copied()
+    }
+
+    pub(crate) fn note_object_world(&self, object_id: u64, world: WorldId) {
+        self.object_worlds.borrow_mut().insert(object_id, world);
+    }
+
+    pub fn forget_object(&self, object_id: u64) {
+        self.object_worlds.borrow_mut().remove(&object_id);
+    }
+
+    /// Forgets every handle of one world (a commit, or a world teardown).
+    pub fn forget_objects_of(&self, world: WorldId) {
+        self.object_worlds.borrow_mut().retain(|_, w| *w != world);
+    }
+
+    /// Records which world started a script-initiated request, so its
+    /// `NetEvent`s are delivered where the waiting promise lives.
+    pub(crate) fn note_net_world(&self, id: RequestId, world: WorldId) {
+        self.net_world.borrow_mut().insert(id, world);
+    }
+
+    /// The world that started `id`, if it is still tracked.
+    #[must_use]
+    pub fn net_world_of(&self, id: RequestId) -> Option<WorldId> {
+        self.net_world.borrow().get(&id).copied()
+    }
+
+    /// Drops every request-to-world mapping (a commit aborts them all).
+    pub fn clear_net_worlds(&self) {
+        self.net_world.borrow_mut().clear();
+    }
+
+    /// Forgets a request that has reached a terminal event.
+    pub fn forget_net_world(&self, id: RequestId) {
+        self.net_world.borrow_mut().remove(&id);
+    }
+
+    /// How far `world` has consumed the connectivity log.
+    #[must_use]
+    pub(crate) fn conn_cursor(&self, world: WorldId) -> u64 {
+        self.conn_cursors.borrow().get(&world).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn set_conn_cursor(&self, world: WorldId, seq: u64) {
+        self.conn_cursors.borrow_mut().insert(world, seq);
+    }
+
+    /// Empties the log and every cursor at a document commit.
+    ///
+    /// The log is trimmed below the *minimum* live cursor, so without this a
+    /// world that has not drained since the outgoing document keeps every entry
+    /// alive across navigations — and the ids in them name an arena that is
+    /// gone.
+    pub fn reset_connectivity(&self) {
+        self.connectivity.borrow_mut().clear();
+        self.conn_cursors.borrow_mut().clear();
+        self.connectivity_seq.set(0);
+    }
+
+    /// Forgets a torn-down world, so its stale cursor stops pinning the log.
+    pub fn forget_world_cursor(&self, world: WorldId) {
+        self.conn_cursors.borrow_mut().remove(&world);
+    }
+
+    /// `Runtime.addBinding` registrations, re-applied to every rebuilt world.
+    pub fn bindings(&self) -> std::cell::RefMut<'_, Vec<(String, Option<String>)>> {
+        self.bindings.borrow_mut()
+    }
+}
+
 /// One browsing context's bindings state: everything that is one-per-*document*
 /// rather than one-per-*world* (ADR-0033 D3).
 ///
@@ -947,6 +1153,8 @@ pub trait WorldEnter {
 /// of JS values left is `LoopHooks`, whose timer and rAF callbacks each carry
 /// the world that created them.
 pub struct FrameShared {
+    /// State shared by every browsing context of the page (ADR-0035 D2).
+    pub global: Rc<PageGlobal>,
     /// The document tree, shared with the parser during loads.
     ///
     /// The arena is shared by every browsing context of the page; **this**
@@ -1051,17 +1259,6 @@ pub struct FrameShared {
     /// simply missing from the capture — the same failure `lazy_images` +
     /// `Page::load_deferred_images` already solve for `<img>`.
     pub(crate) whole_document_visible: Cell<bool>,
-    /// Scripts run at the start of every new document, in insertion order.
-    ///
-    /// Deliberately **not** cleared by `reset_for_navigation`: the whole point
-    /// is that they survive navigation. That is what makes a driver's
-    /// `exposeFunction` and `evaluateOnNewDocument` still be there on the next
-    /// page (CDP `Page.addScriptToEvaluateOnNewDocument`).
-    pub init_scripts: RefCell<Vec<InitScript>>,
-    pub next_init_script: Cell<u64>,
-    /// Payloads delivered by `Runtime.addBinding` functions, drained by the
-    /// page into `Runtime.bindingCalled`.
-    pub binding_calls: RefCell<VecDeque<BindingCall>>,
     /// The page's world registry, main world first then creation order.
     ///
     /// Ids only, deliberately: a world's name and `context_id` live on the
@@ -1070,38 +1267,6 @@ pub struct FrameShared {
     /// context id on the `Cell` and a copy stored here would keep answering
     /// with the dead one.
     pub(crate) worlds: RefCell<Vec<WorldId>>,
-    /// Mints `Runtime.ExecutionContextId`s. Monotonic across documents *and*
-    /// worlds, which is what `ISOLATED_WORLD_ID_OFFSET` was faking (D10).
-    pub(crate) next_context_id: Cell<u64>,
-    /// `Runtime.addBinding` registrations, `(name, world name)`. Re-applied to
-    /// every world at every commit, because a commit rebuilds the worlds.
-    pub(crate) bindings: RefCell<Vec<(String, Option<String>)>>,
-    /// Which world started each in-flight `fetch`/XHR, so a `NetEvent` is
-    /// delivered to the world whose promise is waiting on it.
-    pub(crate) net_world: RefCell<HashMap<RequestId, WorldId>>,
-    /// Append-only connectivity log behind ADR-0018's retention guarantee.
-    ///
-    /// `DomTree::take_pinned_connectivity` is destructive, so with N worlds the
-    /// first to drain would starve every other and the expando guarantee would
-    /// silently break for the rest (ADR-0033 D7). Each entry is
-    /// `(sequence, node, connected)`; a world consumes from its own cursor and
-    /// the log is trimmed below the minimum live cursor.
-    pub(crate) connectivity: RefCell<VecDeque<(u64, NodeId, bool)>>,
-    pub(crate) connectivity_seq: Cell<u64>,
-    /// How far each live world has consumed the log. Kept here rather than on
-    /// `WorldState` because trimming needs the *minimum* across worlds, and a
-    /// world cannot read another world's state. A torn-down world's entry is
-    /// removed, so it never holds the trim back.
-    pub(crate) conn_cursors: RefCell<HashMap<WorldId, u64>>,
-    /// Mints page-unique `objectId`s (see `next_object_id`).
-    pub(crate) next_object_id: Cell<u64>,
-    /// Which world's object store holds each live `objectId`, so a handle is
-    /// always called in the world that owns it (ADR-0033 D10).
-    pub(crate) object_worlds: RefCell<HashMap<u64, WorldId>>,
-    /// Reaches another world's realm from a host callback. **Weak**: a strong
-    /// edge would close the `Page -> WorldTable -> realm -> WorldState ->
-    /// FrameShared` cycle and leak every runtime (D4).
-    pub(crate) enter: RefCell<Weak<dyn WorldEnter>>,
 }
 
 /// All bindings state for one *world* — one `Runtime`, one `Context`, one
@@ -1294,6 +1459,7 @@ impl FrameShared {
     /// Builds the page-level half, including the engines every world shares.
     #[must_use]
     pub fn new(
+        global: Rc<PageGlobal>,
         dom: Rc<RefCell<DomTree>>,
         hooks: Rc<dyn HostHooks>,
         viewport: Viewport,
@@ -1315,6 +1481,7 @@ impl FrameShared {
             .as_secs_f64()
             * 1000.0;
         Rc::new(Self {
+            global,
             dom,
             document: Cell::new(document),
             style,
@@ -1343,21 +1510,7 @@ impl FrameShared {
             start,
             time_origin_epoch_ms,
             whole_document_visible: Cell::new(false),
-            init_scripts: RefCell::new(Vec::new()),
-            next_init_script: Cell::new(0),
-            binding_calls: RefCell::new(VecDeque::new()),
             worlds: RefCell::new(Vec::new()),
-            // 0 is never handed out: the first world takes 1, matching the id
-            // the protocol has always reported for the main context.
-            next_context_id: Cell::new(0),
-            bindings: RefCell::new(Vec::new()),
-            net_world: RefCell::new(HashMap::new()),
-            connectivity: RefCell::new(VecDeque::new()),
-            connectivity_seq: Cell::new(0),
-            conn_cursors: RefCell::new(HashMap::new()),
-            next_object_id: Cell::new(0),
-            object_worlds: RefCell::new(HashMap::new()),
-            enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
         })
     }
 
@@ -1376,19 +1529,6 @@ impl FrameShared {
         self.document.set(document);
     }
 
-    /// Mints the next `Runtime.ExecutionContextId`.
-    pub(crate) fn next_context_id(&self) -> u64 {
-        let id = self.next_context_id.get() + 1;
-        self.next_context_id.set(id);
-        id
-    }
-
-    /// Installs the hop into other worlds. Called once, by the page, after the
-    /// main world exists — the table cannot exist before its first world does.
-    pub fn set_world_enter(&self, enter: Weak<dyn WorldEnter>) {
-        *self.enter.borrow_mut() = enter;
-    }
-
     /// Live world ids, main first.
     ///
     /// The world table is authoritative when one is installed, because only it
@@ -1399,116 +1539,10 @@ impl FrameShared {
     /// world ever matched, and event dispatch would silently deliver nothing.
     #[must_use]
     pub fn world_ids(&self) -> Vec<WorldId> {
-        if let Some(table) = self.enter.borrow().upgrade() {
+        if let Some(table) = self.global.enter.borrow().upgrade() {
             return table.world_ids();
         }
         self.worlds.borrow().clone()
-    }
-
-    /// Runs `f` in `world`. See [`WorldEnter::enter`] for when this is skipped.
-    pub(crate) fn in_world(
-        &self,
-        world: WorldId,
-        mut f: impl FnMut(&crate::cx::BindCx<'_>),
-    ) -> bool {
-        let Some(table) = self.enter.borrow().upgrade() else {
-            return false;
-        };
-        table.enter(world, &mut f)
-    }
-
-    /// Whether `world` has a listener for `event_type` on `target`.
-    #[must_use]
-    pub(crate) fn world_has_listener(
-        &self,
-        world: WorldId,
-        target: crate::events::EventTargetKey,
-        event_type: &str,
-    ) -> bool {
-        self.enter
-            .borrow()
-            .upgrade()
-            .is_some_and(|table| table.has_listener(world, target, event_type))
-    }
-
-    /// Mints `objectId`s for **every** world's object store.
-    ///
-    /// Page-unique rather than per-store: an id names one value, and two
-    /// worlds handing out `1` would let `Runtime.callFunctionOn` reach the
-    /// wrong world's object. Monotonic and never recycled, so a stale id names
-    /// nothing.
-    pub(crate) fn next_object_id(&self) -> u64 {
-        let id = self.next_object_id.get() + 1;
-        self.next_object_id.set(id);
-        id
-    }
-
-    /// The world whose store holds `object_id`.
-    #[must_use]
-    pub fn object_world(&self, object_id: u64) -> Option<WorldId> {
-        self.object_worlds.borrow().get(&object_id).copied()
-    }
-
-    pub(crate) fn note_object_world(&self, object_id: u64, world: WorldId) {
-        self.object_worlds.borrow_mut().insert(object_id, world);
-    }
-
-    pub fn forget_object(&self, object_id: u64) {
-        self.object_worlds.borrow_mut().remove(&object_id);
-    }
-
-    /// Forgets every handle of one world (a commit, or a world teardown).
-    pub fn forget_objects_of(&self, world: WorldId) {
-        self.object_worlds.borrow_mut().retain(|_, w| *w != world);
-    }
-
-    /// Records which world started a script-initiated request, so its
-    /// `NetEvent`s are delivered where the waiting promise lives.
-    pub(crate) fn note_net_world(&self, id: RequestId, world: WorldId) {
-        self.net_world.borrow_mut().insert(id, world);
-    }
-
-    /// The world that started `id`, if it is still tracked.
-    #[must_use]
-    pub fn net_world_of(&self, id: RequestId) -> Option<WorldId> {
-        self.net_world.borrow().get(&id).copied()
-    }
-
-    /// Drops every request-to-world mapping (a commit aborts them all).
-    pub fn clear_net_worlds(&self) {
-        self.net_world.borrow_mut().clear();
-    }
-
-    /// Forgets a request that has reached a terminal event.
-    pub fn forget_net_world(&self, id: RequestId) {
-        self.net_world.borrow_mut().remove(&id);
-    }
-
-    /// How far `world` has consumed the connectivity log.
-    #[must_use]
-    pub(crate) fn conn_cursor(&self, world: WorldId) -> u64 {
-        self.conn_cursors.borrow().get(&world).copied().unwrap_or(0)
-    }
-
-    pub(crate) fn set_conn_cursor(&self, world: WorldId, seq: u64) {
-        self.conn_cursors.borrow_mut().insert(world, seq);
-    }
-
-    /// Empties the log and every cursor at a document commit.
-    ///
-    /// The log is trimmed below the *minimum* live cursor, so without this a
-    /// world that has not drained since the outgoing document keeps every entry
-    /// alive across navigations — and the ids in them name an arena that is
-    /// gone.
-    pub fn reset_connectivity(&self) {
-        self.connectivity.borrow_mut().clear();
-        self.conn_cursors.borrow_mut().clear();
-        self.connectivity_seq.set(0);
-    }
-
-    /// Forgets a torn-down world, so its stale cursor stops pinning the log.
-    pub fn forget_world_cursor(&self, world: WorldId) {
-        self.conn_cursors.borrow_mut().remove(&world);
     }
 
     /// Drops every isolated world from the registry.
@@ -1519,14 +1553,9 @@ impl FrameShared {
     pub fn forget_isolated_worlds(&self) {
         self.worlds.borrow_mut().retain(|id| *id == MAIN_WORLD);
     }
-
-    /// `Runtime.addBinding` registrations, re-applied to every rebuilt world.
-    pub fn bindings(&self) -> std::cell::RefMut<'_, Vec<(String, Option<String>)>> {
-        self.bindings.borrow_mut()
-    }
 }
 
-/// Uninhabited stand-in so `FrameShared::enter` can start as a dangling `Weak`
+/// Uninhabited stand-in so `PageGlobal::enter` can start as a dangling `Weak`
 /// before the world table exists. `Weak::new` needs a sized type; this is never
 /// constructed.
 pub(crate) enum NoWorlds {}
@@ -1552,7 +1581,7 @@ impl WorldState {
     /// Builds one world over the shared state of a browsing context.
     #[must_use]
     pub fn new(frame: Rc<FrameShared>, id: WorldId, name: String) -> Self {
-        let context_id = frame.next_context_id();
+        let context_id = frame.global.next_context_id();
         Self {
             dom: Rc::clone(&frame.dom),
             style: Rc::clone(&frame.style),
@@ -1699,7 +1728,7 @@ impl WorldState {
         // life of the page. Isolated worlds are pruned at teardown; this is the
         // main world's equivalent.
         for id in self.remote_objects.borrow().ids() {
-            self.frame.forget_object(id);
+            self.frame.global.forget_object(id);
         }
         self.remote_objects.borrow_mut().clear();
         self.pending_consts.borrow_mut().clear();
@@ -2006,7 +2035,7 @@ impl WorldState {
         // Page-level, and only the main world's reset runs at a commit: the log
         // and every cursor name nodes of the document being replaced.
         if self.is_main() {
-            self.frame.reset_connectivity();
+            self.frame.global.reset_connectivity();
         }
         // Every `objectId` named a value of the outgoing document. Keeping them
         // would pin that document's whole object graph for the life of the
@@ -2033,13 +2062,13 @@ impl WorldState {
         // `document.close()` lands before the loop reaches
         // `drain_binding_events`.
         if new_context {
-            self.frame.binding_calls.borrow_mut().clear();
+            self.frame.global.binding_calls.borrow_mut().clear();
         }
         // Minted from the page's counter rather than bumped locally: ids must
         // be unique across documents *and* worlds, so a driver holding one from
         // the outgoing document gets a clean "no such context" (ADR-0033 D10).
         if new_context {
-            self.context_id.set(self.frame.next_context_id());
+            self.context_id.set(self.frame.global.next_context_id());
         }
         self.dom.borrow_mut().clear_custom_elements();
         self.frame.current_script.set(None);

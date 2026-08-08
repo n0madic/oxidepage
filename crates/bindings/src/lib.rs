@@ -57,8 +57,8 @@ pub use preview::{
 pub use script::is_classic_script_type;
 pub use state::{
     BindingCall, FrameShared, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES,
-    NavigationBody, NavigatorData, PendingNavigation, ReadyState, ScreenData, SessionHistory,
-    TimingMilestone, WorldEnter, WorldId, WorldState,
+    NavigationBody, NavigatorData, PageGlobal, PendingNavigation, ReadyState, ScreenData,
+    SessionHistory, TimingMilestone, WorldEnter, WorldId, WorldState,
 };
 pub use storage::{
     MAX_STORAGE_ORIGINS, PrivateStorageAreas, QuotaExceeded, STORAGE_QUOTA_BYTES, SharedStorage,
@@ -129,7 +129,14 @@ pub fn install_with_profiles<R: JsRealm>(
     navigator: NavigatorData,
     screen: ScreenData,
 ) -> Result<Rc<WorldState>, JsError> {
-    let page = install_frame(dom, hooks, viewport, navigator, screen);
+    let page = install_frame(
+        crate::state::PageGlobal::new(),
+        dom,
+        hooks,
+        viewport,
+        navigator,
+        screen,
+    );
     install_world(realm, &page, crate::state::MAIN_WORLD, "")
 }
 
@@ -140,13 +147,14 @@ pub fn install_with_profiles<R: JsRealm>(
 /// engine and layout tree.
 #[must_use]
 pub fn install_frame(
+    global: Rc<crate::state::PageGlobal>,
     dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
     hooks: Rc<dyn HostHooks>,
     viewport: Viewport,
     navigator: NavigatorData,
     screen: ScreenData,
 ) -> Rc<crate::state::FrameShared> {
-    crate::state::FrameShared::new(dom, hooks, viewport, navigator, screen)
+    crate::state::FrameShared::new(global, dom, hooks, viewport, navigator, screen)
 }
 
 /// Installs one world's globals into `realm` over shared page state.
@@ -190,7 +198,8 @@ pub fn install_world<R: JsRealm>(
     // A fresh world holds no wrapper, so it needs none of the log's history —
     // and starting it at 0 would pin every entry until its first drain, since
     // the log is trimmed below the *minimum* live cursor.
-    page.set_conn_cursor(id, page.connectivity_seq.get());
+    page.global
+        .set_conn_cursor(id, page.global.connectivity_seq.get());
     Ok(state)
 }
 
@@ -1218,7 +1227,7 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let id = cx.state.hooks.start_fetch(request);
     // Tag the request with this world, so its completion is delivered here
     // and not to whichever world happens to be current (ADR-0033 D10).
-    cx.state.frame.note_net_world(id, cx.state.id);
+    cx.state.frame.global.note_net_world(id, cx.state.id);
     cx.state.pending_net.borrow_mut().insert(
         id,
         PendingNet::Fetch {
@@ -1750,18 +1759,19 @@ pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
     {
         let fresh = cx.state.dom.borrow_mut().take_pinned_connectivity();
         if !fresh.is_empty() {
-            let mut log = frame.connectivity.borrow_mut();
-            let mut seq = frame.connectivity_seq.get();
+            let mut log = frame.global.connectivity.borrow_mut();
+            let mut seq = frame.global.connectivity_seq.get();
             for (id, connected) in fresh {
                 seq += 1;
                 log.push_back((seq, id, connected));
             }
-            frame.connectivity_seq.set(seq);
+            frame.global.connectivity_seq.set(seq);
         }
     }
 
-    let cursor = frame.conn_cursor(cx.state.id);
+    let cursor = frame.global.conn_cursor(cx.state.id);
     let changes: Vec<(u64, oxidepage_base::NodeId, bool)> = frame
+        .global
         .connectivity
         .borrow()
         .iter()
@@ -1817,7 +1827,7 @@ pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
     }
 
     if let Some((last, _, _)) = changes.last() {
-        frame.set_conn_cursor(cx.state.id, *last);
+        frame.global.set_conn_cursor(cx.state.id, *last);
     }
     // Trim below the slowest world's cursor. A world that has been torn down
     // reports no cursor, so a rebuilt world starting at 0 cannot resurrect
@@ -1826,10 +1836,11 @@ pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
     let low = frame
         .world_ids()
         .into_iter()
-        .map(|w| frame.conn_cursor(w))
+        .map(|w| frame.global.conn_cursor(w))
         .min()
-        .unwrap_or_else(|| frame.conn_cursor(cx.state.id));
+        .unwrap_or_else(|| frame.global.conn_cursor(cx.state.id));
     frame
+        .global
         .connectivity
         .borrow_mut()
         .retain(|(seq, _, _)| *seq > low);

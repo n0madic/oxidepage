@@ -399,10 +399,10 @@ impl Page {
 
     /// Releases one handle.
     pub fn release_object(&self, object_id: u64) -> bool {
-        let Some(world) = self.shared.object_world(object_id) else {
+        let Some(world) = self.shared.global.object_world(object_id) else {
             return false;
         };
-        self.shared.forget_object(object_id);
+        self.shared.global.forget_object(object_id);
         self.worlds
             .get(world)
             .and_then(|w| w.state())
@@ -423,7 +423,7 @@ impl Page {
             let after: std::collections::HashSet<u64> = store.ids().into_iter().collect();
             drop(store);
             for id in before.into_iter().filter(|id| !after.contains(id)) {
-                self.shared.forget_object(id);
+                self.shared.global.forget_object(id);
             }
         }
         released
@@ -456,6 +456,7 @@ impl Page {
             self.create_isolated_world(world)?;
         }
         self.shared
+            .global
             .bindings()
             .push((name.to_owned(), world.map(str::to_owned)));
         self.install_binding(name, world)
@@ -463,7 +464,7 @@ impl Page {
 
     /// Installs every remembered binding that applies to `world`.
     pub(crate) fn apply_bindings_to(&self, world: &str) {
-        let registrations: Vec<(String, Option<String>)> = self.shared.bindings().clone();
+        let registrations: Vec<(String, Option<String>)> = self.shared.global.bindings().clone();
         for (name, target) in registrations {
             let applies = match target.as_deref() {
                 None => true,
@@ -524,7 +525,7 @@ impl Page {
                             scope.coerce_string(value).unwrap_or_default()
                         });
                         let state = oxidepage_bindings::cx::world_state(scope)?;
-                        let mut queue = state.frame.binding_calls.borrow_mut();
+                        let mut queue = state.frame.global.binding_calls.borrow_mut();
                         // Bounded: a page that calls its binding in a loop must
                         // not grow this without limit while the driver is busy.
                         if queue.len() >= MAX_BINDING_CALLS {
@@ -554,6 +555,7 @@ impl Page {
     pub fn drain_binding_calls(&self) -> Vec<oxidepage_bindings::BindingCall> {
         self.state
             .frame
+            .global
             .binding_calls
             .borrow_mut()
             .drain(..)
@@ -565,6 +567,7 @@ impl Page {
     /// The world whose store holds `object_id`.
     fn object_world(&self, object_id: u64) -> Result<oxidepage_bindings::WorldId, RemoteError> {
         self.shared
+            .global
             .object_world(object_id)
             .ok_or(RemoteError::NoSuchObject(object_id))
     }
@@ -606,6 +609,7 @@ impl Page {
             // halfway through the call.
             let world = self
                 .shared
+                .global
                 .object_world(id)
                 .ok_or(RemoteError::NoSuchObject(id))?;
             if world != cx.state.id {
