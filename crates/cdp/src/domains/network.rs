@@ -328,17 +328,14 @@ fn set_cache_disabled(connection: &Arc<Connection>, request: &Request) -> Comman
     struct Params {
         cache_disabled: bool,
     }
-    connection.require_session(request)?;
+    let session = connection.require_session(request)?;
     let params: Params = request.parse()?;
-    // Accepting `false` is honest — that is the state anyway. Accepting `true`
-    // would not be: the HTTP cache is shared browser-wide and has no per-page
-    // bypass short of `Page.reload`, which already bypasses it.
-    if params.cache_disabled {
-        return Err(ProtocolError::server(
-            "Network.setCacheDisabled(true) is not implemented: the HTTP cache is browser-wide; \
-             use Page.reload, which always bypasses it",
-        ));
-    }
+    // A real switch, not an accepted no-op. The cache stays shared browser-wide
+    // and is not cleared; what changes is that this page stops reading from and
+    // writing to it. That distinction matters most to the caller that sends
+    // this: every driver turns the cache off while intercepting, and a request
+    // served from cache never reaches the interceptor at all.
+    session.page.set_cache_disabled(params.cache_disabled)?;
     Ok(json!({}))
 }
 

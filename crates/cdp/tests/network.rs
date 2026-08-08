@@ -297,7 +297,6 @@ fn overrides_the_engine_cannot_perform_are_refused() {
             "Security.setIgnoreCertificateErrors",
             json!({ "ignore": true }),
         ),
-        ("Network.setCacheDisabled", json!({ "cacheDisabled": true })),
     ] {
         let error = match client.try_call_on(&session, method, params) {
             Err(error) => error,

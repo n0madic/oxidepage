@@ -149,18 +149,18 @@ fn stop_loading(connection: &Arc<Connection>, request: &Request) -> CommandResul
 
 fn get_frame_tree(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let session = connection.require_session(request)?;
-    let url = connection
+    // One snapshot, so the URL and the loader describing it are the same
+    // instant's. The **committed** loader and the frame's current URL:
+    // `getFrameTree` describes the document the frame has right now, where
+    // `frameNavigated` describes the one its own event is about — which is why
+    // `Frame::json` takes both rather than reading them off the frame.
+    let frame = connection
         .registry
-        .info(&session.target_id)
-        .map(|info| info.url)
-        .unwrap_or_default();
-    let loader_id = connection
-        .registry
-        .loader_id(&session.target_id)
-        .unwrap_or_default();
+        .frame(&session.target_id)
+        .ok_or_else(|| ProtocolError::no_target(&session.target_id))?;
     Ok(serde_json::json!({
         "frameTree": {
-            "frame": crate::pump::frame_json(&session.target_id, &loader_id, &url),
+            "frame": frame.json(frame.loader_id(), frame.url()),
             // No child frames until stage 11. The member is present and empty
             // rather than absent, because a driver iterates it unconditionally.
             "childFrames": [],

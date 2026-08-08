@@ -21,6 +21,7 @@ use oxidepage_engine::page_api::{
 };
 use serde_json::json;
 
+use crate::frame::Frame;
 use crate::message::Event;
 use crate::session::{Connection, SessionState};
 
@@ -44,9 +45,8 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
     if sessions.is_empty() {
         return;
     }
-    // The frame id is the target id. There is one frame per page until stage 11
-    // (real iframes), and minting a second opaque id for a one-to-one mapping
-    // would be two things to keep in sync for no gain.
+    // The frame id is the target id — see [`crate::frame`] for why there is no
+    // second opaque id until stage 11.
     let frame_id = target_id;
     // The loader of the load *in flight*, not of the committed document: every
     // event of a navigation belongs to the document it is producing, and
@@ -62,11 +62,24 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
         .info(target_id)
         .map(|info| info.url)
         .unwrap_or_default();
+    // Snapshotted once per event rather than once per session: only the
+    // navigation events read the frame, and every session would otherwise take
+    // the registry lock for its own identical copy.
+    let frame = matches!(event, PageEvent::Navigation(_)).then(|| {
+        connection.registry.frame(target_id).unwrap_or_else(|| {
+            // A target can be destroyed while its last events are still in the
+            // fan-out queue. The frame id is the target id, so a stand-in still
+            // names the frame the driver is keying on.
+            Frame::new(target_id.to_owned(), url.clone())
+        })
+    });
 
     for session in &sessions {
         match event {
             PageEvent::Navigation(navigation) => {
-                navigation_events(connection, session, frame_id, &loader_id, &url, navigation);
+                if let Some(frame) = &frame {
+                    navigation_events(connection, session, frame, &loader_id, &url, navigation);
+                }
             }
             PageEvent::DialogOpening(request) if session.flags.page.load(Ordering::Relaxed) => {
                 {
@@ -408,11 +421,12 @@ fn dialog_input(response: &oxidepage_engine::page_api::DialogResponse) -> String
 fn navigation_events(
     connection: &Arc<Connection>,
     session: &Arc<SessionState>,
-    frame_id: &str,
+    frame: &Frame,
     loader_id: &str,
     url: &str,
     navigation: &NavigationEvent,
 ) {
+    let frame_id = frame.id();
     let page_on = session.flags.page.load(Ordering::Relaxed);
     // `Page.setLifecycleEventsEnabled` is a separate switch from `Page.enable`:
     // Puppeteer turns it on by itself for `waitUntil: 'networkidle0'`.
@@ -454,7 +468,7 @@ fn navigation_events(
                     &session.id,
                     "Page.frameNavigated",
                     json!({
-                        "frame": frame_json(frame_id, loader_id, &navigation.url),
+                        "frame": frame.json(loader_id, &navigation.url),
                         "type": "Navigation",
                     }),
                 ));
@@ -517,7 +531,20 @@ fn navigation_events(
                 connection.emit(Event::session(
                     &session.id,
                     "Page.navigatedWithinDocument",
-                    json!({ "frameId": frame_id, "url": navigation.url }),
+                    json!({
+                        "frameId": frame_id,
+                        "url": navigation.url,
+                        // Which of the two kinds this was. Classified by the
+                        // registry as the URL moved — the last moment the
+                        // outgoing URL is still known — and read back off the
+                        // snapshot here, so a second same-document navigation
+                        // arriving before this connection drains would report
+                        // the newer one's type. That is the staleness
+                        // `loaderId` above already has, for the same reason.
+                        // See `SameDocumentType` for what the two-URL test
+                        // cannot tell apart.
+                        "navigationType": frame.same_document_type().as_str(),
+                    }),
                 ));
             }
         }
@@ -570,35 +597,6 @@ fn navigation_events(
     let _ = url;
 }
 
-/// CDP's `Page.Frame`.
-pub fn frame_json(frame_id: &str, loader_id: &str, url: &str) -> serde_json::Value {
-    json!({
-        "id": frame_id,
-        "loaderId": loader_id,
-        "url": url,
-        // There is one browsing context per page until stage 11, so a frame
-        // never has a parent and the origin is always the document's own.
-        "securityOrigin": security_origin(url),
-        "mimeType": "text/html",
-    })
-}
-
-/// The serialized origin of `url`, or `"://"` for one that has none — which is
-/// what Chrome reports for `about:blank`.
-pub fn security_origin(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(parsed) if parsed.host_str().is_some() => {
-            let scheme = parsed.scheme();
-            let host = parsed.host_str().unwrap_or_default();
-            match parsed.port() {
-                Some(port) => format!("{scheme}://{host}:{port}"),
-                None => format!("{scheme}://{host}"),
-            }
-        }
-        _ => String::from("://"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,40 +604,5 @@ mod tests {
     #[test]
     fn timestamps_are_seconds() {
         assert!((seconds(1_500.0) - 1.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn security_origin_drops_the_path_and_keeps_a_nondefault_port() {
-        assert_eq!(
-            security_origin("http://example.com/a/b?c"),
-            "http://example.com"
-        );
-        assert_eq!(
-            security_origin("http://127.0.0.1:8080/x"),
-            "http://127.0.0.1:8080"
-        );
-        assert_eq!(
-            security_origin("https://example.com/"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    fn an_opaque_origin_is_reported_as_such() {
-        // Chrome reports `://` for a document with no tuple origin. Reporting
-        // the URL instead would let a driver believe `about:blank` is
-        // same-origin with something.
-        assert_eq!(security_origin("about:blank"), "://");
-        assert_eq!(security_origin("data:text/html,hi"), "://");
-        assert_eq!(security_origin("not a url"), "://");
-    }
-
-    #[test]
-    fn a_frame_carries_the_ids_a_driver_matches_on() {
-        let frame = frame_json("t1", "l1", "http://example.com/");
-        assert_eq!(frame["id"], "t1");
-        assert_eq!(frame["loaderId"], "l1");
-        assert_eq!(frame["url"], "http://example.com/");
-        assert_eq!(frame["securityOrigin"], "http://example.com");
     }
 }

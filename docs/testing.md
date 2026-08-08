@@ -12,11 +12,25 @@ cargo xtask wpt --update             # rebaseline expectations.tsv
 cargo xtask golden [--update] [--filter <stem>]   # display-list JSON goldens
 cargo xtask reftest [--filter <stem>]             # Ahem pixel reftests
 cargo xtask puppeteer [--update] [--filter <substr>]  # real Puppeteer over the CDP endpoint
+cargo xtask playwright [--update] [--filter <substr>] # real Playwright over the CDP endpoint
 ```
 
-`puppeteer` needs a Node toolchain and installs `tests/automation`'s pinned
-`puppeteer-core` on first run. It starts the CDP endpoint **in process** and
-serves its fixtures from loopback, so CI still touches no network.
+`puppeteer` and `playwright` both need a Node toolchain and install their own
+directory's pinned driver (`tests/automation`'s `puppeteer-core`,
+`tests/playwright`'s `playwright-core`) on first run. Each starts the CDP
+endpoint **in process** and serves its fixtures from loopback, so CI still
+touches no network. Everything not driver-specific is shared in
+`xtask/src/nodeharness.rs`, so a fix to the harness contract cannot apply to
+one runner and not the other.
+
+`--filter` narrows the *comparison*, not the run: the whole suite executes and
+only the matching checks are held against expectations. That is why a filtered
+run still reports the full pass count, and why `--update` refuses `--filter`.
+
+**Run the two driver suites apart from the WPT sweep.** Both drive one endpoint
+with generous connect/`newPage` budgets, and WPT's 10-way-parallel sweep on the
+same machine is enough load to miss them. In CI they are separate jobs for
+exactly this reason.
 
 `tests/wpt/vendor/` and `tests/html5lib-tests/` are committed, so a fresh
 clone needs no fetch. `fetch-wpt` / `fetch-html5lib` exist only to bump the
@@ -29,7 +43,7 @@ cargo xtask fetch-html5lib     # re-vendor the html5lib-tests tree-construction 
 
 ## The expectation files are a two-sided contract, not a suppression list
 
-All three fail CI on regressions **and on unexpected passes and stale
+All four fail CI on regressions **and on unexpected passes and stale
 entries**:
 
 - `tests/wpt/expectations.tsv` — only non-PASS outcomes are listed; absent
@@ -43,6 +57,10 @@ entries**:
   check expected to fail. Regenerate with `cargo xtask puppeteer --update`,
   which refuses `--filter` for the same reason `wpt` does: an update rewrites
   the whole file, so a filtered run would delete every entry it did not see.
+- `tests/playwright/expectations.tsv` — the same, for
+  `cargo xtask playwright --update`. **Currently empty**: every check passes
+  (ADR-0034), so any line appearing here is a regression that was written down
+  rather than fixed.
 
 So **fixing a bug breaks CI until you update the expectation**. The
 expectation edit lands in the same commit as the behavior change; diff the

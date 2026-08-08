@@ -27,6 +27,7 @@ use oxidepage_engine::{
 };
 use serde::Serialize;
 
+use crate::frame::Frame;
 use crate::token::random_hex;
 
 /// What a driver sees when it enumerates targets.
@@ -66,43 +67,10 @@ struct TargetEntry {
     info: TargetInfo,
     page: PageHandle,
     context: BrowserContext,
-    /// CDP's `loaderId`: an opaque id for *this document load*, not for the
-    /// frame. Drivers use it to tell a fresh document from a same-document
-    /// change, so it must be re-minted on every commit and must not be reused.
-    loader_id: String,
-    /// The loader minted for the navigation now in flight (ADR-0032 D6a), and
-    /// whether a commit has adopted it yet.
-    pending_loader: Option<PendingLoad>,
-}
-
-/// The navigation in flight, and the loader id its document will have.
-///
-/// **Minted when the navigation *starts*, not when it commits**, because that
-/// is what Chrome does and what two separate Puppeteer mechanisms depend on:
-///
-/// * `Page.lifecycleEvent { name: "init" }` is the **only** event that sets
-///   `frame._loaderId`, and `LifecycleWatcher` resolves a navigation only once
-///   that value differs from the one it captured before the navigation. An
-///   `init` carrying the *outgoing* loader leaves `page.goto()` hanging until
-///   its own timeout — which is exactly what happened after a navigation that
-///   failed without committing, since the committed loader had not moved.
-/// * `isNavigationRequest` is `requestId === loaderId && type === 'Document'`,
-///   so the document request's protocol id is this same string.
-///
-/// The **committed** loader ([`TargetEntry::loader_id`]) only changes on a
-/// commit, so a navigation that fails does not retire the current document's
-/// id — a driver telling documents apart by loader must not see a phantom one.
-#[derive(Debug, Clone)]
-struct PendingLoad {
-    /// The engine's id for the document request, once it has gone out. `None`
-    /// between the navigation starting and its request being announced — and
-    /// for a commit with no request at all (`about:blank`). Kept so
-    /// `Network.getResponseBody` can map the substituted protocol id back.
-    request: Option<RequestId>,
-    loader: String,
-    /// Set once a commit has taken this loader. A later commit with no
-    /// navigation of its own must mint a fresh loader rather than re-use this.
-    adopted: bool,
+    /// The one frame this target is, until stage 11 gives it a tree of them —
+    /// the loader bookkeeping and the frame's URL live there (see
+    /// [`crate::frame`]).
+    frame: Frame,
 }
 
 struct Registry {
@@ -352,8 +320,7 @@ impl TargetRegistry {
                     info: info.clone(),
                     page: page.clone(),
                     context,
-                    loader_id: random_hex(),
-                    pending_loader: None,
+                    frame: Frame::new(target_id.clone(), info.url.clone()),
                 },
             );
             Self::publish(&mut inner, TargetSignal::Created(info));
@@ -412,7 +379,14 @@ impl TargetRegistry {
                             registry.update_info(&pumped, Some(&navigation.url), None);
                             registry.new_loader(&pumped);
                         }
+                        // Classified *before* the URL moves: the
+                        // `navigationType` a driver reads is a statement about
+                        // the difference between the outgoing URL and this one,
+                        // and `update_info` is about to overwrite the outgoing
+                        // one. Folded in here, once, for the same reason the
+                        // loader is — every session must see the same answer.
                         NavigationEventKind::SameDocument => {
+                            registry.note_same_document(&pumped, &navigation.url);
                             registry.update_info(&pumped, Some(&navigation.url), None);
                         }
                         // A navigation that never committed — it failed, or it
@@ -496,137 +470,106 @@ impl TargetRegistry {
         self.lock().targets.get(target_id).map(|t| t.info.clone())
     }
 
-    /// The id of the document currently **committed** in `target_id`.
+    /// A snapshot of a target's frame.
     ///
-    /// Unchanged by a navigation that fails, which is what keeps a driver from
-    /// seeing a phantom document. For the loader a *loading* document will have,
-    /// see [`TargetRegistry::loading_loader_id`].
+    /// A clone rather than a borrow, because the frame lives behind the
+    /// registry's mutex and every caller is on a connection thread. The rest of
+    /// the loader accessors below are thin delegates onto the same state — the
+    /// rules they enforce are documented on [`Frame`], where they now live.
+    #[must_use]
+    pub fn frame(&self, target_id: &str) -> Option<Frame> {
+        self.lock().targets.get(target_id).map(|t| t.frame.clone())
+    }
+
+    /// The id of the document currently **committed** in `target_id`
+    /// ([`Frame::loader_id`]).
     #[must_use]
     pub fn loader_id(&self, target_id: &str) -> Option<String> {
         self.lock()
             .targets
             .get(target_id)
-            .map(|t| t.loader_id.clone())
+            .map(|t| t.frame.loader_id().to_owned())
     }
 
-    /// The loader every event of the load in flight belongs to: the pending one
-    /// if a navigation has started and not yet committed, else the committed
-    /// one.
-    ///
-    /// This is what `Page.lifecycleEvent` must carry. `init` is the only event
-    /// that sets Puppeteer's `frame._loaderId`, and `LifecycleWatcher` resolves
-    /// a navigation only when that value has *changed* — so an `init` carrying
-    /// the outgoing loader hangs `page.goto()` outright.
+    /// The loader every event of the load in flight belongs to
+    /// ([`Frame::loading_loader_id`]) — what `Page.lifecycleEvent` must carry.
     #[must_use]
     pub fn loading_loader_id(&self, target_id: &str) -> Option<String> {
-        let inner = self.lock();
-        let entry = inner.targets.get(target_id)?;
-        Some(match &entry.pending_loader {
-            Some(pending) if !pending.adopted => pending.loader.clone(),
-            _ => entry.loader_id.clone(),
-        })
+        self.lock()
+            .targets
+            .get(target_id)
+            .map(|t| t.frame.loading_loader_id().to_owned())
     }
 
-    /// Mints the loader for a navigation that is *starting*, and returns it.
-    ///
-    /// Called on `NavigationEventKind::Started`, which is what makes the `init`
-    /// lifecycle event carry the new document's loader — see [`PendingLoad`].
+    /// Mints the loader for a navigation that is *starting*, and returns it
+    /// ([`Frame::begin_navigation`]).
     pub fn begin_navigation(&self, target_id: &str) -> Option<String> {
-        let loader = random_hex();
         let mut inner = self.lock();
-        let entry = inner.targets.get_mut(target_id)?;
-        entry.pending_loader = Some(PendingLoad {
-            request: None,
-            loader: loader.clone(),
-            adopted: false,
-        });
-        Some(loader)
+        Some(inner.targets.get_mut(target_id)?.frame.begin_navigation())
     }
 
     /// Commits the pending loader, or mints one for a commit that had no
-    /// navigation of its own.
-    ///
-    /// Called on a *cross-document* commit only. A same-document navigation
-    /// keeps its loader, which is exactly the distinction a driver reads it for.
+    /// navigation of its own ([`Frame::commit_loader`]).
     pub fn new_loader(&self, target_id: &str) -> Option<String> {
         let mut inner = self.lock();
-        let entry = inner.targets.get_mut(target_id)?;
-        let loader = match &mut entry.pending_loader {
-            Some(pending) if !pending.adopted => {
-                pending.adopted = true;
-                pending.loader.clone()
-            }
-            _ => random_hex(),
-        };
-        entry.loader_id = loader.clone();
-        Some(loader)
+        Some(inner.targets.get_mut(target_id)?.frame.commit_loader())
     }
 
-    /// Drops the pending loader of a navigation that never committed.
-    ///
-    /// Only if it is still unadopted: a `Failed` that follows a *committed*
-    /// navigation (a subresource giving up, a later same-document step) must
-    /// leave the current document's loader alone.
+    /// Drops the pending loader of a navigation that never committed
+    /// ([`Frame::abandon_navigation`]).
     pub fn abandon_navigation(&self, target_id: &str) {
         let mut inner = self.lock();
-        let Some(entry) = inner.targets.get_mut(target_id) else {
-            return;
-        };
-        if entry
-            .pending_loader
-            .as_ref()
-            .is_some_and(|pending| !pending.adopted)
-        {
-            entry.pending_loader = None;
+        if let Some(entry) = inner.targets.get_mut(target_id) {
+            entry.frame.abandon_navigation();
         }
     }
 
     /// Records which request is the document request of the load in flight, so
-    /// its protocol id can be the loader (ADR-0032 D6a).
-    ///
-    /// The loader is **not** minted here — `begin_navigation` already did, at
-    /// the `Started` that preceded this. A request arriving with no pending
-    /// navigation mints one anyway rather than losing the association.
+    /// its protocol id can be the loader ([`Frame::begin_document_load`]).
     pub fn begin_document_load(&self, target_id: &str, request: RequestId) -> Option<String> {
         let mut inner = self.lock();
-        let entry = inner.targets.get_mut(target_id)?;
-        match &mut entry.pending_loader {
-            Some(pending) if !pending.adopted => {
-                pending.request = Some(request);
-                Some(pending.loader.clone())
-            }
-            _ => {
-                let loader = random_hex();
-                entry.pending_loader = Some(PendingLoad {
-                    request: Some(request),
-                    loader: loader.clone(),
-                    adopted: false,
-                });
-                Some(loader)
-            }
-        }
+        Some(
+            inner
+                .targets
+                .get_mut(target_id)?
+                .frame
+                .begin_document_load(request),
+        )
     }
 
     /// The substituted protocol id for `request`, iff it is the document
-    /// request of the load now in flight (or the one that produced the current
-    /// document).
+    /// request of the load now in flight ([`Frame::document_loader`]).
     #[must_use]
     pub fn document_loader(&self, target_id: &str, request: RequestId) -> Option<String> {
-        let inner = self.lock();
-        let pending = inner.targets.get(target_id)?.pending_loader.as_ref()?;
-        (pending.request == Some(request)).then(|| pending.loader.clone())
+        self.lock()
+            .targets
+            .get(target_id)?
+            .frame
+            .document_loader(request)
     }
 
-    /// The inverse of [`TargetRegistry::document_loader`]: the engine request a
-    /// substituted protocol id names, so `Network.getResponseBody` can answer
-    /// for the document a driver just navigated to.
+    /// The inverse of [`TargetRegistry::document_loader`]
+    /// ([`Frame::request_for_loader`]).
     #[must_use]
     pub fn request_for_loader(&self, target_id: &str, loader: &str) -> Option<RequestId> {
-        let inner = self.lock();
-        let pending = inner.targets.get(target_id)?.pending_loader.as_ref()?;
-        (pending.loader == loader)
-            .then_some(pending.request)
-            .flatten()
+        self.lock()
+            .targets
+            .get(target_id)?
+            .frame
+            .request_for_loader(loader)
+    }
+
+    /// Classifies a same-document navigation to `url` against the URL the frame
+    /// still has, so `Page.navigatedWithinDocument` can carry a
+    /// `navigationType` ([`SameDocumentType`]).
+    ///
+    /// **Must run before [`TargetRegistry::update_info`] moves the URL** — the
+    /// frame's own URL is the only record of the outgoing one.
+    pub fn note_same_document(&self, target_id: &str, url: &str) {
+        let mut inner = self.lock();
+        if let Some(entry) = inner.targets.get_mut(target_id) {
+            entry.frame.note_same_document(url);
+        }
     }
 
     #[must_use]
@@ -666,8 +609,12 @@ impl TargetRegistry {
         };
         let mut changed = false;
         if let Some(url) = url
-            && entry.info.url != url
+            && entry.frame.url() != url
         {
+            // A URL belongs to a *frame*. `TargetInfo::url` mirrors the top
+            // frame's, which is the only frame there is until stage 11 — so the
+            // two move together, from here and nowhere else.
+            entry.frame.set_url(url);
             entry.info.url = url.to_owned();
             changed = true;
         }

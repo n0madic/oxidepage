@@ -721,17 +721,20 @@ from 45/45 to **48/48**, the three new checks being the isolation itself.
   `forced-colors` while creating **every** page. Accepting the value that already
   holds is ADR-0030 D9's own rule; any other value is still refused.
 
-**Known flake.** `context.newPage` occasionally times out when the runner is
-started immediately after WPT's 10-way-parallel sweep on a loaded machine, and
-because every other check needs a page, one timeout reports as sixteen. The
-connect/newPage/goto budgets are 60 s for that reason. It is a harness
-sensitivity, not an engine fault — the checks pass in isolation on every run.
+**Known flake — diagnosed and fixed in stage 10.** `context.newPage`
+occasionally timed out on a loaded machine, and because every other check needs
+a page, one timeout reported as sixteen. It was **not** a harness sensitivity:
+`Target.attachedToTarget` was emitted by the connection's event thread and
+raced the `Target.createTarget` reply, which Chrome guarantees it precedes.
+Playwright reads `_crPages.get(targetId)._page` the instant that reply lands,
+so losing the race is a `TypeError` on `undefined`. See ADR-0034 D7.
 
-**Still failing, and why** (`tests/playwright/expectations.tsv`): `page.fill`
-appends instead of replacing (the `Input` domain does not honour a selection),
-`page.setContent`, `page.waitForSelector` and `page.exposeBinding` need
-Playwright's injected-script plumbing that stage 10's frame work brings. Those
-four lines are the two-sided contract working as designed.
+**Still failing at the end of stage 9** (`tests/playwright/expectations.tsv`):
+`page.fill`, `page.setContent`, `page.waitForSelector` and
+`page.exposeBinding`. All four are fixed in stage 10, and the file is now
+empty — but the *explanation* recorded here for them ("injected-script plumbing
+that stage 10's frame work brings") was wrong about every one. See stage 10's
+"what the plan got wrong".
 
 The original scope follows, for the record.
 
@@ -771,10 +774,50 @@ protection.
 
 ---
 
-## Stage 10 — Frame plumbing and the Playwright compatibility surface
+## Stage 10 — Frame plumbing and the Playwright compatibility surface — **landed**
 
 **Milestone: `chromium.connectOverCDP()` and a Playwright test file that clicks,
-types, waits, routes and screenshots — green in CI.**
+types, waits, routes and screenshots — green in CI.** Reached:
+`cargo xtask playwright` is **17/17 with an empty `expectations.tsv`**, there is
+a CI job for it, and `cargo xtask puppeteer` stayed 48/48 throughout. Decisions
+and deliberate limits: **ADR-0034**.
+
+### What landed beyond the plan, and what the plan got wrong
+
+The four remaining failures were attributed above to one cause — "Playwright's
+injected-script plumbing that stage 10's frame work brings". **That was wrong
+about all four**, and reading `playwright-core@1.54.1`'s sources against the
+engine gave four independent causes, of which one was architectural:
+
+- **`page.fill`** was not the `Input` domain failing to honour a selection — it
+  does honour one, which is why Puppeteer's `page.type` works. Playwright's
+  `injectedScript.fill` runs `input.select(); input.focus();`, selection first,
+  and focus parked a collapsed caret at the end of the value, erasing it.
+- **`page.exposeBinding`** was the one architectural problem, and it had nothing
+  to do with injected scripts: `awaitPromise` blocked the session lane, and the
+  only command that could resolve the promise was a *later* one on that same
+  lane. A deadlock, answered after ten seconds with a pending promise
+  serialized as `{}`.
+- **`page.setContent`** failed at its first statement: `document.open` and
+  `document.close` were not installed, so the whole evaluate threw.
+- **`page.waitForSelector`** was a bug in *our own harness* — an empty unstyled
+  `<div>` never becomes visible, and `waitForSelector` defaults to
+  `state: 'visible'`. It would have failed against real Chrome too.
+
+Three further defects were latent rather than new and surfaced while fixing
+those: `callFunctionOn` held its `this` handle across the commit that freed the
+handle's runtime (a process **abort**, not a failure); `Target.attachedToTarget`
+raced the `Target.createTarget` reply it is supposed to precede — which is the
+`context.newPage` flake recorded below, never a harness sensitivity; and a
+console message was attributed to the main context whatever world made it, so a
+driver silently dropped it.
+
+**`Page.frameAttached`/`frameDetached` are deliberately not implemented**,
+against the scope below. Chrome sends neither for the main frame and Playwright
+takes the main frame from `Page.getFrameTree`, so with no nested contexts both
+would be dead code — the "fake" P6 forbids. They arrive with stage 11.
+
+The original scope follows, for the record.
 
 **Scope.**
 

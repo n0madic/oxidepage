@@ -201,6 +201,48 @@ try {
     assertEqual(await requirePage().textContent('#s'), 'content', 'setContent');
   });
 
+  // `page.route` is the milestone's "routes". Playwright routes through
+  // `Fetch.enable { handleAuthRequests: true, patterns: [{ urlPattern: "*",
+  // requestStage: "Request" }] }` and correlates `requestPaused.networkId`
+  // with `Network.requestWillBeSent.requestId` — which works here because the
+  // engine hands out the same id for both (ADR-0032).
+  await check('page.route fulfills', async () => {
+    const target = requirePage();
+    await target.route('**/-/hello', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/html', body: '<p id=r>fulfilled</p>' }));
+    await target.goto(`${base}/-/hello`);
+    assertEqual(await target.textContent('#r'), 'fulfilled', 'the fulfilled body');
+    await target.unroute('**/-/hello');
+  });
+
+  await check('page.route continues', async () => {
+    const target = requirePage();
+    let seen = 0;
+    await target.route('**/-/hello', (route) => {
+      seen += 1;
+      return route.continue();
+    });
+    await target.goto(`${base}/-/hello`);
+    assertEqual(seen, 1, 'the handler ran once');
+    // Continued unmodified, so the *server's* document is what loaded.
+    assertEqual(await target.textContent('#p'), 'from the server', 'the served body');
+    await target.unroute('**/-/hello');
+  });
+
+  await check('page.route aborts', async () => {
+    const target = requirePage();
+    await target.goto(`${base}/index.html`);
+    await target.route('**/-/hello', (route) => route.abort());
+    let failed = false;
+    try {
+      await target.goto(`${base}/-/hello`);
+    } catch {
+      failed = true;
+    }
+    assert(failed, 'an aborted navigation must fail rather than load');
+    await target.unroute('**/-/hello');
+  });
+
   await check('page.screenshot', async () => {
     const shot = await requirePage().screenshot();
     assert(shot.length > 0, 'screenshot produced no bytes');

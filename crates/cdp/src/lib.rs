@@ -50,6 +50,7 @@
 pub mod base64;
 pub mod domains;
 pub mod error;
+pub mod frame;
 pub mod http;
 pub mod message;
 pub mod pump;

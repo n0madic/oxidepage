@@ -717,4 +717,17 @@ directory is refused and recorded rather than parsed as HTML.
 touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing
 domain (`Debugger`, `Profiler`, `HeapProfiler`, `CSS`, `Overlay`,
 `Accessibility`). There are no nested browsing contexts, so every frame API
-answers for the one frame a page has.
+answers for the one frame a page has — and `Page.frameAttached`/`frameDetached`
+are therefore **not** implemented at all: Chrome sends neither for the main
+frame and Playwright takes it from `Page.getFrameTree`, so both would be dead
+code (ADR-0034 D5). `Emulation.setTimezoneOverride` and
+`setGeolocationOverride` are refused because there is no `Intl` and no
+Geolocation API to override; `setLocaleOverride` **is** implemented, and moves
+`navigator.languages` and `Accept-Language` together or not at all.
+
+**`document.open()`.** The replacement is buffered, not parsed incrementally:
+markup written between `open()` and `close()` becomes visible at `close()` (or
+at the task boundary, for the legacy no-`close()` idiom), and scripts in it do
+not run before then. `document.write` **without** `open()` is still a
+warn-and-noop outside an active parser — the spec's implicit open is not
+implemented (ADR-0034 D2).

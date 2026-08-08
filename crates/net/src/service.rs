@@ -369,6 +369,15 @@ struct OpenRequest {
 }
 
 impl NetService {
+    /// Turns the HTTP cache off (or back on) for this page's requests.
+    ///
+    /// A real switch rather than an accepted no-op: a cache *hit* never reaches
+    /// a driver's interceptor, so a driver that asked for no cache and got one
+    /// silently loses requests it was told it would see.
+    pub fn set_cache_disabled(&self, disabled: bool) {
+        self.engine.set_cache_disabled(disabled);
+    }
+
     /// Replaces the `Accept-Language` every later request carries.
     ///
     /// The header half of `Page::set_languages` (ADR-0034 D6). Deliberately

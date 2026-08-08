@@ -9,7 +9,7 @@
 //! CORS (non-simple cross-origin requests) is deferred to Phase 10 and
 //! rejected here.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -459,6 +459,11 @@ pub struct FetchEngine {
     /// Cumulative response bytes (against [`ResourcePolicy::max_total_bytes`]).
     total_bytes: Arc<AtomicU64>,
     request_defaults: RequestDefaults,
+    /// `Network.setCacheDisabled`. Shared with every clone of this engine, and
+    /// consulted for both halves of the cache: a disabled cache neither reads
+    /// nor writes, which is what "disabled" has to mean for a driver
+    /// intercepting requests — a served hit never reaches the interceptor.
+    cache_disabled: Arc<AtomicBool>,
 }
 
 impl FetchEngine {
@@ -512,7 +517,13 @@ impl FetchEngine {
             request_count: Arc::new(AtomicU32::new(0)),
             total_bytes: Arc::new(AtomicU64::new(0)),
             request_defaults,
+            cache_disabled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Turns the HTTP cache off (or back on) for this engine's requests.
+    pub fn set_cache_disabled(&self, disabled: bool) {
+        self.cache_disabled.store(disabled, Ordering::Relaxed);
     }
 
     /// The headers this engine applies to every request.
@@ -674,6 +685,7 @@ impl FetchEngine {
         // cookie correctness). Correctness never depends on it — a miss just
         // re-fetches.
         let cache_parts = (!request.bypass_cache
+            && !self.cache_disabled.load(Ordering::Relaxed)
             && method == Method::GET
             && request.body.is_none()
             && !is_cross_origin(initiator.as_ref(), &url))

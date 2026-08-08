@@ -115,3 +115,36 @@ jobs:
       # Fixtures are served from loopback; CI never touches the internet.
       - name: Puppeteer
         run: cargo run --release -p xtask -- puppeteer
+
+  playwright:
+    name: Playwright conformance
+    # Ubuntu only, for the same reason the Puppeteer job is: one endpoint driven
+    # by a real driver, and a second platform would cost time for no signal.
+    #
+    # A **job of its own**, deliberately not a second step of the Puppeteer job
+    # and not chained after WPT. The runner's `context.newPage` budget is 60 s
+    # and the whole suite fails as one when it is missed, so sharing a machine
+    # with WPT's 10-way-parallel sweep is how this turns flaky
+    # (docs/automation-roadmap.md records that history).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/playwright/package.json
+      # See the lint job: the system font source needs fontconfig on Linux.
+      - name: Fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - uses: Swatinem/rust-cache@v2
+      # Release for the same reason the Puppeteer job is: this drives the whole
+      # engine through a real driver, and a debug build turns minutes into tens
+      # of them. Fixtures are served from loopback; CI never touches the
+      # internet.
+      - name: Playwright
+        run: cargo run --release -p xtask -- playwright

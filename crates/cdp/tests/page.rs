@@ -252,6 +252,70 @@ fn each_navigation_reports_a_fresh_loader_on_init() {
     );
 }
 
+/// `Page.navigatedWithinDocument` must say *which kind* of same-document
+/// navigation it was: Chrome always sends `navigationType`, and a driver
+/// branches on it rather than re-deriving it from the URL.
+#[test]
+fn a_fragment_navigation_reports_its_navigation_type() {
+    let fixtures = Fixtures::start(vec![("/a", &doc("A", ""))]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a#one") }),
+    );
+
+    let event = client.await_event("Page.navigatedWithinDocument");
+    assert_eq!(event["params"]["url"], fixtures.url("/a#one"));
+    assert_eq!(
+        event["params"]["navigationType"], "fragment",
+        "only the fragment moved: {event}"
+    );
+}
+
+/// The other branch: a same-document *traversal* back to an entry a
+/// `pushState` displaced. The URL difference is not a fragment, so it is not a
+/// fragment navigation — which is the whole distinction `navigationType` draws.
+#[test]
+fn a_history_traversal_reports_a_history_api_navigation_type() {
+    let fixtures = Fixtures::start(vec![("/a", &doc("A", ""))]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+    // `pushState` moves the document URL with no navigation milestone at all,
+    // so this produces no event of its own — the traversal below is the first
+    // same-document navigation the registry sees.
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "history.pushState(null, '', '/pushed')" }),
+    );
+
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "history.back()" }),
+    );
+
+    let event = client.await_event("Page.navigatedWithinDocument");
+    assert_eq!(event["params"]["url"], fixtures.url("/a"));
+    assert_eq!(
+        event["params"]["navigationType"], "historyApi",
+        "a traversal that is not a fragment change: {event}"
+    );
+}
+
 #[test]
 fn get_frame_tree_reports_the_current_document() {
     let fixtures = Fixtures::start(vec![("/a", &doc("A", ""))]);

@@ -6262,6 +6262,16 @@ impl Page {
 
     /// Replaces the viewport: media queries re-evaluate and the next layout
     /// read reflows against the new size.
+    /// Turns this page's HTTP cache use off (or back on).
+    ///
+    /// `Network.setCacheDisabled`. The cache itself is shared browser-wide, so
+    /// this does not clear it — it makes *this page* neither read from nor
+    /// write to it, which is what a driver asks for when it intercepts:
+    /// a request served from cache never reaches the interceptor.
+    pub fn set_cache_disabled(&self, disabled: bool) {
+        self.net.set_cache_disabled(disabled);
+    }
+
     /// Replaces `navigator.language`/`languages` **and** the `Accept-Language`
     /// header, together (ADR-0034 D6).
     ///

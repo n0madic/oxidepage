@@ -433,3 +433,47 @@ fn a_page_handle_is_send_and_sync() {
     assert_send_sync::<oxidepage_engine::BrowserContext>();
     assert_send_sync::<oxidepage_engine::PageHandle>();
 }
+
+/// `Page::set_cache_disabled` is a real switch, not an accepted no-op.
+///
+/// It is what `Network.setCacheDisabled` reaches, and every driver sends that
+/// while intercepting — a request served from cache never reaches the
+/// interceptor, so a driver told the cache was off and given one silently
+/// loses requests it was promised it would see.
+#[test]
+fn disabling_the_cache_makes_a_page_go_to_the_wire() {
+    let server = spawn_server();
+    let browser = browser();
+    let context = browser.default_context();
+
+    // Warm the shared cache: `/uses-cache` pulls `/cached` as a stylesheet, and
+    // the server counts only the hits that reached the wire.
+    let warm = context.new_page(NewPageOptions::default()).unwrap();
+    warm.navigate(&server.url("/uses-cache"), WaitUntil::Load)
+        .unwrap()
+        .unwrap();
+    assert_eq!(server.cache_hits(), 1);
+
+    // A sibling would ordinarily be served from that cache…
+    let cached = context.new_page(NewPageOptions::default()).unwrap();
+    cached
+        .navigate(&server.url("/uses-cache"), WaitUntil::Load)
+        .unwrap()
+        .unwrap();
+    assert_eq!(server.cache_hits(), 1, "the sibling must hit the cache");
+
+    // …and with the cache disabled it must not be.
+    let direct = context.new_page(NewPageOptions::default()).unwrap();
+    direct.set_cache_disabled(true).unwrap();
+    direct
+        .navigate(&server.url("/uses-cache"), WaitUntil::Load)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        server.cache_hits(),
+        2,
+        "a page with the cache disabled must go to the wire"
+    );
+
+    browser.close();
+}

@@ -504,6 +504,11 @@ impl PageHandle {
         self.with_control(Page::is_suspended)
     }
 
+    /// Turns this page's HTTP cache use off (or back on).
+    pub fn set_cache_disabled(&self, disabled: bool) -> EngineResult<()> {
+        self.with(move |page| page.set_cache_disabled(disabled))
+    }
+
     /// Replaces `navigator.languages` and the `Accept-Language` header.
     pub fn set_languages(&self, languages: Vec<String>) -> EngineResult<Result<(), String>> {
         self.with(move |page| page.set_languages(languages).map_err(|e| e.to_string()))
