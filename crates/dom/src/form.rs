@@ -51,6 +51,16 @@ pub struct FormState {
     pub(crate) selection_end: usize,
     /// `"forward"`, `"backward"` or `"none"`.
     pub(crate) selection_direction: SelectionDirection,
+    /// Whether the current selection was asked for **by name** — `select()` or
+    /// `setSelectionRange()` — rather than left behind by an edit.
+    ///
+    /// Focus otherwise parks a collapsed caret at the end of the value, and a
+    /// driver that selects before it focuses (Playwright's `fill` runs
+    /// `input.select(); input.focus();`, in that order) would have its
+    /// selection silently erased and its replacement text appended instead.
+    /// The flag's life is closed: [`DomTree::set_form_value`] clears it, so an
+    /// explicit selection survives exactly until the value is rewritten.
+    pub(crate) selection_explicit: bool,
     /// The value at the moment the control took focus, kept so that blur can
     /// decide whether to fire `change`. `None` when the control is not focused.
     ///
@@ -290,11 +300,22 @@ impl DomTree {
 
     /// Sets the dirty value flag and the value. Does **not** touch the content
     /// attribute — that is the whole point of the flag.
+    ///
+    /// Writing a *different* value to a text control also does what HTML's
+    /// value setter requires: move the text entry cursor to the end,
+    /// unselecting any selected text. Callers that want the caret somewhere
+    /// else (an edit inserts in the middle) follow with
+    /// [`collapse_selection_to`](Self::collapse_selection_to).
     pub fn set_form_value(&mut self, id: NodeId, value: String) {
+        let moves_cursor = self.is_text_entry(id) && self.form_value(id) != value;
         let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) else {
             return;
         };
         el.form_state_mut().value = Some(value);
+        if moves_cursor {
+            let end = self.form_value(id).encode_utf16().count();
+            self.collapse_selection_to(id, end);
+        }
         // `:placeholder-shown` and (later) validity depend on the value.
         self.update_element_state(id);
     }
@@ -444,6 +465,45 @@ impl DomTree {
         end: usize,
         direction: SelectionDirection,
     ) {
+        self.write_selection(id, start, end, direction, /* explicit */ true);
+    }
+
+    /// Places a collapsed caret at the end of the value — what a control gets
+    /// when focus arrives and what an insertion leaves behind.
+    ///
+    /// This is the *implicit* caret, so it clears
+    /// [`selection_explicit`](FormState::selection_explicit): a caret left
+    /// behind by an edit is not a selection anyone asked for.
+    pub fn collapse_selection_to(&mut self, id: NodeId, offset: usize) {
+        self.write_selection(
+            id,
+            offset,
+            offset,
+            SelectionDirection::None,
+            /* explicit */ false,
+        );
+    }
+
+    /// Whether the selection was set by `select()`/`setSelectionRange()` and
+    /// has not been superseded by a value write.
+    #[must_use]
+    pub fn selection_explicit(&self, id: NodeId) -> bool {
+        self.get(id)
+            .and_then(|n| n.as_element())
+            .and_then(ElementData::form_state)
+            .is_some_and(|state| state.selection_explicit)
+    }
+
+    /// The one writer of the selection triple, so `explicit` can never drift
+    /// out of step with the offsets it describes.
+    fn write_selection(
+        &mut self,
+        id: NodeId,
+        start: usize,
+        end: usize,
+        direction: SelectionDirection,
+        explicit: bool,
+    ) {
         let len = self.form_value(id).encode_utf16().count();
         let Some(el) = self.arena.get_mut(id).and_then(|n| n.as_element_mut()) else {
             return;
@@ -452,12 +512,7 @@ impl DomTree {
         state.selection_start = start.min(len);
         state.selection_end = end.min(len).max(state.selection_start);
         state.selection_direction = direction;
-    }
-
-    /// Places a collapsed caret at the end of the value — what a control gets
-    /// when focus arrives and what an insertion leaves behind.
-    pub fn collapse_selection_to(&mut self, id: NodeId, offset: usize) {
-        self.set_selection(id, offset, offset, SelectionDirection::None);
+        state.selection_explicit = explicit;
     }
 
     /// Snapshots the value as focus arrives, so blur can decide whether the

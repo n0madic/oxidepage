@@ -815,6 +815,63 @@ fn backspace_deletes_the_selection() {
     assert_eq!(eval_string(&page, "String(t.selectionStart)"), "1");
 }
 
+/// Focus does not erase a selection that was asked for by name.
+///
+/// Playwright's `fill` runs `input.select(); input.focus();` — in that order —
+/// and then pastes. Collapsing the caret unconditionally on focus turned the
+/// replacement into an append, which is what made `page.fill` report
+/// `"initialtyped"`.
+#[test]
+fn focus_keeps_an_explicit_selection() {
+    let page = page_with(r##"<!doctype html><input id=t value="initial">"##);
+    page.eval("t.select(); t.focus()").unwrap();
+    assert_eq!(
+        eval_string(&page, "[t.selectionStart, t.selectionEnd].join(',')"),
+        "0,7",
+        "focus left the selection alone"
+    );
+    page.insert_text("typed");
+    assert_eq!(eval_string(&page, "t.value"), "typed");
+}
+
+/// The other order still works: focusing a control nothing selected parks the
+/// caret at the end, so typing appends. This is the puppeteer `page.type` path
+/// and it must not change.
+#[test]
+fn focus_without_a_selection_still_parks_the_caret_at_the_end() {
+    let page = page_with(r##"<!doctype html><input id=t value="ab">"##);
+    page.eval("t.focus()").unwrap();
+    page.insert_text("x");
+    assert_eq!(eval_string(&page, "t.value"), "abx");
+}
+
+/// Writing `value` moves the cursor to the end and unselects, as HTML's value
+/// setter requires — which is also what closes the explicit-selection flag's
+/// life cycle, so a stale `select()` cannot outlive the text it selected.
+#[test]
+fn the_value_setter_collapses_the_selection() {
+    let page = page_with(r##"<!doctype html><input id=t value="initial">"##);
+    page.eval("t.select(); t.value = 'new'; t.focus()").unwrap();
+    assert_eq!(
+        eval_string(&page, "[t.selectionStart, t.selectionEnd].join(',')"),
+        "3,3",
+        "the value setter collapsed the caret to the end"
+    );
+    page.insert_text("er");
+    assert_eq!(eval_string(&page, "t.value"), "newer");
+}
+
+/// `fill('')` is spelled as a `Delete` press over the selection, not as an
+/// empty insert — so the delete path has to honour the range rather than eat
+/// one character forward.
+#[test]
+fn delete_over_an_explicit_selection_clears_the_value() {
+    let page = page_with(r##"<!doctype html><input id=t value="initial">"##);
+    page.eval("t.select(); t.focus()").unwrap();
+    press(&page, "Delete");
+    assert_eq!(eval_string(&page, "t.value"), "");
+}
+
 /// `maxLength`/`minLength` reflect, with -1 for absent, and reject negatives.
 #[test]
 fn max_length_reflects() {

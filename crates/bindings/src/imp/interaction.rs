@@ -551,9 +551,15 @@ fn move_focus(cx: &BindCx<'_>, to: Option<NodeId>) -> Result<(), JsThrow> {
                 .borrow_mut()
                 .set_value_at_focus(new, Some(value));
             // Focus places a collapsed caret at the end of the value, which is
-            // where typing continues from.
-            let end = cx.state.dom.borrow().form_value(new).encode_utf16().count();
-            cx.state.dom.borrow_mut().collapse_selection_to(new, end);
+            // where typing continues from — but only when nothing asked for a
+            // selection by name. A driver may select *before* it focuses
+            // (Playwright's `fill` runs `select()` then `focus()`), and
+            // collapsing there would append its replacement text instead of
+            // replacing the value.
+            if !cx.state.dom.borrow().selection_explicit(new) {
+                let end = cx.state.dom.borrow().form_value(new).encode_utf16().count();
+                cx.state.dom.borrow_mut().collapse_selection_to(new, end);
+            }
         }
     }
 
