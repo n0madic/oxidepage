@@ -343,6 +343,11 @@ impl Client {
         self.send(method, params, Some(session))
     }
 
+    /// [`Client::dispatch`] for a browser-level (session-less) command.
+    pub fn dispatch_browser(&mut self, method: &str, params: Value) -> i64 {
+        self.send(method, params, None)
+    }
+
     /// Blocks for the answer to a previously [`Client::dispatch`]ed command.
     pub fn collect(&mut self, id: i64) -> Result<Value, Value> {
         self.await_response(id)
@@ -467,6 +472,16 @@ impl Client {
             }
         }
         std::mem::take(&mut self.events)
+    }
+
+    /// Reads the next `count` frames **in the order the server wrote them**.
+    ///
+    /// [`Client::await_frame`] and [`Client::await_event`] both stash what they
+    /// are not looking for into two separate buffers, which is exactly what
+    /// loses the one thing a test about ordering needs to see. This reads raw.
+    pub fn read_ordered(&mut self, count: usize) -> Vec<Value> {
+        let deadline = Instant::now() + TIMEOUT;
+        (0..count).map(|_| self.read_frame(deadline)).collect()
     }
 
     fn read_frame(&mut self, deadline: Instant) -> Value {

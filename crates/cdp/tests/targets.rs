@@ -353,3 +353,45 @@ fn two_connections_see_the_same_targets_independently() {
         "discovery leaked across connections: {events:?}"
     );
 }
+
+/// `Target.attachedToTarget` reaches the driver **before** the
+/// `Target.createTarget` response it belongs to.
+///
+/// Chrome emits the attach while the target is being created, and Playwright
+/// depends on that literally: `doCreateNewPage` reads
+/// `_crPages.get(targetId)._page` the instant the reply lands, so an attach
+/// still in flight is a `TypeError` on `undefined`. Leaving the attach to the
+/// connection's event thread made it a race the reply sometimes won — which is
+/// what the roadmap recorded as `context.newPage` occasionally timing out and
+/// taking every later check with it.
+#[test]
+fn auto_attach_precedes_the_create_target_reply() {
+    let harness = Harness::start();
+    let mut client = harness.client();
+
+    client.call(
+        "Target.setAutoAttach",
+        json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+    );
+    // A known-empty baseline: the browser target's own attach must not be
+    // mistaken for the one this test is about.
+    client.forget_events(std::time::Duration::from_millis(200));
+
+    let id = client.dispatch_browser("Target.createTarget", json!({ "url": "about:blank" }));
+    // Read raw, in wire order — the ordering *is* the assertion.
+    let frames = client.read_ordered(2);
+
+    assert_eq!(
+        frames[0]["method"], "Target.attachedToTarget",
+        "the attach must come first, got {frames:?}"
+    );
+    assert_eq!(
+        frames[1]["id"],
+        serde_json::json!(id),
+        "the createTarget reply must come second, got {frames:?}"
+    );
+    assert_eq!(
+        frames[0]["params"]["targetInfo"]["targetId"], frames[1]["result"]["targetId"],
+        "the attach must name the target that was just created"
+    );
+}

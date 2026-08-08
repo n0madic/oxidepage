@@ -204,6 +204,13 @@ pub struct Connection {
     streams: Mutex<HashMap<String, Stream>>,
     /// Commands whose reply is waiting on a promise (ADR-0034 D1).
     awaits: Mutex<AwaitBook>,
+    /// Targets this connection has already auto-attached to.
+    ///
+    /// Two threads reach the attach for one target — the event thread and
+    /// `Target.createTarget`'s lane — and exactly one must win. Entries are
+    /// removed when the target is destroyed, so a browser that opens and closes
+    /// pages does not accumulate them.
+    auto_attached: Mutex<std::collections::HashSet<String>>,
 }
 
 /// The two sides of a deferred reply, under one lock.
@@ -270,6 +277,7 @@ impl Connection {
             wait_for_debugger: AtomicBool::new(false),
             streams: Mutex::new(HashMap::new()),
             awaits: Mutex::new(AwaitBook::default()),
+            auto_attached: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -667,12 +675,42 @@ impl Connection {
         // Auto-attach is what Puppeteer and Playwright both use in place of
         // discovering and then attaching by hand; a target created while it is
         // on must arrive already attached.
-        if self.auto_attach.load(Ordering::Relaxed) {
-            let _ = self.attach(&info.target_id);
+        self.auto_attach(&info.target_id);
+    }
+
+    /// Attaches to a newly created target **once**, if this connection asked
+    /// for auto-attach.
+    ///
+    /// Called from two places that race: the connection's event thread, which
+    /// sees `TargetSignal::Created`, and `Target.createTarget`'s own lane,
+    /// which calls it before replying (see there for why). The `auto_attached`
+    /// set is what makes "once" true whichever gets there first — the check and
+    /// the claim happen under one lock, so both can never attach.
+    pub fn auto_attach(self: &Arc<Self>, target_id: &str) {
+        if !self.auto_attach.load(Ordering::Relaxed) {
+            return;
         }
+        // The guard is held **across the attach**, not just across the claim.
+        // Releasing it in between leaves a window in which the loser sees the
+        // target claimed and returns while the winner has not emitted yet — and
+        // if the loser is `createTarget`'s lane, its reply overtakes the
+        // `attachedToTarget` it was supposed to follow. That is the whole bug
+        // this set exists to close, so a narrow lock would fix nothing.
+        //
+        // Lock order is `auto_attached` → `sessions`, the same order
+        // `on_target_destroyed` takes them in.
+        let mut claimed = self.auto_attached.lock().unwrap_or_else(|e| e.into_inner());
+        if !claimed.insert(target_id.to_owned()) {
+            return;
+        }
+        let _ = self.attach(target_id);
     }
 
     fn on_target_destroyed(self: &Arc<Self>, target_id: &str) {
+        self.auto_attached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(target_id);
         for session in self.sessions_for(target_id) {
             self.detach(&session.id);
         }

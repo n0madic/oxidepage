@@ -216,6 +216,19 @@ fn create_target(connection: &Arc<Connection>, request: &Request) -> CommandResu
         })?;
     }
 
+    // **Before the reply, not after.** Chrome emits `attachedToTarget` while
+    // the target is being created, so a driver that awaits `createTarget` finds
+    // the session already registered. Playwright depends on it literally:
+    // `doCreateNewPage` reads `_crPages.get(targetId)._page` the instant the
+    // reply lands, and an attach that is still in flight makes that a
+    // `TypeError` on `undefined`. Leaving it to the connection's event thread
+    // is a race the reply usually lost and sometimes won — the flake the
+    // roadmap recorded as `context.newPage` occasionally timing out.
+    //
+    // The event thread still reaches this target's `Created` signal; the claim
+    // set in `Connection::auto_attach` is what makes exactly one of them win.
+    connection.auto_attach(&target_id);
+
     Ok(serde_json::json!({ "targetId": target_id }))
 }
 
