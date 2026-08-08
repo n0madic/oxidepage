@@ -1974,6 +1974,16 @@ impl Page {
     /// A script in the loaded document may navigate; that navigation is chained
     /// off this call, exactly as it would be off a `navigate`.
     pub fn load_html(&self, html: &str) -> Result<(), JsError> {
+        // A suspended page does not load, and this path does not go through
+        // `run_navigation` where that guard lives (ADR-0034 D3). Without it
+        // `PageHandle::set_content` on a paused target parses the document,
+        // runs its inline scripts and reports success having awaited neither
+        // stylesheets nor subresources — `wait_until` returns instantly while
+        // suspended. Queued instead, and performed on resume.
+        if self.suspended.get() {
+            self.state.queue_embedder_document(html.to_owned());
+            return Ok(());
+        }
         // An embedder replacing the content is a navigation in every way that
         // matters: fresh globals, fresh context ids, dead handles (ADR-0033
         // D9). Only `document.open()` keeps its `Window`, and only because
@@ -2659,16 +2669,19 @@ impl Page {
                 PendingNavigation::JavaScriptUrl { source } => {
                     self.run_javascript_url(&source, wait_until)?;
                 }
-                PendingNavigation::ReplaceDocument { html } => {
-                    // HTML's `document.open()` keeps the `Document`, the
-                    // `Window` and the environment settings object, so the
-                    // realms and every handle minted against them survive
-                    // (ADR-0034 D2). A driver's own `callFunctionOn` is what
-                    // asked for this replacement — tearing its context down
-                    // under it would fail the very call that requested it.
-                    self.commit_replacement_document(
-                        &html, wait_until, /* preserve_contexts */ true,
-                    )?;
+                PendingNavigation::ReplaceDocument {
+                    html,
+                    preserve_contexts,
+                } => {
+                    // `preserve_contexts` comes from whoever queued it, not
+                    // from the variant: HTML's `document.open()` keeps the
+                    // `Document`, the `Window` and the environment settings
+                    // object (ADR-0034 D2) — a driver's own `callFunctionOn` is
+                    // what asked for that replacement, and tearing its context
+                    // down under it would fail the very call that requested it
+                    // — while an embedder's `load_html`, queued here only when
+                    // the page is suspended, is a navigation and rebuilds them.
+                    self.commit_replacement_document(&html, wait_until, preserve_contexts)?;
                 }
             }
             pending = self.state.take_pending_navigation();
@@ -3951,6 +3964,18 @@ impl Page {
         ran
     }
 
+    /// Whether a *budgeted* wait can make progress at all.
+    ///
+    /// [`Self::stop_waiting`] is the give-up test, and it is also the answer to
+    /// "would looping here spin": [`Self::wait_until`] returns instantly under
+    /// it, so a caller that loops around `settle` would burn a core for its
+    /// whole budget rather than park. Named separately because the caller reads
+    /// better for it, and because getting this wrong is invisible except as CPU.
+    #[must_use]
+    fn cannot_progress(&self) -> bool {
+        self.stop_waiting()
+    }
+
     /// Runs the loop until `done`, or until `budget` elapses.
     ///
     /// The one place a *budgeted* wait is expressed. There used to be three
@@ -3962,18 +3987,6 @@ impl Page {
     /// waiter and survive in the others. A fifth waiter added later gets all
     /// three rules — give up on close/suspend, fold in every deadline, stop
     /// when the command port disconnects — by construction.
-    /// Whether a *budgeted* wait can make progress at all.
-    ///
-    /// [`Self::stop_waiting`] is the give-up test, and it is also the answer to
-    /// "would looping here spin": `wait_until` returns instantly under it, so a
-    /// caller that loops around `settle` would burn a core for its whole budget
-    /// rather than park. Named separately because the caller reads better for
-    /// it, and because getting this wrong is invisible except as CPU.
-    #[must_use]
-    fn cannot_progress(&self) -> bool {
-        self.stop_waiting()
-    }
-
     fn wait_until(&self, budget: Duration, done: impl Fn(&Self) -> bool) {
         let end = Instant::now() + budget;
         loop {
@@ -5353,15 +5366,6 @@ impl Page {
         if self.pending_awaits.borrow().is_empty() {
             return false;
         }
-        // Nothing to answer *through*: `LoopHooks::emit` drops the record when
-        // no sink is installed, and dropping the entry with it would leave the
-        // caller holding a token that can never resolve. `defer_await` is a
-        // public option, so an embedder on the pull API can reach this. Left
-        // parked instead — the same rule `drain_binding_events` follows, and
-        // for the same reason.
-        if self.hooks.event_sink.borrow().is_none() {
-            return false;
-        }
         // Swapped out rather than held: describing a settled promise runs a
         // microtask checkpoint, which runs author JS, which can defer another
         // await — and that would be a `BorrowMutError` against this borrow.
@@ -6352,8 +6356,6 @@ impl Page {
         self.viewport.get()
     }
 
-    /// Replaces the viewport: media queries re-evaluate and the next layout
-    /// read reflows against the new size.
     /// Turns this page's HTTP cache use off (or back on).
     ///
     /// `Network.setCacheDisabled`. The cache itself is shared browser-wide, so
@@ -6395,6 +6397,8 @@ impl Page {
         Ok(())
     }
 
+    /// Replaces the viewport: media queries re-evaluate and the next layout
+    /// read reflows against the new size.
     pub fn set_viewport(&self, viewport: Viewport) {
         self.viewport.set(viewport);
         self.state.style.borrow_mut().set_viewport(viewport);

@@ -683,7 +683,14 @@ impl Page {
         promise: JsValue,
         options: &EvaluateOptions,
     ) -> EvaluateOutcome {
-        if !options.defer_await {
+        // A token nobody can answer must never be issued. `hooks.emit` drops
+        // the record when no sink is installed, so an embedder on the pull API
+        // would get a `Deferred` that can never resolve — and the entry would
+        // sit in `pending_awaits` reporting an elapsed deadline forever, which
+        // `next_wakeup` turns into a park on a past instant: 100% CPU, the
+        // ADR-0004 busy-wait. Such a caller gets the blocking path instead,
+        // which is the behaviour it had before deferral existed.
+        if !options.defer_await || !self.has_event_sink() {
             return EvaluateOutcome::Done(Box::new(self.settle_promise(world, promise, options)));
         }
         if self.promise_is_settled(world, &promise) {

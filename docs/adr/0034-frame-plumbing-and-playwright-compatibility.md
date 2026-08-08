@@ -63,6 +63,13 @@ Four properties are load-bearing rather than incidental:
   connection attached to the target, so a second driver sees tokens it will
   never claim.
 - Tokens come from a process-wide counter, because one connection spans pages.
+- **No deferral without an event sink.** `defer_await` is a public option, and
+  an embedder on the pull API has nothing for the answer to arrive through — so
+  it gets the blocking path instead of a token that can never resolve. Issuing
+  one would also park an entry whose deadline elapses and never clears, and
+  `next_wakeup` turns an elapsed deadline into a park on a past instant: the
+  ADR-0004 busy-wait, reached through the feature that exists to prevent a
+  deadlock.
 - **Every exit answers**: budget expiry, the navigation that destroyed the
   context, and the page's own close. Silence strands the driver, and the parked
   `JsValue` would outlive its `Runtime` — an abort inside `JS_FreeRuntime`, not

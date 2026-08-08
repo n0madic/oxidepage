@@ -1360,3 +1360,60 @@ fn an_unclosed_parser_keeps_taking_writes_from_later_tasks() {
         "a write after the flush must still reach the open parser"
     );
 }
+
+/// A `close()` whose markup a task-boundary flush already committed does not
+/// commit it a second time.
+///
+/// A duplicate `ReplaceDocument` is not a harmless no-op: it is another
+/// `Started`/`Committed`/`load`, the document rebuilt from scratch, and every
+/// inline script in it run twice.
+#[test]
+fn close_after_a_flush_does_not_commit_the_same_markup_twice() {
+    let page = load_html_page("<!doctype html><p>old</p>", PageOptions::default()).expect("page");
+    page.eval(
+        "document.open(); \
+         document.write('<p id=a>once</p><script>window.runs = (window.runs || 0) + 1;<\\/script>');",
+    )
+    .expect("eval");
+    // The task boundary commits the buffer.
+    page.settle(Duration::from_secs(5));
+    assert_eq!(page.eval_to_string("String(window.runs)").unwrap(), "1");
+    let _ = page.drain_navigation_events();
+
+    // A later `close()` with nothing new written owes no second commit.
+    page.eval("document.close()").expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("String(window.runs)").unwrap(),
+        "1",
+        "the document must not be rebuilt, and its scripts must not re-run"
+    );
+    let kinds: Vec<NavigationEventKind> = page
+        .drain_navigation_events()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(
+        !kinds.contains(&NavigationEventKind::Committed),
+        "a redundant close must commit nothing, got {kinds:?}"
+    );
+}
+
+/// `document.open(); document.close()` with nothing written still replaces the
+/// document — that is what `open()` means.
+#[test]
+fn an_empty_open_close_still_replaces_the_document() {
+    let page =
+        load_html_page("<!doctype html><p id=old>old</p>", PageOptions::default()).expect("page");
+    page.eval("document.open(); document.close();")
+        .expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("String(document.getElementById('old'))")
+            .unwrap(),
+        "null",
+        "an empty open/close must still throw the old document away"
+    );
+}

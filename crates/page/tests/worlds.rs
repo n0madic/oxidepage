@@ -357,6 +357,11 @@ fn dropping_a_page_with_live_worlds_is_clean() {
     // holds the promise itself, not a handle to it, so this is the one owner
     // of a `JsValue` that lives outside `WorldState` — and a `Persistent`
     // outliving its `Runtime` aborts the process rather than failing a test.
+    //
+    // A sink first: without one a token could never be answered, so
+    // `defer_await` falls back to blocking and nothing would be parked to
+    // exercise the teardown at all.
+    page.set_event_sink(Some(std::rc::Rc::new(|_record| {})));
     for context in [None, Some(a.context_id), Some(b.context_id)] {
         let outcome = page
             .evaluate_in(

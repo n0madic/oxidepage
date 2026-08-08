@@ -514,3 +514,43 @@ fn a_navigation_on_a_suspended_page_waits_for_the_resume() {
     );
     browser.close();
 }
+
+/// `PageHandle::set_content` on a suspended page is queued, not run hollow.
+///
+/// It does not go through `run_navigation`, so it needed the suspension guard
+/// of its own: `wait_until` returns instantly while suspended, so running it
+/// would parse the document, execute its inline scripts on a page the driver
+/// believes is frozen, and report success having awaited nothing.
+#[test]
+fn set_content_on_a_suspended_page_waits_for_the_resume() {
+    let browser = browser();
+    let page = browser
+        .default_context()
+        .new_page(NewPageOptions {
+            suspended: true,
+            ..NewPageOptions::default()
+        })
+        .unwrap();
+
+    page.set_content("<title>later</title><script>window.ran = 1;</script>")
+        .unwrap()
+        .unwrap();
+    assert_ne!(title(&page), "later", "a suspended page must not load");
+    assert_eq!(
+        page.eval_to_string("String(window.ran)").unwrap().unwrap(),
+        "undefined",
+        "and must not run the content's scripts"
+    );
+
+    page.resume().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while title(&page) != "later" && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        title(&page),
+        "later",
+        "the queued content must load on resume"
+    );
+    browser.close();
+}

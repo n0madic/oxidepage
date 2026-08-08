@@ -262,7 +262,18 @@ pub enum PendingNavigation {
     /// the world rebuild and the context re-announcement all happen. Queued for
     /// exactly the reason `JavaScriptUrl` is — `close()` runs inside JS, under
     /// live borrows on the DOM, style and layout.
-    ReplaceDocument { html: String },
+    ReplaceDocument {
+        html: String,
+        /// Whether the realms survive it (ADR-0034 D2).
+        ///
+        /// True for `document.open()`, where HTML keeps the `Document`, the
+        /// `Window` and the environment settings object. False for an
+        /// embedder's `Page::load_html`, which is a navigation in every way
+        /// that matters — it is queued through here only when the page is
+        /// suspended, and must not quietly acquire `open()`'s semantics by
+        /// sharing its variant.
+        preserve_contexts: bool,
+    },
 }
 
 /// The request body of a form submission that navigates.
@@ -1884,13 +1895,21 @@ impl WorldState {
         Ok(true)
     }
 
-    /// Closes the script-created parser and hands back what it collected.
+    /// Closes the script-created parser and hands back what it collected, if a
+    /// commit is still owed.
     ///
     /// `None` when none was open — `close()` on a document nobody opened is a
-    /// no-op, not an error.
+    /// no-op, not an error — **and** when every byte it holds has already been
+    /// committed by a task-boundary flush. Re-committing there would queue a
+    /// second identical replacement: another `Started`/`Committed`/`load`, the
+    /// document rebuilt from scratch, and every inline script in it run twice.
+    ///
+    /// An `open()` with nothing written is still a commit: it replaces the
+    /// document with an empty one, which is what `open()` means.
     pub fn take_script_parser(&self) -> Option<String> {
-        self.page.script_parser_flushed.set(0);
-        self.page.script_parser_buffer.borrow_mut().take()
+        let flushed = self.page.script_parser_flushed.replace(0);
+        let buffer = self.page.script_parser_buffer.borrow_mut().take()?;
+        (flushed == 0 || buffer.len() > flushed).then_some(buffer)
     }
 
     /// Number of in-flight `fetch`/XHR requests (the page's event loop keeps
@@ -1972,7 +1991,16 @@ impl WorldState {
         // A payload the outgoing document queued belongs to a world that is
         // gone; reporting it against the new document would attribute it to the
         // wrong execution context.
-        self.page.binding_calls.borrow_mut().clear();
+        //
+        // A replacement destroys no world, so the payload is still owed to the
+        // driver — and dropping it is the `exposeBinding` deadlock D1 exists to
+        // remove: the driver is never told the binding was called, so it never
+        // resolves the promise the page is waiting on. Reachable whenever a
+        // `document.close()` lands before the loop reaches
+        // `drain_binding_events`.
+        if new_context {
+            self.page.binding_calls.borrow_mut().clear();
+        }
         // Minted from the page's counter rather than bumped locally: ids must
         // be unique across documents *and* worlds, so a driver holding one from
         // the outgoing document gets a clean "no such context" (ADR-0033 D10).
@@ -2041,7 +2069,19 @@ impl WorldState {
     /// Queues the replacement document a script-created parser collected
     /// (ADR-0034 D2).
     pub fn queue_document_replacement(&self, html: String) {
-        self.request_navigation(PendingNavigation::ReplaceDocument { html });
+        self.request_navigation(PendingNavigation::ReplaceDocument {
+            html,
+            preserve_contexts: true,
+        });
+    }
+
+    /// Queues an embedder's whole-document replacement (`Page::load_html`),
+    /// which does **not** keep its realms.
+    pub fn queue_embedder_document(&self, html: String) {
+        self.request_navigation(PendingNavigation::ReplaceDocument {
+            html,
+            preserve_contexts: false,
+        });
     }
 
     /// Queues a navigation for the page's event loop (see

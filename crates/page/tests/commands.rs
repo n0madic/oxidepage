@@ -169,6 +169,10 @@ fn a_page_with_a_deferred_await_still_parks() {
     let (tx, handle) = spawn_loop("<p>quiet</p>");
 
     let deferred = call(&tx, Duration::from_secs(5), |page| {
+        // A sink first: a token nobody can answer is never issued, so without
+        // one `defer_await` falls back to the blocking path and this would
+        // block for the whole await budget instead of deferring.
+        page.set_event_sink(Some(std::rc::Rc::new(|_record| {})));
         matches!(
             page.evaluate(
                 "new Promise(() => {})",
@@ -445,4 +449,42 @@ fn a_suspended_page_parks_jobs_until_resumed() {
 
     tx.send(PageJob::control(Page::request_close)).unwrap();
     handle.join().unwrap();
+}
+
+/// Without an event sink, `defer_await` falls back to the blocking path rather
+/// than issuing a token nobody can answer (ADR-0034 D1).
+///
+/// `LoopHooks::emit` drops the record when no sink is installed, so a pull-API
+/// embedder would get a `Deferred` that can never resolve — and the parked
+/// entry would report an elapsed deadline forever, which `next_wakeup` turns
+/// into a park on a past instant: the ADR-0004 busy-wait, reached through the
+/// feature meant to prevent a deadlock.
+#[test]
+fn deferring_without_a_sink_falls_back_to_blocking() {
+    let page = load_html_page("<p>x</p>", PageOptions::default()).expect("page");
+    assert!(!page.has_event_sink());
+
+    let before = page.loop_stats();
+    let outcome = page.evaluate(
+        "Promise.resolve(7)",
+        &EvaluateOptions {
+            by_value: true,
+            await_promise: true,
+            defer_await: true,
+            ..EvaluateOptions::default()
+        },
+    );
+    // Answered, not deferred — and answered *correctly*, which is the point of
+    // falling back rather than refusing.
+    let result = outcome.expect_done();
+    assert_eq!(result.result.value_json.as_deref(), Some("7"));
+
+    // And no entry was parked to spin on: the loop is not now waking on an
+    // elapsed deadline.
+    let after = page.loop_stats();
+    assert!(
+        after.turns - before.turns < 100,
+        "the fallback must not leave the loop spinning: {} turns",
+        after.turns - before.turns
+    );
 }
