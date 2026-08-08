@@ -26,6 +26,7 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         // the state anyway; turning it on is refused with the touch events.
         "Emulation.setTouchEmulationEnabled" => set_touch_emulation(connection, request),
         "Emulation.setScriptExecutionDisabled" => set_script_disabled(connection, request),
+        "Emulation.setLocaleOverride" => set_locale_override(connection, request),
         // Deliberate refusals, each because the capability does not exist:
         // pretending otherwise is what P6 forbids.
         "Emulation.setTimezoneOverride" => Err(ProtocolError::server(
@@ -96,6 +97,39 @@ fn clear_device_metrics(connection: &Arc<Connection>, request: &Request) -> Comm
     // one viewport, not a stack — so this returns to the library default, which
     // is what a driver's `setViewport(null)` means in practice.
     session.page.set_viewport(Viewport::default())?;
+    Ok(json!({}))
+}
+
+/// `Emulation.setLocaleOverride` — `navigator.language`/`languages` **and**
+/// the `Accept-Language` header (ADR-0034 D6).
+///
+/// Both halves or nothing, which is what makes this implementable where
+/// `setUserAgentOverride` is not: moving only the script side would leave every
+/// request advertising the old locale, and a page that renders in the wrong
+/// language while `navigator.language` insists otherwise is worse than a loud
+/// refusal.
+///
+/// An absent `locale` clears the override in Chrome; there is no "the locale
+/// before the override" to restore here, so it is refused rather than silently
+/// doing nothing.
+fn set_locale_override(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        #[serde(default)]
+        locale: Option<String>,
+    }
+    let session = connection.require_session(request)?;
+    let params: Params = request.parse()?;
+    let Some(locale) = params.locale.filter(|l| !l.is_empty()) else {
+        return Err(ProtocolError::invalid_params(
+            "Emulation.setLocaleOverride requires a locale: there is no prior locale to restore",
+        ));
+    };
+    session
+        .page
+        .set_languages(vec![locale])?
+        .map_err(ProtocolError::server)?;
     Ok(json!({}))
 }
 

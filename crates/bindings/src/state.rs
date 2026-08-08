@@ -441,7 +441,10 @@ pub struct NavigatorData {
     pub user_agent: String,
     pub vendor: String,
     pub platform: String,
-    pub languages: Vec<String>,
+    /// `navigator.languages`. Interior mutability because
+    /// `Emulation.setLocaleOverride` moves it at runtime (ADR-0034 D6) and this
+    /// whole struct is shared as an `Rc` by every world.
+    pub languages: RefCell<Vec<String>>,
     pub hardware_concurrency: u64,
     pub webdriver: bool,
     pub max_touch_points: u32,
@@ -462,7 +465,7 @@ impl NavigatorData {
             user_agent,
             vendor,
             platform,
-            languages,
+            languages: RefCell::new(languages),
             hardware_concurrency,
             webdriver,
             max_touch_points,
@@ -1641,9 +1644,7 @@ impl WorldState {
         self.adopted_sheets.borrow_mut().clear();
         self.pending_conn.borrow_mut().clear();
         *self.history_state_cache.borrow_mut() = None;
-        *self.languages_js.borrow_mut() = None;
-        *self.plugins_js.borrow_mut() = None;
-        *self.mime_types_js.borrow_mut() = None;
+        self.forget_navigator_caches();
         // The page's `objectId -> world` index must forget them too, or it
         // grows by one entry per handle the main world ever minted, for the
         // life of the page. Isolated worlds are pruned at teardown; this is the
@@ -1793,6 +1794,27 @@ impl WorldState {
     /// `document.open()`: starts collecting markup that will replace the
     /// document. Re-opening an already-open buffer discards what it held,
     /// which is what a second `open()` means.
+    /// Replaces `navigator.languages` for every world at once.
+    ///
+    /// The data is page-level (one `Rc<NavigatorData>` shared by all worlds),
+    /// so this is one write; the per-world frozen arrays are dropped by
+    /// [`Self::forget_navigator_caches`].
+    pub fn set_navigator_languages(&self, languages: Vec<String>) {
+        *self.page.navigator.languages.borrow_mut() = languages;
+    }
+
+    /// Drops the frozen `navigator.languages`/`plugins`/`mimeTypes` values
+    /// this world handed out.
+    ///
+    /// They are `[SameObject]`-style caches, so a changed profile is invisible
+    /// until they are dropped — which is what makes `Page::set_languages`
+    /// observable to script that already read the list once.
+    pub fn forget_navigator_caches(&self) {
+        *self.languages_js.borrow_mut() = None;
+        *self.plugins_js.borrow_mut() = None;
+        *self.mime_types_js.borrow_mut() = None;
+    }
+
     pub fn open_script_parser(&self) {
         *self.page.script_parser_buffer.borrow_mut() = Some(String::new());
     }

@@ -844,3 +844,14 @@ fn a_download_navigation_reports_a_fresh_loader_on_init() {
     assert_eq!(title["result"]["value"], "doc");
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// `Page.setBypassCSP` is accepted. No CSP is enforced anywhere in the engine,
+/// so there is nothing to bypass and nothing to lie about — and refusing would
+/// break `browser.newContext({ bypassCSP: true })` over a capability the page
+/// never had.
+#[test]
+fn set_bypass_csp_is_accepted() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+    client.call_on(&session, "Page.setBypassCSP", json!({ "enabled": true }));
+}

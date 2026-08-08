@@ -440,6 +440,48 @@ impl Default for NavigatorProfile {
     }
 }
 
+/// The `Accept-Language` header a language list implies.
+///
+/// The first tag carries no `q`, each later one drops a tenth — the shape every
+/// browser sends, and the one half of a locale override that a *header* can
+/// express.
+fn accept_language_for(languages: &[String]) -> String {
+    languages
+        .iter()
+        .enumerate()
+        .map(|(index, language)| {
+            if index == 0 {
+                language.clone()
+            } else {
+                format!("{language};q={:.1}", 1.0 - index as f64 / 10.0)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Checks a language list, shared by [`NavigatorProfile::validate`] and
+/// [`Page::set_languages`] so a driver's override is held to exactly the rules
+/// an embedder's profile is.
+fn validate_languages(languages: &[String]) -> Result<(), JsError> {
+    if languages.is_empty() || languages.len() > 10 {
+        return Err(JsError::Engine(
+            "navigator.languages must contain between 1 and 10 entries".into(),
+        ));
+    }
+    if languages.iter().any(|language| {
+        language.is_empty()
+            || language
+                .split('-')
+                .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_alphanumeric()))
+    }) {
+        return Err(JsError::Engine(
+            "navigator.languages contains an invalid language tag".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl NavigatorProfile {
     fn validate(&self) -> Result<(), JsError> {
         if self.user_agent.chars().any(char::is_control) {
@@ -447,24 +489,10 @@ impl NavigatorProfile {
                 "navigator.userAgent must not contain control characters".into(),
             ));
         }
-        if self.languages.is_empty() || self.languages.len() > 10 {
-            return Err(JsError::Engine(
-                "navigator.languages must contain between 1 and 10 entries".into(),
-            ));
-        }
+        validate_languages(&self.languages)?;
         if self.hardware_concurrency == 0 {
             return Err(JsError::Engine(
                 "navigator.hardwareConcurrency must be greater than zero".into(),
-            ));
-        }
-        if self.languages.iter().any(|language| {
-            language.is_empty()
-                || language
-                    .split('-')
-                    .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_alphanumeric()))
-        }) {
-            return Err(JsError::Engine(
-                "navigator.languages contains an invalid language tag".into(),
             ));
         }
         oxidepage_net::RequestDefaults::new(&self.user_agent, &self.accept_language())
@@ -473,18 +501,7 @@ impl NavigatorProfile {
     }
 
     fn accept_language(&self) -> String {
-        self.languages
-            .iter()
-            .enumerate()
-            .map(|(index, language)| {
-                if index == 0 {
-                    language.clone()
-                } else {
-                    format!("{language};q={:.1}", 1.0 - index as f64 / 10.0)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        accept_language_for(&self.languages)
     }
 
     fn bindings_data(&self) -> oxidepage_bindings::NavigatorData {
@@ -6223,6 +6240,37 @@ impl Page {
 
     /// Replaces the viewport: media queries re-evaluate and the next layout
     /// read reflows against the new size.
+    /// Replaces `navigator.language`/`languages` **and** the `Accept-Language`
+    /// header, together (ADR-0034 D6).
+    ///
+    /// Both halves or neither. A locale override that moved only the script
+    /// side would leave every request advertising the old locale and every
+    /// server answering in it — which is exactly the dishonesty
+    /// `Emulation.setUserAgentOverride` is refused for, arrived at by a
+    /// different road.
+    ///
+    /// Held to the same rules an embedder's [`NavigatorProfile`] is, so a
+    /// driver cannot install a language list the profile API would reject.
+    pub fn set_languages(&self, languages: Vec<String>) -> Result<(), JsError> {
+        validate_languages(&languages)?;
+        let header = accept_language_for(&languages);
+        // The header is validated *before* anything is written, so a value the
+        // net stack would refuse leaves both halves untouched rather than the
+        // script side alone moved.
+        self.net
+            .set_accept_language(&header)
+            .map_err(|error| JsError::Engine(error.to_string()))?;
+        self.state.set_navigator_languages(languages);
+        // Every world caches the frozen `languages` array it handed out; each
+        // must mint a fresh one or script would keep reading the old list.
+        for world in self.worlds.all() {
+            if let Some(state) = world.state() {
+                state.forget_navigator_caches();
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_viewport(&self, viewport: Viewport) {
         self.viewport.set(viewport);
         self.state.style.borrow_mut().set_viewport(viewport);

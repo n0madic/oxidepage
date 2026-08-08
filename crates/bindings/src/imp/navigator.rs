@@ -49,7 +49,7 @@ pub(crate) fn vendor_sub(_cx: &BindCx<'_>, _this: Rc<NavigatorData>) -> Result<S
 }
 
 pub(crate) fn language(_cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<String, JsThrow> {
-    Ok(this.languages.first().cloned().unwrap_or_default())
+    Ok(this.languages.borrow().first().cloned().unwrap_or_default())
 }
 
 pub(crate) fn languages(cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<JsValue, JsThrow> {
@@ -58,6 +58,7 @@ pub(crate) fn languages(cx: &BindCx<'_>, this: Rc<NavigatorData>) -> Result<JsVa
     }
     let values: Vec<JsValue> = this
         .languages
+        .borrow()
         .iter()
         .cloned()
         .map(JsValue::String)

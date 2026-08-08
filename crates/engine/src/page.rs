@@ -495,6 +495,11 @@ impl PageHandle {
         self.with(move |page| page.evaluate_in(context_id, &source, &options))
     }
 
+    /// Replaces `navigator.languages` and the `Accept-Language` header.
+    pub fn set_languages(&self, languages: Vec<String>) -> EngineResult<Result<(), String>> {
+        self.with(move |page| page.set_languages(languages).map_err(|e| e.to_string()))
+    }
+
     /// Installs a binding in one named world, or in every world when `None`.
     pub fn add_binding_in(
         &self,

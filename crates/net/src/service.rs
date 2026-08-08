@@ -369,6 +369,16 @@ struct OpenRequest {
 }
 
 impl NetService {
+    /// Replaces the `Accept-Language` every later request carries.
+    ///
+    /// The header half of `Page::set_languages` (ADR-0034 D6). Deliberately
+    /// *not* a general per-page header API: `Network.setExtraHTTPHeaders` stays
+    /// refused, and widening this seam is how that refusal quietly stops
+    /// meaning anything.
+    pub fn set_accept_language(&self, value: &str) -> crate::NetResult<()> {
+        self.engine.request_defaults().set_accept_language(value)
+    }
+
     /// Builds a service over `policy`, returning it plus the receiver the
     /// page drains net events from.
     pub fn new(policy: ResourcePolicy) -> NetResult<(Self, Receiver<NetEvent>)> {

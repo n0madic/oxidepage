@@ -38,6 +38,12 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "Page.addScriptToEvaluateOnNewDocument" => add_init_script(connection, request),
         "Page.removeScriptToEvaluateOnNewDocument" => remove_init_script(connection, request),
         "Page.createIsolatedWorld" => create_isolated_world(connection, request),
+        // Accepted, not refused. There is no CSP enforcement anywhere in the
+        // engine, so there is nothing to bypass and nothing this could be
+        // lying about — the answer is already what the driver is asking for.
+        // Refusing would break `browser.newContext({ bypassCSP: true })` over a
+        // capability the page does not have in the first place.
+        "Page.setBypassCSP" => Ok(serde_json::json!({})),
         // The metrics are a pure layout read, so the handler lives beside the
         // rest of the geometry vocabulary in `domains::dom`.
         "Page.getLayoutMetrics" => crate::domains::dom::get_layout_metrics(connection, request),

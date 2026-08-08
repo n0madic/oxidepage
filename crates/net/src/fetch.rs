@@ -61,11 +61,16 @@ pub enum RequestMode {
     Navigate,
 }
 
-/// Immutable user-agent-controlled headers applied to every HTTP request.
+/// User-agent-controlled headers applied to every HTTP request.
 #[derive(Clone, Debug)]
 pub struct RequestDefaults {
     user_agent: HeaderValue,
-    accept_language: HeaderValue,
+    /// Behind a lock because a driver can change it at runtime
+    /// (`Emulation.setLocaleOverride`, ADR-0034 D6) while clones of this value
+    /// are already in flight on the net runtime's worker threads. The
+    /// `User-Agent` has no such setter — `setUserAgentOverride` is refused —
+    /// so it stays a plain value.
+    accept_language: Arc<Mutex<HeaderValue>>,
 }
 
 impl RequestDefaults {
@@ -79,8 +84,23 @@ impl RequestDefaults {
             .map_err(|_| NetError::protocol("invalid Accept-Language header value"))?;
         Ok(Self {
             user_agent,
-            accept_language,
+            accept_language: Arc::new(Mutex::new(accept_language)),
         })
+    }
+
+    /// Replaces the `Accept-Language` every later request will carry.
+    ///
+    /// The other half of `Page::set_languages`: `navigator.languages` and this
+    /// header are one setting with two faces, and moving only one is the
+    /// dishonesty `setUserAgentOverride` is refused for.
+    pub fn set_accept_language(&self, value: &str) -> NetResult<()> {
+        let parsed = HeaderValue::from_str(value)
+            .map_err(|_| NetError::protocol("invalid Accept-Language header value"))?;
+        *self
+            .accept_language
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = parsed;
+        Ok(())
     }
 }
 
@@ -88,7 +108,7 @@ impl Default for RequestDefaults {
     fn default() -> Self {
         Self {
             user_agent: HeaderValue::from_static("Mozilla/5.0 (compatible) OxidePage/0.1"),
-            accept_language: HeaderValue::from_static("en-US"),
+            accept_language: Arc::new(Mutex::new(HeaderValue::from_static("en-US"))),
         }
     }
 }
@@ -493,6 +513,12 @@ impl FetchEngine {
             total_bytes: Arc::new(AtomicU64::new(0)),
             request_defaults,
         }
+    }
+
+    /// The headers this engine applies to every request.
+    #[must_use]
+    pub fn request_defaults(&self) -> &RequestDefaults {
+        &self.request_defaults
     }
 
     /// Charges one request against the per-page request-count budget.
@@ -975,7 +1001,11 @@ impl FetchEngine {
         if !headers.contains_key(ACCEPT_LANGUAGE) {
             headers.insert(
                 ACCEPT_LANGUAGE,
-                self.request_defaults.accept_language.clone(),
+                self.request_defaults
+                    .accept_language
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
             );
         }
         if !headers.contains_key(REFERER)

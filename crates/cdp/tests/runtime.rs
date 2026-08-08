@@ -805,3 +805,32 @@ fn a_document_replacement_keeps_the_contexts_it_ran_in() {
         json!({ "objectId": &handle }),
     );
 }
+
+/// `Emulation.setLocaleOverride` moves **both** halves of the locale: what
+/// script reads and what the wire carries (ADR-0034 D6). Moving one is the
+/// dishonesty `setUserAgentOverride` is refused for.
+#[test]
+fn locale_override_moves_navigator_and_the_header() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+
+    client.call_on(
+        &session,
+        "Emulation.setLocaleOverride",
+        json!({ "locale": "de-DE" }),
+    );
+    let language = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "navigator.language + '|' + navigator.languages.join(',')",
+                "returnByValue": true }),
+    );
+    assert_eq!(language["result"]["value"], "de-DE|de-DE");
+
+    // Clearing has no prior locale to restore, so it is refused rather than
+    // silently doing nothing.
+    let error = client
+        .try_call_on(&session, "Emulation.setLocaleOverride", json!({}))
+        .expect_err("an empty locale is refused");
+    assert_eq!(error["code"], -32602);
+}
