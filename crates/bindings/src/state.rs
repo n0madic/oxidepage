@@ -988,6 +988,9 @@ pub struct PageShared {
     /// no script-created parser is open, which is the ordinary state and the
     /// one in which `write` still goes to the real parser.
     pub(crate) script_parser_buffer: RefCell<Option<String>>,
+    /// How much of [`Self::script_parser_buffer`] the task-boundary flush has
+    /// already committed, so an unclosed parser re-commits only what is new.
+    pub(crate) script_parser_flushed: Cell<usize>,
     /// `console.group` nesting depth. Grouping has no other observable effect
     /// in a headless console, so the depth *is* the feature — it rides on
     /// every `ConsoleMessage` and the CLI indents by it.
@@ -1302,6 +1305,7 @@ impl PageShared {
             parser_write_calls: Cell::new(0),
             parser_write_bytes: Cell::new(0),
             script_parser_buffer: RefCell::new(None),
+            script_parser_flushed: Cell::new(0),
             console_group_depth: Cell::new(0),
             current_script: Cell::new(None),
             fonts_loading: Cell::new(false),
@@ -1829,6 +1833,7 @@ impl WorldState {
     /// which is what a second `open()` means.
     pub fn open_script_parser(&self) {
         *self.page.script_parser_buffer.borrow_mut() = Some(String::new());
+        self.page.script_parser_flushed.set(0);
     }
 
     /// Whether a script-created parser is collecting.
@@ -1837,18 +1842,28 @@ impl WorldState {
         self.page.script_parser_buffer.borrow().is_some()
     }
 
-    /// Whether a script-created parser is open **and** has been written to.
+    /// The markup an **unclosed** script-created parser has accumulated, if it
+    /// has grown since the last time this asked.
     ///
-    /// The question the task-boundary flush actually asks: an open buffer with
-    /// nothing in it is an `open()` whose writes have not happened yet, and
-    /// committing that would replace the document with nothing.
+    /// The parser stays *open*: `document.open()` opens a document until
+    /// `close()` or a navigation, so a `write` from a later task must still
+    /// land. Taking the buffer here — which is what closing it means — made
+    /// `document.open(); write(a);` followed by `setTimeout(() => write(b))`
+    /// drop `b` on the floor, warn-and-noop, with no parser left to receive it.
+    ///
+    /// `None` when nothing is open, when nothing has been written, or when
+    /// nothing has been written *since the last flush* — the last being what
+    /// keeps the task boundary from re-committing the same markup every turn of
+    /// the loop.
     #[must_use]
-    pub fn script_parser_has_content(&self) -> bool {
-        self.page
-            .script_parser_buffer
-            .borrow()
-            .as_ref()
-            .is_some_and(|buffer| !buffer.is_empty())
+    pub fn unflushed_script_parser(&self) -> Option<String> {
+        let buffer = self.page.script_parser_buffer.borrow();
+        let buffer = buffer.as_ref()?;
+        if buffer.is_empty() || buffer.len() == self.page.script_parser_flushed.get() {
+            return None;
+        }
+        self.page.script_parser_flushed.set(buffer.len());
+        Some(buffer.clone())
     }
 
     /// Appends to the script-created parser, if one is open.
@@ -1874,6 +1889,7 @@ impl WorldState {
     /// `None` when none was open — `close()` on a document nobody opened is a
     /// no-op, not an error.
     pub fn take_script_parser(&self) -> Option<String> {
+        self.page.script_parser_flushed.set(0);
         self.page.script_parser_buffer.borrow_mut().take()
     }
 
@@ -1970,9 +1986,16 @@ impl WorldState {
         self.page.pending_parser_write.borrow_mut().clear();
         self.page.parser_write_calls.set(0);
         self.page.parser_write_bytes.set(0);
-        // A script-created parser belongs to the document that opened it; the
-        // replacement it was collecting *is* the incoming document.
-        self.page.script_parser_buffer.borrow_mut().take();
+        // A script-created parser belongs to the document that opened it, and a
+        // real navigation ends it. A *replacement* does not: the commit it is
+        // reacting to is the one this very parser produced, and script keeps
+        // the document open until `close()`. Clearing it there would close the
+        // parser as a side effect of its own first flush, and every later write
+        // would land nowhere.
+        if new_context {
+            self.page.script_parser_buffer.borrow_mut().take();
+            self.page.script_parser_flushed.set(0);
+        }
         // A group the outgoing document opened must not indent the next one.
         self.page.console_group_depth.set(0);
         // `pending_navigation` is deliberately *not* cleared. The commit path

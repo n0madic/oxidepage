@@ -831,9 +831,14 @@ impl PageHandle {
     /// nothing.
     pub fn resume(&self) -> EngineResult<()> {
         let result = self.with_control(Page::resume);
-        // Cleared *after* the job lands, the mirror of `suspend`: never report
-        // a page as running before it is.
-        self.0.suspended.store(false, Ordering::Release);
+        // Cleared *after* the job lands, and **only if it landed**: the mirror
+        // of `suspend`'s asymmetry, in the same safe direction. Clearing on a
+        // timed-out or dead page would report a still-frozen page as running,
+        // and a driver reading `waitingForDebugger: false` never sends the
+        // `runIfWaitingForDebugger` that would actually release it.
+        if result.is_ok() {
+            self.0.suspended.store(false, Ordering::Release);
+        }
         result
     }
 

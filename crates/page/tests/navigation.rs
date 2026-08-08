@@ -1322,3 +1322,41 @@ fn open_during_parsing_is_a_no_op_and_write_still_reaches_the_parser() {
         "via parser"
     );
 }
+
+/// A `document.open()` that is never closed stays open: a `write` from a later
+/// task still lands, and the document grows rather than losing everything after
+/// the first task boundary.
+///
+/// The task-boundary flush is a safety net for the legacy
+/// `open(); write();`-with-no-`close()` idiom. Taking the buffer there would
+/// *close* the parser, and a browser keeps the document open until `close()`.
+///
+/// One thing a browser does that this does not: the `Window` survives
+/// `document.open()`, so its timers do too. A replacement still resets them
+/// (ADR-0034 D2), so a `setTimeout` scheduled before the flush is discarded by
+/// it — which is why this drives two tasks by hand.
+#[test]
+fn an_unclosed_parser_keeps_taking_writes_from_later_tasks() {
+    let page = load_html_page("<!doctype html><p>old</p>", PageOptions::default()).expect("page");
+    // Two tasks, deliberately not a timer: a replacement still resets the
+    // page's timers and animation frames (see below), so a `setTimeout` here
+    // would be testing that limitation rather than this fix.
+    page.eval("document.open(); document.write('<p id=a>first</p>');")
+        .expect("eval");
+    page.settle(Duration::from_secs(5));
+    page.eval("document.write('<p id=b>second</p>');")
+        .expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("document.getElementById('a').textContent")
+            .unwrap(),
+        "first"
+    );
+    assert_eq!(
+        page.eval_to_string("document.getElementById('b').textContent")
+            .unwrap(),
+        "second",
+        "a write after the flush must still reach the open parser"
+    );
+}

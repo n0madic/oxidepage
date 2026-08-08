@@ -477,3 +477,40 @@ fn disabling_the_cache_makes_a_page_go_to_the_wire() {
 
     browser.close();
 }
+
+/// A navigation asked for while the page is suspended is **queued**, not run
+/// hollow (ADR-0034 D3).
+///
+/// `wait_until` returns instantly on a suspended page, so running the load
+/// would report a `WaitUntil::Load` success having awaited neither stylesheets
+/// nor subresources nor fired `load`. It happens on resume instead.
+#[test]
+fn a_navigation_on_a_suspended_page_waits_for_the_resume() {
+    let server = spawn_server();
+    let browser = browser();
+    let page = browser
+        .default_context()
+        .new_page(NewPageOptions {
+            suspended: true,
+            ..NewPageOptions::default()
+        })
+        .unwrap();
+
+    page.navigate(&server.url("/start.html"), WaitUntil::Load)
+        .unwrap()
+        .unwrap();
+    // Nothing loaded: the page is still on its opening document.
+    assert_ne!(title(&page), "start.html", "a suspended page must not load");
+
+    page.resume().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while title(&page) != "start.html" && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        title(&page),
+        "start.html",
+        "the queued load must run on resume"
+    );
+    browser.close();
+}

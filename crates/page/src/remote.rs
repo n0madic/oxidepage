@@ -767,6 +767,14 @@ impl Page {
     ) -> EvaluationResult {
         let deadline = std::time::Instant::now() + AWAIT_PROMISE_BUDGET;
         while !self.promise_is_settled(world, &promise) {
+            // A page that is closing or suspended runs none of its own work, so
+            // `settle` returns instantly and this loop would spin at 100% CPU
+            // for the whole budget — the ADR-0004 busy-wait, reached through
+            // the wait that was meant to be bounded. Nothing will settle the
+            // promise, so report it pending now rather than in ten seconds.
+            if self.cannot_progress() {
+                return self.described(world, &promise, options);
+            }
             if std::time::Instant::now() >= deadline {
                 // Still pending after the budget: report the promise itself
                 // rather than hanging the lane on one that never settles.

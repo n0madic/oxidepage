@@ -38,7 +38,17 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
     // `sessions.is_empty()` early-out, because a session detached while its
     // promise was pending still has a request id waiting for a reply.
     if let PageEvent::AwaitSettled { token, result } = event {
-        connection.resolve_await(token.0, crate::domains::runtime::evaluation_json(result));
+        // Only a connection with a session on this target can have issued the
+        // command, so only such a connection may *park* an answer it has not
+        // claimed yet. Every other connection on the endpoint sees this event
+        // too, and parking there would retain a whole `returnByValue` payload
+        // per deferred answer it will never claim.
+        let ours = !connection.sessions_for(target_id).is_empty();
+        connection.resolve_await(
+            token.0,
+            crate::domains::runtime::evaluation_json(result),
+            ours,
+        );
         return;
     }
     let sessions = connection.sessions_for(target_id);

@@ -204,6 +204,17 @@ fn create_target(connection: &Arc<Connection>, request: &Request) -> CommandResu
 
     let target_id = connection.registry.create_page(&context, options)?;
 
+    // **Before the navigation is posted**, not only before the reply. The post
+    // is fire-and-forget, so the page thread can start *and finish* that load
+    // while no session exists — and `dispatch_page_event` returns early on an
+    // empty session list, so `frameNavigated`, every `lifecycleEvent` and
+    // `loadEventFired` for the target's first document would be discarded. A
+    // driver told to "wait for `Page.loadEventFired`" would then wait forever.
+    //
+    // The event thread still reaches this target's `Created` signal; the claim
+    // set in `Connection::auto_attach` is what makes exactly one of them win.
+    connection.auto_attach(&target_id);
+
     if !blank && let Some(page) = connection.registry.page(&target_id) {
         // Fire and forget: `Target.createTarget` answers with a targetId, it
         // does not wait for the load. A driver that wants the load waits for
@@ -213,19 +224,6 @@ fn create_target(connection: &Arc<Connection>, request: &Request) -> CommandResu
             let _ = p.navigate(&url, WaitUntil::Load);
         })?;
     }
-
-    // **Before the reply, not after.** Chrome emits `attachedToTarget` while
-    // the target is being created, so a driver that awaits `createTarget` finds
-    // the session already registered. Playwright depends on it literally:
-    // `doCreateNewPage` reads `_crPages.get(targetId)._page` the instant the
-    // reply lands, and an attach that is still in flight makes that a
-    // `TypeError` on `undefined`. Leaving it to the connection's event thread
-    // is a race the reply usually lost and sometimes won — the flake the
-    // roadmap recorded as `context.newPage` occasionally timing out.
-    //
-    // The event thread still reaches this target's `Created` signal; the claim
-    // set in `Connection::auto_attach` is what makes exactly one of them win.
-    connection.auto_attach(&target_id);
 
     Ok(serde_json::json!({ "targetId": target_id }))
 }

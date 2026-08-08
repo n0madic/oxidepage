@@ -38,7 +38,14 @@ pub(crate) fn implementation(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue, J
 fn write_text(cx: &BindCx<'_>, this: NodeId, text: String) -> Result<(), JsThrow> {
     // A script-created parser takes precedence, and only on the rendered
     // document — that is the one `open()` can have opened (ADR-0034 D2).
-    if is_page_document(cx, this) {
+    //
+    // **Except while a parser-inserted script runs.** `open()` refuses to open
+    // a buffer there, but a buffer opened *earlier* — by a timer or an async
+    // script, both of which reach the event loop from inside `load_document` —
+    // would otherwise swallow the writes of the parser that is still streaming,
+    // and the buffer would then replace the document that parser built. Same
+    // failure as the `open()` guard prevents, arrived at from the other side.
+    if is_page_document(cx, this) && !cx.state.parser_script_is_active() {
         match cx.state.append_script_parser(&text) {
             Ok(true) => return Ok(()),
             Ok(false) => {}

@@ -2586,6 +2586,17 @@ impl Page {
         wait_until: WaitUntil,
         embedder: bool,
     ) -> Result<(), JsError> {
+        // A suspended page does not load (ADR-0034 D3). Running it here would
+        // *look* like it worked and be hollow: `wait_until` returns instantly
+        // while suspended, so `await_subresources` and `await_pending_stylesheets`
+        // would both no-op and the call would report a `WaitUntil::Load` load
+        // with no stylesheets, no images and no `load` event. Queued instead —
+        // the loop performs it on resume, which is what a driver that paused
+        // the target and then navigated it actually asked for.
+        if self.suspended.get() {
+            self.state.request_navigation(first);
+            return Ok(());
+        }
         let was_navigating = self.navigating.replace(true);
         let result = self.run_navigation_chain(first, wait_until, embedder);
         self.navigating.set(was_navigating);
@@ -3131,7 +3142,7 @@ impl Page {
             // only the ones about to be destroyed — a main-world promise
             // belongs to the dead document just as much, and nothing will ever
             // settle it.
-            self.fail_pending_awaits(None, "Execution context was destroyed.");
+            self.fail_pending_awaits("Execution context was destroyed.");
             // Every isolated world is destroyed and rebuilt against a fresh
             // global before any init script runs (ADR-0033 D9).
             self.reset_worlds_for_navigation();
@@ -3951,6 +3962,18 @@ impl Page {
     /// waiter and survive in the others. A fifth waiter added later gets all
     /// three rules — give up on close/suspend, fold in every deadline, stop
     /// when the command port disconnects — by construction.
+    /// Whether a *budgeted* wait can make progress at all.
+    ///
+    /// [`Self::stop_waiting`] is the give-up test, and it is also the answer to
+    /// "would looping here spin": `wait_until` returns instantly under it, so a
+    /// caller that loops around `settle` would burn a core for its whole budget
+    /// rather than park. Named separately because the caller reads better for
+    /// it, and because getting this wrong is invisible except as CPU.
+    #[must_use]
+    fn cannot_progress(&self) -> bool {
+        self.stop_waiting()
+    }
+
     fn wait_until(&self, budget: Duration, done: impl Fn(&Self) -> bool) {
         let end = Instant::now() + budget;
         loop {
@@ -4150,7 +4173,7 @@ impl Page {
         // Answer whatever is still parked on a promise before the port goes
         // (ADR-0034 D1). The thread is ending, so nothing will settle these —
         // and a driver told nothing waits out its own command timeout instead.
-        self.fail_pending_awaits(None, "Target closed");
+        self.fail_pending_awaits("Target closed");
         // Drop the port so a late `send` fails fast rather than queueing into a
         // channel nobody will read.
         self.cmd_rx.borrow_mut().take();
@@ -4183,13 +4206,26 @@ impl Page {
                 // it — the only path it would add coverage for is the `return`
                 // below, and a finalization deferred to the next entry costs
                 // nothing.
+                //
+                // These five are the driver's turn, in the order the main drain
+                // runs them. Every one of them is a reply the driver is waiting
+                // on, and dropping any reproduces inside D3 the deadlock D1 was
+                // written to remove:
+                //
+                // * commands — the session setup a pause exists to allow;
+                // * a utility world's promise jobs, because that is where a
+                //   driver's injected surface lives and nothing else pumps
+                //   them, so a deferred await there would never settle;
+                // * mutation records, because a driver's own evaluate mutates
+                //   the DOM and its injected observer must hear about it;
+                // * binding payloads, without which `exposeBinding` deadlocks
+                //   exactly as it did before D1 — the driver cannot resolve a
+                //   promise it has not been told about;
+                // * the awaits themselves.
                 let mut ran = self.drain_commands();
-                // **Both**, not just commands. A deferred await is a reply the
-                // driver is already waiting on, and skipping it here reproduces
-                // inside D3 the exact deadlock D1 was written to remove — worse,
-                // because not even the budget answer would arrive. A promise on
-                // a suspended page can still settle: a driver command or a net
-                // event is what settles it, and both are still delivered.
+                ran |= self.pump_non_main_jobs();
+                ran |= self.deliver_mutation_records();
+                ran |= self.drain_binding_events();
                 ran |= self.drain_pending_awaits();
                 if !ran || self.closing.get() || Instant::now() >= deadline {
                     return;
@@ -5294,14 +5330,13 @@ impl Page {
     /// `write()`s have not happened yet, and flushing that would replace the
     /// document with nothing and leave the writes with no parser to reach.
     fn flush_unclosed_script_parser(&self) {
-        // Asked before it is taken. Taking is what *closes* the parser, so the
-        // common case — an `open()` whose writes have not happened yet — would
-        // otherwise close and re-open the buffer on every turn of the loop, with
-        // a window in between where `script_parser_is_open` answers wrongly.
-        if !self.state.script_parser_has_content() {
-            return;
-        }
-        if let Some(html) = self.state.take_script_parser() {
+        // The parser stays **open**: a document opened by script stays open
+        // until `close()` or a navigation, so a `write` from a later task still
+        // has somewhere to go. Each flush commits everything written so far —
+        // the replacement is whole-document, so re-committing the accumulated
+        // buffer is what makes the document *grow* across tasks rather than
+        // lose everything after the first flush.
+        if let Some(html) = self.state.unflushed_script_parser() {
             self.state.queue_document_replacement(html);
         }
     }
@@ -5316,6 +5351,15 @@ impl Page {
     /// resolve gets an answer rather than silence.
     fn drain_pending_awaits(&self) -> bool {
         if self.pending_awaits.borrow().is_empty() {
+            return false;
+        }
+        // Nothing to answer *through*: `LoopHooks::emit` drops the record when
+        // no sink is installed, and dropping the entry with it would leave the
+        // caller holding a token that can never resolve. `defer_await` is a
+        // public option, so an embedder on the pull API can reach this. Left
+        // parked instead — the same rule `drain_binding_events` follows, and
+        // for the same reason.
+        if self.hooks.event_sink.borrow().is_none() {
             return false;
         }
         // Swapped out rather than held: describing a settled promise runs a
@@ -5349,21 +5393,21 @@ impl Page {
         answered
     }
 
-    /// Reports every parked await with `text` as its exception, releasing the
-    /// promises (ADR-0034 D1).
+    /// Reports **every** parked await with `text` as its exception, releasing
+    /// the promises (ADR-0034 D1).
     ///
-    /// Called wherever the answer can no longer arrive: the world is being torn
-    /// down for a navigation, or the page is closing. Both halves matter — the
-    /// driver would otherwise wait out its own timeout, and the `JsValue` would
-    /// outlive the runtime that owns it, which aborts the process.
-    fn fail_pending_awaits(&self, world: Option<oxidepage_bindings::WorldId>, text: &str) {
+    /// Called wherever the answer can no longer arrive: the document is being
+    /// replaced, or the page is closing. Both halves matter — the driver would
+    /// otherwise wait out its own timeout, and the `JsValue` would outlive the
+    /// runtime that owns it, which aborts the process.
+    ///
+    /// All worlds, not a chosen one: a commit renumbers the main world and
+    /// rebuilds the isolated ones together, and the page closes as a whole.
+    /// A per-world variant would be dead code until something tears down one
+    /// world alone, and dead code here reads as coverage that is not there.
+    fn fail_pending_awaits(&self, text: &str) {
         let parked = std::mem::take(&mut *self.pending_awaits.borrow_mut());
-        let mut kept = Vec::new();
         for entry in parked {
-            if world.is_some_and(|only| only != entry.world) {
-                kept.push(entry);
-                continue;
-            }
             self.hooks.emit(PageRecord::AwaitSettled {
                 token: entry.token,
                 result: oxidepage_bindings::remote::EvaluationResult {
@@ -5375,9 +5419,9 @@ impl Page {
                 },
             });
             // `entry` drops here, releasing the promise while its runtime is
-            // still alive.
+            // still alive. The emit may be dropped for want of a sink — the
+            // value still has to go, because its runtime is about to.
         }
-        self.pending_awaits.borrow_mut().extend(kept);
     }
 
     /// Dispatches `scroll` events for the targets whose position changed

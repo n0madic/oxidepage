@@ -132,6 +132,14 @@ runs a microtask checkpoint, so page script does run — and an evaluate from th
 driver runs page script by definition. The line is between the page's own
 *scheduling* and the driver's turn, not between script and no script.
 
+What stays on the page's side, and is therefore *not* reset for a replacement's
+sake: its timers and animation frames. HTML keeps the `Window` across
+`document.open()`, so a browser keeps those too; we still clear them, which
+means a `setTimeout` scheduled before an unclosed parser's first task-boundary
+flush is discarded by it. The script-created parser itself does survive its own
+replacement — it is open until `close()` — so a `write` from a later task still
+lands and the document grows.
+
 **A deferred await is on the driver's side of that line.** A suspended page
 still drains its parked awaits and still wakes for their budget — a reply the
 driver is already waiting on is not the page's own work, and leaving it to the

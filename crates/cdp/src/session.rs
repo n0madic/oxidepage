@@ -301,16 +301,22 @@ impl Connection {
 
     /// Delivers a settled await to the command that is waiting for it, or parks
     /// it for a lane that has not registered yet.
-    pub fn resolve_await(&self, token: u64, result: serde_json::Value) {
+    pub fn resolve_await(&self, token: u64, result: serde_json::Value, may_park: bool) {
         let waiter = {
             let mut book = self.lock_awaits();
             match book.waiting.remove(&token) {
                 Some(waiter) => Some(waiter),
-                None => {
+                // No waiter *yet*: the lane learns a command deferred only
+                // after `dispatch` returns, and the page can answer first. Park
+                // it — but only if this connection could plausibly be the one
+                // that asked (`may_park`); otherwise the answer belongs to
+                // somebody else's session and holding it is pure retention.
+                None if may_park => {
                     book.settled
                         .insert(token, (result.clone(), std::time::Instant::now()));
                     None
                 }
+                None => None,
             }
         };
         if let Some((request_id, session_id)) = waiter {
@@ -320,11 +326,14 @@ impl Connection {
 
     /// Takes the await book, sweeping answers nobody claimed in time.
     ///
-    /// Swept here rather than only where an orphan is inserted: once orphans
-    /// stop arriving — the other connection detached, or the page went quiet —
-    /// an insert-only sweep never revisits what is already there, and
-    /// `ORPHAN_AWAIT_TTL` would bound nothing. The results are whole
-    /// `returnByValue` payloads, so "nothing" can be large.
+    /// The sweep runs on every take rather than only where an orphan is
+    /// inserted, but be honest about what that bounds: the book is only ever
+    /// locked by `defer_reply` and `resolve_await`, so a connection that goes
+    /// completely quiet keeps whatever was parked at the end. The real bound is
+    /// that a connection now parks an answer **only for a target it holds a
+    /// session on** — an answer it might actually be owed — so the map cannot
+    /// grow with other drivers' traffic at all. The TTL is the backstop for the
+    /// remaining case: this connection's own command whose lane died.
     fn lock_awaits(&self) -> std::sync::MutexGuard<'_, AwaitBook> {
         let mut book = self.awaits.lock().unwrap_or_else(|e| e.into_inner());
         if !book.settled.is_empty() {
