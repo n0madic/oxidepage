@@ -495,6 +495,15 @@ impl PageHandle {
         self.with(move |page| page.evaluate_in(context_id, &source, &options))
     }
 
+    /// Whether the page is suspended, waiting for a debugger to release it.
+    ///
+    /// A **control** call for the same reason `execution_context_id` is: it is
+    /// read while building `Target.attachedToTarget`, on the event thread,
+    /// which must never block. It reads a single `Cell`.
+    pub fn is_suspended(&self) -> EngineResult<bool> {
+        self.with_control(Page::is_suspended)
+    }
+
     /// Replaces `navigator.languages` and the `Accept-Language` header.
     pub fn set_languages(&self, languages: Vec<String>) -> EngineResult<Result<(), String>> {
         self.with(move |page| page.set_languages(languages).map_err(|e| e.to_string()))

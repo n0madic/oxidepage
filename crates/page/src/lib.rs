@@ -3777,13 +3777,13 @@ impl Page {
         // port away would hit a `BorrowMutError`.
         let cmd_rx = self.cmd_rx.borrow().clone();
 
-        // A suspended page delivers nothing of its own — and a net event
-        // *does* run script (it resolves a `fetch`/XHR promise and runs a
-        // microtask checkpoint), so leaving this arm live would let a frozen
-        // page execute callbacks behind the driver's back. Deregistering
-        // rather than receive-and-discard: the events must still be there on
-        // resume, and a registered-but-undrained ready channel would spin.
-        let suspended = self.suspended.get();
+        // Every arm stays registered, suspended or not (ADR-0034 D3). A
+        // suspended page freezes its *own* sources — timers, rendering, queued
+        // navigations, subresource loads — but keeps serving the driver, and a
+        // net event is how a driver's own `fetch` interception makes progress.
+        // Deregistering the net arm was what made a paused page unable to
+        // finish the setup it was paused for.
+        let suspended = false;
         // Cloned out for the same reason `cmd_rx` is: the borrow must be
         // released before the park. A `crossbeam` receiver clone shares the
         // channel rather than duplicating the stream, and every clone feeds the
@@ -3863,11 +3863,11 @@ impl Page {
     /// `await_pending_stylesheets` park *inside* `load_document`, which holds
     /// borrows on the DOM and style engines and live parser handles. A job that
     /// evaluated script there would panic on those borrows.
+    /// A suspended page is deliberately **not** excluded (ADR-0034 D3): the
+    /// point of the pause is to let a driver configure the page before it
+    /// starts, so refusing its commands defeats it.
     fn can_run_jobs(&self) -> bool {
-        !self.in_job.get()
-            && !self.suspended.get()
-            && !self.navigating.get()
-            && !self.state.parsing()
+        !self.in_job.get() && !self.navigating.get() && !self.state.parsing()
     }
 
     /// Runs `job` now if it is safe to, otherwise parks it for the top of the
@@ -3996,12 +3996,14 @@ impl Page {
     /// - closing: a `settle` that ran its full budget after a close request
     ///   would still be executing script when the driver's bounded join gave up
     ///   and detached the thread;
-    /// - suspended: nothing can progress, so there is nothing to wait for — and
-    ///   worse, `next_deadline` keeps yielding the now-past deadline of a timer
-    ///   a suspended page will never fire, so each iteration would park on an
-    ///   elapsed instant and return instantly. That is a pegged core for the
-    ///   rest of the budget: the busy-wait ADR-0004 exists to forbid, reached
-    ///   through the change that was meant to freeze the page.
+    /// - suspended: the page's own work cannot progress, so a *budgeted* wait
+    ///   has nothing to wait for — and worse, `next_deadline` keeps yielding
+    ///   the now-past deadline of a timer a suspended page will never fire, so
+    ///   each iteration would park on an elapsed instant and return instantly.
+    ///   That is a pegged core for the rest of the budget: the busy-wait
+    ///   ADR-0004 exists to forbid, reached through the change that was meant
+    ///   to freeze the page. (`run_command_loop` is not a budgeted wait and
+    ///   keeps parking for commands — see [`Page::suspend`].)
     fn stop_waiting(&self) -> bool {
         self.closing.get() || self.suspended.get()
     }
@@ -4019,18 +4021,30 @@ impl Page {
         self.closing.get()
     }
 
-    /// Freezes the page: no timers fire, no network is delivered, no script
-    /// runs, and no ordinary job is serviced.
+    /// Freezes the page's **own** work: no timers fire, no rendering
+    /// opportunity runs, no queued navigation starts, no subresource load
+    /// begins, and no script of the page's own runs.
     ///
-    /// Control jobs and [`Page::resume`] keep working, which is what makes a
-    /// suspended page controllable. A page suspended from birth has nothing to
-    /// hold back — [`Page::new`] does not navigate ([`PageOptions::url`] only
-    /// seeds the document URL) — but this is deliberately not limited to that
-    /// case: a page suspended later would otherwise keep running
-    /// attacker-controlled script while refusing every driver command, which is
-    /// the opposite of what a driver asks for when it suspends.
+    /// The driver keeps being served (ADR-0034 D3). Embedder jobs run and net
+    /// events are delivered, because that is what
+    /// `Target.setAutoAttach { waitForDebuggerOnStart: true }` actually means:
+    /// a page paused *for* a debugger, whose whole purpose is to be inspected
+    /// and configured before it starts. Freezing the protocol too is what made
+    /// this unusable — a driver sends its entire session setup
+    /// (`addScriptToEvaluateOnNewDocument` among it) *before*
+    /// `Runtime.runIfWaitingForDebugger`, so a page that defers those commands
+    /// deadlocks its own setup until the command timeout.
     pub fn suspend(&self) {
         self.suspended.set(true);
+    }
+
+    /// Whether the page is [suspended](Page::suspend).
+    ///
+    /// Read by a driver to answer `waitingForDebugger` honestly rather than
+    /// from a flag it merely asked for.
+    #[must_use]
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.get()
     }
 
     /// Resumes a [suspended](Page::suspend) page. Jobs parked meanwhile run at
@@ -4139,8 +4153,16 @@ impl Page {
             // A suspended page runs nothing of its own. GC finalization above
             // is bookkeeping, not page work, and must keep running or the
             // wrapper cache would grow for as long as the page is held.
+            // A suspended page runs none of its **own** sources, but it still
+            // serves the driver (ADR-0034 D3) — so the command drain below
+            // runs and everything after it does not.
             if self.suspended.get() {
-                return;
+                let ran = self.drain_commands();
+                self.process_finalized();
+                if !ran || self.closing.get() || Instant::now() >= deadline {
+                    return;
+                }
+                continue;
             }
             // A script-created parser the task opened and wrote to but never
             // closed (ADR-0034 D2). `document.open(); document.write(…)` with

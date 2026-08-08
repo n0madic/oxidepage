@@ -583,7 +583,14 @@ impl Connection {
                 serde_json::json!({
                     "sessionId": session_id,
                     "targetInfo": info,
-                    "waitingForDebugger": self.wait_for_debugger.load(Ordering::Relaxed),
+                    // From the page, not from the flag the driver set: the
+                    // flag is a request, and a target attached *after* it
+                    // started is not waiting for anything (ADR-0034 D3).
+                    "waitingForDebugger": self
+                        .registry
+                        .page(target_id)
+                        .and_then(|page| page.is_suspended().ok())
+                        .unwrap_or(false),
                 }),
             ));
         }

@@ -218,7 +218,7 @@ fn a_closed_page_reports_closed_rather_than_hanging() {
 }
 
 #[test]
-fn a_suspended_page_runs_nothing_until_resumed() {
+fn a_suspended_page_serves_the_driver_but_runs_none_of_its_own_work() {
     let browser = browser();
     let page = browser
         .default_context()
@@ -227,25 +227,41 @@ fn a_suspended_page_runs_nothing_until_resumed() {
             ..NewPageOptions::default()
         })
         .unwrap();
+    assert!(page.is_suspended().unwrap());
 
-    // A short-timeout browser would be nicer, but the point is that the call
-    // does not complete: post it and check it stays unanswered.
-    let (tx, rx) = std::sync::mpsc::channel();
-    page.post(move |p| {
-        let _ = tx.send(p.eval_to_string("1 + 1").unwrap());
-    })
-    .unwrap();
-    assert!(
-        rx.recv_timeout(Duration::from_millis(300)).is_err(),
-        "a suspended page must not run ordinary work"
+    // The driver is still served (ADR-0034 D3). This is the whole point of
+    // `waitForDebuggerOnStart`: a driver sends its entire session setup —
+    // `addScriptToEvaluateOnNewDocument` among it — *before*
+    // `Runtime.runIfWaitingForDebugger`, so a page that deferred those commands
+    // would deadlock the setup it was paused for.
+    assert_eq!(
+        page.eval_to_string("1 + 1").unwrap().unwrap(),
+        "2",
+        "a suspended page must still answer the driver"
+    );
+
+    // …but the page's **own** work stays frozen: a timer set here must not
+    // fire while it is suspended.
+    page.eval_to_string("globalThis.t = 0; setInterval(() => { t++; }, 5); 'ok'")
+        .unwrap()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        page.eval_to_string("String(t)").unwrap().unwrap(),
+        "0",
+        "a suspended page must fire no timers"
     );
 
     page.resume().unwrap();
-    assert_eq!(
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("the parked job must run once resumed"),
-        "2"
-    );
+    assert!(!page.is_suspended().unwrap());
+    std::thread::sleep(Duration::from_millis(300));
+    let ticks: u32 = page
+        .eval_to_string("String(t)")
+        .unwrap()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(ticks > 0, "the timer must run once resumed, got {ticks}");
     browser.close();
 }
 

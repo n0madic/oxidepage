@@ -192,15 +192,13 @@ fn create_target(connection: &Arc<Connection>, request: &Request) -> CommandResu
         // whose `location.href` is `about:blank`, not the empty string.
         url: blank.then(|| String::from("about:blank")),
         viewport: viewport_override(params.width, params.height),
-        // **Not suspended, even under `waitForDebuggerOnStart`.** A suspended
-        // page defers every ordinary job until `resume()`, and a driver sends
-        // its whole session setup — `Page.addScriptToEvaluateOnNewDocument`
-        // among it — *before* `Runtime.runIfWaitingForDebugger`. So suspending
-        // here does not delay the page, it deadlocks the setup until the
-        // command timeout. Honouring the flag needs the setup path to be
-        // suspension-safe first; until then the page simply starts running,
-        // which is what a driver that never sends the flag already gets.
-        suspended: false,
+        // Honoured now that a suspended page still serves the driver
+        // (ADR-0034 D3). It could not be before: suspension deferred every
+        // ordinary job, and a driver sends its whole session setup —
+        // `Page.addScriptToEvaluateOnNewDocument` among it — *before*
+        // `Runtime.runIfWaitingForDebugger`, so pausing here deadlocked the
+        // setup instead of delaying the page.
+        suspended: connection.wait_for_debugger.load(Ordering::Relaxed),
         ..NewPageOptions::default()
     };
 
