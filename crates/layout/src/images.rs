@@ -124,7 +124,10 @@ pub fn inline_svg_markup(dom: &DomTree, svg: NodeId) -> String {
         }
         // Scoped to the referring `<svg>`'s own document: a `<use href="#x">`
         // must not reach into another browsing context for its definition.
-        let Some(def) = dom.element_by_id(dom.node_document(svg), id) else {
+        let Some(def) = dom
+            .containing_document(svg)
+            .and_then(|doc| dom.element_by_id(doc, id))
+        else {
             continue;
         };
         // Never inline the icon itself or one of its ancestors: that would

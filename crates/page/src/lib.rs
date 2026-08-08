@@ -62,6 +62,7 @@ use style::stylesheets::Origin;
 
 mod command;
 mod domnode;
+mod frame;
 pub mod node_handle;
 pub mod remote;
 mod render;
@@ -1553,8 +1554,15 @@ pub struct Page {
     /// world's runtime, and a `Persistent` outliving its `Runtime` aborts the
     /// process. `Drop` clears it first for the same reason.
     pending_awaits: RefCell<Vec<remote::PendingAwait>>,
+    /// The **top-level** browsing context's main world.
+    ///
+    /// A nested context has its own worlds; reach for them through
+    /// [`Self::frames`] rather than assuming this one (ADR-0035 D2).
     state: Rc<WorldState>,
+    /// The top-level browsing context's bindings state — `frames.main()`'s.
     shared: Rc<oxidepage_bindings::FrameShared>,
+    /// Every browsing context of this page, the top-level one first.
+    frames: Rc<frame::FrameTree>,
     worlds: Rc<worlds::WorldTable>,
     net: Rc<NetService>,
     net_rx: Receiver<NetEvent>,
@@ -1871,6 +1879,7 @@ impl Page {
         );
         let state =
             oxidepage_bindings::install_world(&realm, &shared, oxidepage_bindings::MAIN_WORLD, "")?;
+        let frames = Rc::new(frame::FrameTree::new(Rc::clone(&shared)));
         let world_table = Rc::new(worlds::WorldTable::new());
         world_table.push(oxidepage_bindings::MAIN_WORLD, "", realm, Rc::clone(&state));
         // The hop a host callback in one world uses to reach another. Weak, so
@@ -1910,6 +1919,7 @@ impl Page {
             pending_awaits: RefCell::new(Vec::new()),
             state,
             shared,
+            frames,
             worlds: world_table,
             net,
             net_rx,
@@ -5481,15 +5491,34 @@ impl Page {
     fn drain_style_updates(&self) {
         let updates = self.state.dom.borrow_mut().take_style_updates();
         for update in updates {
+            // The queue is tree-wide because the arena is; each entry belongs
+            // to the engine of the frame that renders its node document
+            // (ADR-0035 D1). An entry whose node has been freed, or whose
+            // frame has detached, has no engine to reach and is dropped.
+            let node = update.node();
+            let Some(frame) = self.frame_of(node) else {
+                continue;
+            };
             match update {
                 StyleUpdate::StyleElement(node) => self.upsert_inline_stylesheet(node),
                 StyleUpdate::StyleElementRemoved(node) | StyleUpdate::LinkElementRemoved(node) => {
-                    self.state.style.borrow_mut().remove_sheet_for_node(node);
+                    frame
+                        .shared()
+                        .style
+                        .borrow_mut()
+                        .remove_sheet_for_node(node);
                     self.link_sheets.borrow_mut().remove(&node);
                 }
                 StyleUpdate::LinkElement(node) => self.start_link_stylesheet(node),
             }
         }
+    }
+
+    /// The browsing context `node` belongs to, or `None` when its document is
+    /// not rendered (an inert `DOMParser` document, or a detached frame).
+    fn frame_of(&self, node: NodeId) -> Option<Rc<frame::Frame>> {
+        let dom = self.state.dom.borrow();
+        self.frames.of_node(&dom, node)
     }
 
     /// Builds (or replaces) the stylesheet for a connected `<style>` element
@@ -6350,11 +6379,23 @@ impl Page {
     // === Layout access (Phase 5) ===
 
     /// Flushes styles and brings the layout up to date (cheap when clean).
+    /// Reflows every browsing context, parents before their children.
+    ///
+    /// The order is load-bearing (ADR-0035 D6): a parent's layout fixes the
+    /// content box its child lays out into. It needs no second pass because an
+    /// `<iframe>` is sized as a replaced element — by CSS and attributes, never
+    /// by its content — so a child cannot change its parent.
+    ///
+    /// The `dom` borrow is taken and released **once per frame** rather than
+    /// held across the walk. Nesting it is how this becomes a `BorrowMutError`.
     fn flush_layout(&self) {
         self.drain_style_updates();
-        let mut dom = self.state.dom.borrow_mut();
-        let mut style = self.state.style.borrow_mut();
-        self.state.layout.borrow_mut().reflow(&mut dom, &mut style);
+        for frame in self.frames.pre_order() {
+            let shared = frame.shared();
+            let mut dom = shared.dom.borrow_mut();
+            let mut style = shared.style.borrow_mut();
+            shared.layout.borrow_mut().reflow(&mut dom, &mut style);
+        }
     }
 
     /// The current layout viewport, including its device pixel ratio.

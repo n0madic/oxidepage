@@ -349,3 +349,69 @@ fn document_element_is_per_document() {
         tree.document_element()
     );
 }
+
+/// A node inside a shadow tree is *owned* by its shadow root, not by the
+/// document — `attach_shadow` allocates the fragment as its own owner root. So
+/// `node_document` answers with a `DocumentFragment` there, and every consumer
+/// asking "which document is this in" has to cross the host instead
+/// (ADR-0035 D1).
+///
+/// Regression: routing style updates by `node_document` dropped every
+/// shadow-scoped `<style>` on the floor, and the stylo glue answered
+/// `is_html_document = false` for shadow content because a fragment carries no
+/// `DocumentData`.
+#[test]
+fn containing_document_crosses_shadow_hosts() {
+    let mut tree = parse("<div id='host'></div>");
+    let host = find_element(&tree, "div");
+    let root = tree
+        .attach_shadow(host, oxidepage_dom::shadow::ShadowMode::Open)
+        .expect("attach_shadow");
+    let inner = tree.create_element(html_name("span".into()), Vec::new());
+    tree.append_child(root, inner).unwrap();
+
+    // The owner is the shadow root, and that is deliberate…
+    assert_eq!(tree.node_document(inner), root);
+    assert_eq!(tree.node_document(root), root);
+    // …but the *document* is the page's, from either node.
+    assert_eq!(tree.containing_document(inner), Some(tree.document()));
+    assert_eq!(tree.containing_document(root), Some(tree.document()));
+    assert_eq!(tree.containing_document(host), Some(tree.document()));
+
+    // Nested shadow trees cross more than one host.
+    let inner_host = tree.create_element(html_name("div".into()), Vec::new());
+    tree.append_child(root, inner_host).unwrap();
+    let nested = tree
+        .attach_shadow(inner_host, oxidepage_dom::shadow::ShadowMode::Open)
+        .expect("nested attach_shadow");
+    let deep = tree.create_element(html_name("b".into()), Vec::new());
+    tree.append_child(nested, deep).unwrap();
+    assert_eq!(tree.containing_document(deep), Some(tree.document()));
+
+    // A `createDocumentFragment()` is *owned* by the document that created it
+    // — unlike a shadow root — so its contents report that document even
+    // though they are disconnected.
+    let fragment = tree.create_document_fragment();
+    let loose = tree.create_element(html_name("i".into()), Vec::new());
+    tree.append_child(fragment, loose).unwrap();
+    assert_eq!(tree.containing_document(loose), Some(tree.document()));
+    assert!(!tree.node(loose).is_connected());
+}
+
+/// A shadow tree hanging off a *second* document reports that document, not
+/// the page's — the walk crosses hosts, it does not fall back to slot 0.
+#[test]
+fn containing_document_answers_the_owning_document() {
+    let mut tree = parse("<div></div>");
+    let doc2 = tree.create_document(DocumentData::html("https://other.example/".to_owned()));
+    let host = tree.create_element_in(doc2, html_name("div".into()), Vec::new());
+    tree.append_child(doc2, host).unwrap();
+    let root = tree
+        .attach_shadow(host, oxidepage_dom::shadow::ShadowMode::Open)
+        .expect("attach_shadow");
+    let inner = tree.create_element_in(doc2, html_name("span".into()), Vec::new());
+    tree.append_child(root, inner).unwrap();
+
+    assert_eq!(tree.containing_document(inner), Some(doc2));
+    assert_ne!(tree.containing_document(inner), Some(tree.document()));
+}

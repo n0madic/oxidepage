@@ -64,6 +64,20 @@ pub enum StyleUpdate {
     LinkElementRemoved(NodeId),
 }
 
+impl StyleUpdate {
+    /// The element this update is about. May be stale — the queue holds
+    /// snapshots (L3).
+    #[must_use]
+    pub fn node(self) -> NodeId {
+        match self {
+            Self::StyleElement(node)
+            | Self::StyleElementRemoved(node)
+            | Self::LinkElement(node)
+            | Self::LinkElementRemoved(node) => node,
+        }
+    }
+}
+
 /// Enables the stylo layout-feature prefs before any CSS parsing happens.
 ///
 /// Inline `style=""` attributes are parsed during *document* parsing, which
@@ -158,6 +172,13 @@ pub const DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: u16 = 0x20;
 /// One shadow root's slot lookup: the `structure_version` it was built at,
 /// plus the first `<slot>` per name in tree order.
 type SlotMap = (u64, HashMap<String, NodeId>);
+
+/// Deepest chain of shadow hosts [`DomTree::containing_document`] will follow.
+///
+/// Shadow trees nest without limit in principle; the walk is bounded so a
+/// cycle — which the tree's invariants forbid, but which a bug could create —
+/// answers `None` instead of hanging the page thread.
+const MAX_SHADOW_HOST_HOPS: usize = 256;
 
 /// The single source of truth for document state.
 pub struct DomTree {
@@ -465,6 +486,17 @@ impl DomTree {
     #[must_use]
     pub fn url_extra_data(&self) -> &UrlExtraData {
         self.url_extra_data_of(self.document)
+    }
+
+    /// The URL data of the document `node` is in, for relative-URL resolution
+    /// in its style attributes. Falls back to the top-level document's for a
+    /// node that belongs to no document.
+    #[must_use]
+    pub fn url_extra_data_of_node(&self, node: NodeId) -> &UrlExtraData {
+        match self.containing_document(node) {
+            Some(doc) => self.url_extra_data_of(doc),
+            None => self.url_extra_data(),
+        }
     }
 
     /// `doc`'s URL as stylo's URL data (for relative-URL resolution).
@@ -1061,9 +1093,39 @@ impl DomTree {
 
     /// The node document of `id` — `id` itself when it is a Document. This is
     /// the "node document" every spec algorithm means.
+    ///
+    /// **A node inside a shadow tree is owned by its shadow root**, not by the
+    /// document: `attach_shadow` allocates the fragment as its own owner root
+    /// so an unattached shadow tree stays self-contained. So this can answer
+    /// with a `DocumentFragment`. When the question is "which *document* is
+    /// this in", which is what style, layout and every resource hook mean,
+    /// use [`Self::containing_document`].
     #[must_use]
     pub fn node_document(&self, id: NodeId) -> NodeId {
         self.node(id).owner.unwrap_or(id)
+    }
+
+    /// The Document `id` is in, crossing shadow boundaries — HTML's node
+    /// document, and the browsing context's document when there is one.
+    ///
+    /// A `createDocumentFragment()` or `<template>` contents *is* owned by the
+    /// document that created it, so its nodes answer with that document even
+    /// though they are disconnected — only a shadow root is its own owner
+    /// root, and that is the hop this crosses. `None` is therefore reserved
+    /// for a stale id and for an unattached shadow tree whose host has been
+    /// freed.
+    #[must_use]
+    pub fn containing_document(&self, id: NodeId) -> Option<NodeId> {
+        let mut current = self.get(id)?.owner.unwrap_or(id);
+        // Shadow roots nest, so this is a loop rather than one hop.
+        for _ in 0..MAX_SHADOW_HOST_HOPS {
+            if self.get(current)?.data().kind() == NodeKind::Document {
+                return Some(current);
+            }
+            let host = self.shadow_host(current)?;
+            current = self.get(host)?.owner.unwrap_or(host);
+        }
+        None
     }
 
     /// Per-document payload. `None` if `doc` is not a Document node.
@@ -1268,10 +1330,14 @@ impl DomTree {
         if is_potential_custom {
             data.custom_state = CustomElementState::Undefined;
         }
-        // `owner` *is* the new element's node document, so a `<style>` or a
-        // `style=""` in a nested browsing context resolves against that frame's
-        // address rather than the top-level one (ADR-0035 D1).
-        let url_extra = self.url_extra_data_of(owner).clone();
+        // A `style=""` resolves against the address of the document the
+        // element belongs to, so a nested browsing context uses its own rather
+        // than the top-level one (ADR-0035 D1). `owner` may be a shadow root,
+        // whose document is its host's.
+        let url_extra = self.containing_document(owner).map_or_else(
+            || self.url_extra_data().clone(),
+            |doc| self.url_extra_data_of(doc).clone(),
+        );
         data.refresh_selector_caches(&self.style_lock, &url_extra);
         let node = self
             .arena
@@ -3137,7 +3203,7 @@ impl DomTree {
         let attr_local = name.local.clone();
         let old_id = self.indexed_id(element, &attr_local);
         let lock = self.style_lock.clone();
-        let url = self.url_extra_data_of(self.node_document(element)).clone();
+        let url = self.url_extra_data_of_node(element).clone();
         if let Some(el) = self.arena.node_mut(element).as_element_mut() {
             match el.attrs.iter_mut().find(|a| a.name == name) {
                 Some(attr) => attr.value = value,
@@ -3198,7 +3264,7 @@ impl DomTree {
         self.snapshot_element(element);
         let old_id = self.indexed_id(element, &name.local);
         let lock = self.style_lock.clone();
-        let url = self.url_extra_data_of(self.node_document(element)).clone();
+        let url = self.url_extra_data_of_node(element).clone();
         if let Some(el) = self.arena.node_mut(element).as_element_mut() {
             el.attrs.retain(|a| a.name != *name);
             el.refresh_selector_caches(&lock, &url);

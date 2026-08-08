@@ -751,7 +751,7 @@ impl DomTree {
             // An explicit `form=""` attribute detaches the control from any
             // ancestor form, even when it names nothing.
             return self
-                .element_by_id(self.node_document(id), &form_id)
+                .element_by_id(self.containing_document(id)?, &form_id)
                 .filter(|&f| self.is_html_element(f, &local_name!("form")));
         }
         self.ancestors(id)
@@ -844,7 +844,7 @@ impl DomTree {
         let el = self.get(label)?.as_element()?;
         if let Some(target) = el.attr_str(local_name!("for")) {
             return self
-                .element_by_id(self.node_document(label), &target)
+                .element_by_id(self.containing_document(label)?, &target)
                 .filter(|&t| self.is_labelable(t));
         }
         self.inclusive_descendants(label)

@@ -84,7 +84,12 @@ impl TDocument for NodeRef<'_> {
     }
 
     fn is_html_document(&self) -> bool {
-        self.tree().is_html_document(self.node)
+        // `self.node` is a *document* here (this is `TDocument`), but it may be
+        // a shadow root standing in for one — `owner_doc` crosses the host, so
+        // ask the document that walk lands on.
+        let tree = self.tree();
+        tree.containing_document(self.node)
+            .is_some_and(|doc| tree.is_html_document(doc))
     }
 
     fn quirks_mode(&self) -> QuirksMode {
@@ -161,7 +166,15 @@ impl TNode for NodeRef<'_> {
         // The node's *own* document, not the top-level one: with nested
         // browsing contexts they differ, and stylo asks this to reach the
         // quirks mode a frame's own cascade must use (ADR-0035 D1).
-        self.with(self.tree().node_document(self.node))
+        //
+        // `containing_document` rather than `node_document`, because a node in
+        // a shadow tree is owned by its shadow root — which is not a document
+        // and would answer every `TDocument` method with a default.
+        let tree = self.tree();
+        let doc = tree
+            .containing_document(self.node)
+            .unwrap_or_else(|| tree.document());
+        self.with(doc)
     }
 
     fn is_in_document(&self) -> bool {
@@ -467,7 +480,8 @@ impl<'a> TElement for NodeRef<'a> {
         // A `<body>` counts only as a direct child of *its own* document's
         // root `<html>`.
         let tree = self.tree();
-        tree.document_element_of(tree.node_document(self.node))
+        tree.containing_document(self.node)
+            .and_then(|doc| tree.document_element_of(doc))
             .and_then(|root| self.raw().parent().map(|p| p == root))
             .unwrap_or(false)
     }
