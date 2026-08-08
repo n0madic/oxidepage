@@ -219,10 +219,26 @@ requests a driver had been promised it would see; refusing it broke
 Classified at the commit, where the outgoing and incoming URLs are both still
 known, and stored on the frame. The distinction is derived from the two URLs
 rather than from how the navigation was requested: a change confined to the
-fragment is `"fragment"`, anything else is `"historyApi"`. That mislabels a
-`pushState` that only changes the fragment — the one case the two-URL test
-cannot see — and is recorded on `SameDocumentType` rather than left to be
-rediscovered.
+fragment is `"fragment"`, anything else is `"historyApi"`. Chrome's third value,
+`"other"`, is never emitted.
+
+Two limits, both on `SameDocumentType` rather than left to be rediscovered:
+
+- It mislabels a `pushState` that changes **only** the fragment, which is the
+  one case the two-URL test cannot see.
+- **`pushState`/`replaceState` emit no `Page.navigatedWithinDocument` at all**,
+  because they record no navigation milestone — `shared_history_push` moves the
+  document URL and the history entry without going through
+  `commit_same_document`. So `"historyApi"` is reached in practice only by a
+  same-document *traversal*. Chrome fires the event for both. This is a real
+  gap for a single-page app whose router pushes state, and it is a page-crate
+  change rather than a protocol one, so it is recorded here and left to the
+  stage that wants it.
+
+`Page.getFrameTree` also stopped answering with a frame of empty strings for a
+target destroyed under a live session; it answers `no_target` instead. A
+fabricated frame is the "fake" P6 forbids, and the window is narrow — the
+`targetDestroyed` signal racing an in-flight command.
 
 ### D11. `page.waitForSelector` was a harness bug
 

@@ -725,6 +725,12 @@ code (ADR-0034 D5). `Emulation.setTimezoneOverride` and
 Geolocation API to override; `setLocaleOverride` **is** implemented, and moves
 `navigator.languages` and `Accept-Language` together or not at all.
 
+**Same-document navigation.** `Page.navigatedWithinDocument` carries a
+`navigationType`, but `history.pushState`/`replaceState` record no navigation
+milestone at all, so the event fires only for fragment navigations and
+same-document traversals — never for a router that pushes state. Chrome fires
+it for those too (ADR-0034 D10).
+
 **`document.open()`.** The replacement is buffered, not parsed incrementally:
 markup written between `open()` and `close()` becomes visible at `close()` (or
 at the task boundary, for the legacy no-`close()` idiom), and scripts in it do
