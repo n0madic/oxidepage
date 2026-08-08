@@ -524,7 +524,7 @@ impl Page {
                             scope.coerce_string(value).unwrap_or_default()
                         });
                         let state = oxidepage_bindings::cx::world_state(scope)?;
-                        let mut queue = state.page.binding_calls.borrow_mut();
+                        let mut queue = state.frame.binding_calls.borrow_mut();
                         // Bounded: a page that calls its binding in a loop must
                         // not grow this without limit while the driver is busy.
                         if queue.len() >= MAX_BINDING_CALLS {
@@ -553,7 +553,7 @@ impl Page {
     #[must_use]
     pub fn drain_binding_calls(&self) -> Vec<oxidepage_bindings::BindingCall> {
         self.state
-            .page
+            .frame
             .binding_calls
             .borrow_mut()
             .drain(..)

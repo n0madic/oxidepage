@@ -58,7 +58,7 @@ pub(crate) fn rect_data(rect: oxidepage_base::Rect) -> RectData {
 pub(crate) fn note_scroll(cx: &BindCx<'_>, target: Option<NodeId>, changed: bool) {
     if changed {
         cx.state
-            .page
+            .frame
             .pending_scroll_targets
             .borrow_mut()
             .push(target);

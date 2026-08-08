@@ -533,7 +533,7 @@ pub(crate) fn current_script(cx: &BindCx<'_>, this: NodeId) -> Result<Option<Nod
         // No script ever runs in a document without a browsing context.
         return Ok(None);
     }
-    Ok(cx.state.page.current_script.get())
+    Ok(cx.state.frame.current_script.get())
 }
 
 fn title_element(cx: &BindCx<'_>, document: NodeId) -> Option<NodeId> {

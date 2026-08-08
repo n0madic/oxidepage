@@ -277,14 +277,14 @@ pub fn describe(cx: &BindCx<'_>, value: &JsValue, options: RemoteOptions<'_>) ->
 
     // The id is minted page-wide and the handle is filed in **this** world's
     // store, so `Runtime.callFunctionOn` can route back here (ADR-0033 D10).
-    let id = cx.state.page.next_object_id();
+    let id = cx.state.frame.next_object_id();
     object.object_id = cx.state.remote_objects.borrow_mut().insert(
         id,
         value.clone(),
         options.group.map(str::to_owned),
     );
     if object.object_id.is_some() {
-        cx.state.page.note_object_world(id, cx.state.id);
+        cx.state.frame.note_object_world(id, cx.state.id);
     }
     // `None` here means the table is full. Returning a `RemoteObject` with no
     // `objectId` would hand the caller a handle-shaped answer that names

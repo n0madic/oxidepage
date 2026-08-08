@@ -337,7 +337,7 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
     let id = cx.state.hooks.start_fetch(request);
     // Tag the request with this world, so its completion is delivered here
     // and not to whichever world happens to be current (ADR-0033 D10).
-    cx.state.page.note_net_world(id, cx.state.id);
+    cx.state.frame.note_net_world(id, cx.state.id);
     {
         let mut x = this.borrow_mut();
         x.request_id = Some(id);

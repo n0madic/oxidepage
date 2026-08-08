@@ -19,7 +19,7 @@ fn ms(value: f64) -> f64 {
 macro_rules! timing_getter {
     ($name:ident, $field:ident) => {
         pub(crate) fn $name(cx: &BindCx<'_>, _this: u64) -> Result<f64, JsThrow> {
-            Ok(ms(cx.state.page.timing.borrow().$field))
+            Ok(ms(cx.state.frame.timing.borrow().$field))
         }
     };
 }

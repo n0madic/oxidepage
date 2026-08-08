@@ -176,7 +176,7 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         | "WheelEvent" | "PointerEvent" | "KeyboardEvent" | "FocusEvent" | "InputEvent"
         | "CompositionEvent" | "ProgressEvent" => "this_event",
         // Brands with no state of their own: a Location *is* the document URL,
-        // and the session history lives in `PageShared::history`.
+        // and the session history lives in `FrameShared::history`.
         "Location" => "this_location",
         "History" => "this_history",
         "NodeList" => "this_node_list",

@@ -63,6 +63,20 @@ define_id! {
     RequestId
 }
 
+define_id! {
+    /// Identifies a browsing context — the page's top-level one, or the nested
+    /// one an `<iframe>` owns (ADR-0035).
+    ///
+    /// Generation-checked like the rest, and for the same reason: a frame id
+    /// outlives its frame. It is stored in listener keys
+    /// (`EventTargetKey::Window`), in each world's state, and in the CDP frame
+    /// registry, so a detached frame whose slot was reused would silently make
+    /// a stale id name an unrelated browsing context.
+    ///
+    /// It does not cross the process boundary — CDP mints an opaque string.
+    FrameId
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -966,7 +966,7 @@ fn invoke_listeners_in_every_world(
     );
     let event_type = event.borrow().event_type.clone();
     let worlds = match scope {
-        DispatchScope::EveryWorld => cx.state.page.world_ids(),
+        DispatchScope::EveryWorld => cx.state.frame.world_ids(),
         DispatchScope::ThisWorld => vec![cx.state.id],
     };
     for world in worlds {
@@ -980,13 +980,13 @@ fn invoke_listeners_in_every_world(
         }
         // A cheap probe before entering: nothing is minted, no scope is
         // entered, and a page whose utility worlds are idle pays only this.
-        if !cx.state.page.world_has_listener(world, key, &event_type) {
+        if !cx.state.frame.world_has_listener(world, key, &event_type) {
             continue;
         }
         // Another world's listener throwing is that world's script error, and
         // is reported there by `invoke_listeners`. It must not abort the
         // dispatch for the world that started it.
-        cx.state.page.in_world(world, |wcx| {
+        cx.state.frame.in_world(world, |wcx| {
             if let Ok(value) = world_event_wrapper(wcx, event, wrappers) {
                 let _ = invoke_listeners(wcx, key, &value, event, phase);
             }

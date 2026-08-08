@@ -291,7 +291,7 @@ pub struct HistoryEntry {
     ///
     /// **Not a `JsValue`** (ADR-0033 D3). The session history is page-level and
     /// outlives any one world, so holding a live handle would both pin one
-    /// world's object graph from `PageShared` — the invariant that keeps
+    /// world's object graph from `FrameShared` — the invariant that keeps
     /// teardown from aborting in `JS_FreeRuntime` — and make `history.state`
     /// readable in exactly one world. Serialized, every world materializes its
     /// own copy, which is also what the spec's structured clone implies.
@@ -901,9 +901,9 @@ pub struct BindingCall {
 /// Enters another world from a host callback (ADR-0033 D4).
 ///
 /// `bindings` must not depend on `page`, so the page's world table implements
-/// this and [`PageShared`] holds a [`Weak`] to it. The `Weak` is load-bearing:
+/// this and [`FrameShared`] holds a [`Weak`] to it. The `Weak` is load-bearing:
 /// a strong edge would close the `Page` → `WorldTable` → realm → `WorldState`
-/// → `PageShared` cycle, leak every runtime, and turn a dropped page into the
+/// → `FrameShared` cycle, leak every runtime, and turn a dropped page into the
 /// `JS_FreeRuntime` abort.
 pub trait WorldEnter {
     /// Runs `f` with a [`crate::cx::BindCx`] bound to `world`.
@@ -929,17 +929,24 @@ pub trait WorldEnter {
     ) -> bool;
 }
 
-/// Page-level bindings state: everything that is one-per-*document* rather
-/// than one-per-*world* (ADR-0033 D3).
+/// One browsing context's bindings state: everything that is one-per-*document*
+/// rather than one-per-*world* (ADR-0033 D3).
+///
+/// ADR-0033 named this `PageShared`, because a page had exactly one browsing
+/// context and therefore one document. The partition it drew was already the
+/// right one; nested browsing contexts (ADR-0035 D2) simply make it plural, so
+/// a page now holds one of these per frame. What is genuinely page-wide —
+/// context and object id minting, driver registrations, the connectivity log —
+/// moves to `PageGlobal`.
 ///
 /// **Holds no `JsValue`.** That is the invariant that makes teardown tractable
 /// with one `Runtime` per world: a `Persistent` outliving its runtime aborts
-/// the process in `JS_FreeRuntime`, and a page-level container could otherwise
+/// the process in `JS_FreeRuntime`, and a shared container could otherwise
 /// hold values from several worlds at once. `SessionHistory` was the one
-/// violator and now stores serialized state (D3/D5); the only page-level owner
+/// violator and now stores serialized state (D3/D5); the only shared owner
 /// of JS values left is `LoopHooks`, whose timer and rAF callbacks each carry
 /// the world that created them.
-pub struct PageShared {
+pub struct FrameShared {
     /// The document tree, shared with the parser during loads.
     ///
     /// The arena is shared by every browsing context of the page; **this**
@@ -1093,7 +1100,7 @@ pub struct PageShared {
     pub(crate) object_worlds: RefCell<HashMap<u64, WorldId>>,
     /// Reaches another world's realm from a host callback. **Weak**: a strong
     /// edge would close the `Page -> WorldTable -> realm -> WorldState ->
-    /// PageShared` cycle and leak every runtime (D4).
+    /// FrameShared` cycle and leak every runtime (D4).
     pub(crate) enter: RefCell<Weak<dyn WorldEnter>>,
 }
 
@@ -1107,7 +1114,7 @@ pub struct PageShared {
 /// through [`WorldState::page`].
 pub struct WorldState {
     /// State shared with every other world of this page.
-    pub page: Rc<PageShared>,
+    pub frame: Rc<FrameShared>,
     /// This world's dense index; `MAIN_WORLD` for the page's own world.
     pub id: WorldId,
     /// `""` for the main world, else the name a driver created it under.
@@ -1283,7 +1290,7 @@ pub struct WorldState {
     pub(crate) pending_conn: RefCell<HashMap<NodeId, JsValue>>,
 }
 
-impl PageShared {
+impl FrameShared {
     /// Builds the page-level half, including the engines every world shares.
     #[must_use]
     pub fn new(
@@ -1519,7 +1526,7 @@ impl PageShared {
     }
 }
 
-/// Uninhabited stand-in so `PageShared::enter` can start as a dangling `Weak`
+/// Uninhabited stand-in so `FrameShared::enter` can start as a dangling `Weak`
 /// before the world table exists. `Weak::new` needs a sized type; this is never
 /// constructed.
 pub(crate) enum NoWorlds {}
@@ -1542,18 +1549,18 @@ impl WorldEnter for NoWorlds {
 }
 
 impl WorldState {
-    /// Builds one world over the shared page state.
+    /// Builds one world over the shared state of a browsing context.
     #[must_use]
-    pub fn new(page: Rc<PageShared>, id: WorldId, name: String) -> Self {
-        let context_id = page.next_context_id();
+    pub fn new(frame: Rc<FrameShared>, id: WorldId, name: String) -> Self {
+        let context_id = frame.next_context_id();
         Self {
-            dom: Rc::clone(&page.dom),
-            style: Rc::clone(&page.style),
-            layout: Rc::clone(&page.layout),
-            hooks: Rc::clone(&page.hooks),
-            navigator: Rc::clone(&page.navigator),
-            screen: Rc::clone(&page.screen),
-            page,
+            dom: Rc::clone(&frame.dom),
+            style: Rc::clone(&frame.style),
+            layout: Rc::clone(&frame.layout),
+            hooks: Rc::clone(&frame.hooks),
+            navigator: Rc::clone(&frame.navigator),
+            screen: Rc::clone(&frame.screen),
+            frame,
             id,
             name,
             context_id: Cell::new(context_id),
@@ -1603,7 +1610,7 @@ impl WorldState {
     /// This document's identity among the subscribers of its storage areas.
     #[must_use]
     pub fn storage_subscriber(&self) -> crate::storage::StorageSubscriber {
-        self.page.storage_subscriber
+        self.frame.storage_subscriber
     }
 
     /// True for the page's own world. Custom elements, inline event handlers,
@@ -1692,7 +1699,7 @@ impl WorldState {
         // life of the page. Isolated worlds are pruned at teardown; this is the
         // main world's equivalent.
         for id in self.remote_objects.borrow().ids() {
-            self.page.forget_object(id);
+            self.frame.forget_object(id);
         }
         self.remote_objects.borrow_mut().clear();
         self.pending_consts.borrow_mut().clear();
@@ -1711,19 +1718,19 @@ impl WorldState {
 
     /// Marks the parser as owning handles into the tree (suspends freeing).
     pub fn set_parsing(&self, parsing: bool) {
-        self.page.parsing.set(parsing);
+        self.frame.parsing.set(parsing);
     }
 
     /// True while the parser holds handles into the tree.
     #[must_use]
     pub fn parsing(&self) -> bool {
-        self.page.parsing.get()
+        self.frame.parsing.get()
     }
 
     /// See [`WorldState::whole_document_visible`]. Set by the embedder before
     /// the page runs, so the observers script installs at startup see it.
     pub fn set_whole_document_visible(&self, whole: bool) {
-        self.page.whole_document_visible.set(whole);
+        self.frame.whole_document_visible.set(whole);
     }
 
     /// The time origin behind [`WorldState::epoch_now_ms`]: the monotonic base
@@ -1734,7 +1741,7 @@ impl WorldState {
     /// lines and loop-emitted events on timescales that cannot be merged.
     #[must_use]
     pub fn time_origin(&self) -> (std::time::Instant, f64) {
-        (self.page.start, self.page.time_origin_epoch_ms)
+        (self.frame.start, self.frame.time_origin_epoch_ms)
     }
 
     /// A monotonic Unix-epoch timestamp in milliseconds (time origin plus the
@@ -1742,14 +1749,14 @@ impl WorldState {
     /// milestones stay ordered even if the wall clock steps).
     #[must_use]
     pub fn epoch_now_ms(&self) -> f64 {
-        self.page.time_origin_epoch_ms + self.page.start.elapsed().as_secs_f64() * 1000.0
+        self.frame.time_origin_epoch_ms + self.frame.start.elapsed().as_secs_f64() * 1000.0
     }
 
     /// Records a document-lifecycle milestone on [`WorldState::timing`].
     /// `document.readyState`.
     #[must_use]
     pub fn ready_state(&self) -> ReadyState {
-        self.page.ready_state.get()
+        self.frame.ready_state.get()
     }
 
     /// Records a lifecycle milestone: the timing entry `PerformanceTiming`
@@ -1763,12 +1770,12 @@ impl WorldState {
         use crate::state::TimingMilestone as M;
         let now = self.epoch_now_ms();
         match milestone {
-            M::NavigationStart => self.page.ready_state.set(ReadyState::Loading),
-            M::DomInteractive => self.page.ready_state.set(ReadyState::Interactive),
-            M::DomCompleteLoadStart => self.page.ready_state.set(ReadyState::Complete),
+            M::NavigationStart => self.frame.ready_state.set(ReadyState::Loading),
+            M::DomInteractive => self.frame.ready_state.set(ReadyState::Interactive),
+            M::DomCompleteLoadStart => self.frame.ready_state.set(ReadyState::Complete),
             _ => {}
         }
-        let mut t = self.page.timing.borrow_mut();
+        let mut t = self.frame.timing.borrow_mut();
         match milestone {
             M::NavigationStart => {
                 // Reset the previous document's timing, then collapse the
@@ -1801,7 +1808,7 @@ impl WorldState {
 
     /// Marks entry/exit of the parser-inserted classic script task.
     pub fn set_parser_script_active(&self, active: bool) {
-        self.page.parser_script_active.set(active);
+        self.frame.parser_script_active.set(active);
     }
 
     /// Queues markup for the suspended HTML parser. `Ok(false)` means the
@@ -1809,26 +1816,26 @@ impl WorldState {
     pub(crate) fn queue_parser_write(&self, text: &str) -> Result<bool, &'static str> {
         const MAX_CALLS: usize = 1024;
         const MAX_BYTES: usize = 1024 * 1024;
-        if !self.page.parsing.get() || !self.page.parser_script_active.get() {
+        if !self.frame.parsing.get() || !self.frame.parser_script_active.get() {
             return Ok(false);
         }
-        let calls = self.page.parser_write_calls.get().saturating_add(1);
+        let calls = self.frame.parser_write_calls.get().saturating_add(1);
         let bytes = self
-            .page
+            .frame
             .parser_write_bytes
             .get()
             .saturating_add(text.len());
         if calls > MAX_CALLS || bytes > MAX_BYTES {
             return Err("document.write budget exceeded");
         }
-        self.page.parser_write_calls.set(calls);
-        self.page.parser_write_bytes.set(bytes);
-        self.page.pending_parser_write.borrow_mut().push_str(text);
+        self.frame.parser_write_calls.set(calls);
+        self.frame.parser_write_bytes.set(bytes);
+        self.frame.pending_parser_write.borrow_mut().push_str(text);
         Ok(true)
     }
 
     pub fn take_parser_write(&self) -> String {
-        std::mem::take(&mut *self.page.pending_parser_write.borrow_mut())
+        std::mem::take(&mut *self.frame.pending_parser_write.borrow_mut())
     }
 
     // === the navigator profile (ADR-0034 D6) ===
@@ -1839,7 +1846,7 @@ impl WorldState {
     /// so this is one write; the per-world frozen arrays are dropped by
     /// [`Self::forget_navigator_caches`].
     pub fn set_navigator_languages(&self, languages: Vec<String>) {
-        *self.page.navigator.languages.borrow_mut() = languages;
+        *self.frame.navigator.languages.borrow_mut() = languages;
     }
 
     /// Drops the frozen `navigator.languages`/`plugins`/`mimeTypes` values
@@ -1863,21 +1870,21 @@ impl WorldState {
     /// to a buffer that would later replace what it produced.
     #[must_use]
     pub fn parser_script_is_active(&self) -> bool {
-        self.page.parsing.get() && self.page.parser_script_active.get()
+        self.frame.parsing.get() && self.frame.parser_script_active.get()
     }
 
     /// `document.open()`: starts collecting markup that will replace the
     /// document. Re-opening an already-open buffer discards what it held,
     /// which is what a second `open()` means.
     pub fn open_script_parser(&self) {
-        *self.page.script_parser_buffer.borrow_mut() = Some(String::new());
-        self.page.script_parser_flushed.set(0);
+        *self.frame.script_parser_buffer.borrow_mut() = Some(String::new());
+        self.frame.script_parser_flushed.set(0);
     }
 
     /// Whether a script-created parser is collecting.
     #[must_use]
     pub fn script_parser_is_open(&self) -> bool {
-        self.page.script_parser_buffer.borrow().is_some()
+        self.frame.script_parser_buffer.borrow().is_some()
     }
 
     /// The markup an **unclosed** script-created parser has accumulated, if it
@@ -1895,12 +1902,12 @@ impl WorldState {
     /// the loop.
     #[must_use]
     pub fn unflushed_script_parser(&self) -> Option<String> {
-        let buffer = self.page.script_parser_buffer.borrow();
+        let buffer = self.frame.script_parser_buffer.borrow();
         let buffer = buffer.as_ref()?;
-        if buffer.is_empty() || buffer.len() == self.page.script_parser_flushed.get() {
+        if buffer.is_empty() || buffer.len() == self.frame.script_parser_flushed.get() {
             return None;
         }
-        self.page.script_parser_flushed.set(buffer.len());
+        self.frame.script_parser_flushed.set(buffer.len());
         Some(buffer.clone())
     }
 
@@ -1911,7 +1918,7 @@ impl WorldState {
     /// `open()` on exactly the path it always took.
     pub fn append_script_parser(&self, text: &str) -> Result<bool, &'static str> {
         const MAX_BYTES: usize = 1024 * 1024;
-        let mut buffer = self.page.script_parser_buffer.borrow_mut();
+        let mut buffer = self.frame.script_parser_buffer.borrow_mut();
         let Some(buffer) = buffer.as_mut() else {
             return Ok(false);
         };
@@ -1934,8 +1941,8 @@ impl WorldState {
     /// An `open()` with nothing written is still a commit: it replaces the
     /// document with an empty one, which is what `open()` means.
     pub fn take_script_parser(&self) -> Option<String> {
-        let flushed = self.page.script_parser_flushed.replace(0);
-        let buffer = self.page.script_parser_buffer.borrow_mut().take()?;
+        let flushed = self.frame.script_parser_flushed.replace(0);
+        let buffer = self.frame.script_parser_buffer.borrow_mut().take()?;
         (flushed == 0 || buffer.len() > flushed).then_some(buffer)
     }
 
@@ -1973,7 +1980,7 @@ impl WorldState {
             .drain()
             .map(|(id, _)| id)
             .collect();
-        self.page.pending_scroll_targets.borrow_mut().clear();
+        self.frame.pending_scroll_targets.borrow_mut().clear();
         self.event_handlers.borrow_mut().clear();
         // Observers hold stale NodeIds from the previous document; drop the
         // registries (and the delivery gate) so nothing is delivered against
@@ -1999,7 +2006,7 @@ impl WorldState {
         // Page-level, and only the main world's reset runs at a commit: the log
         // and every cursor name nodes of the document being replaced.
         if self.is_main() {
-            self.page.reset_connectivity();
+            self.frame.reset_connectivity();
         }
         // Every `objectId` named a value of the outgoing document. Keeping them
         // would pin that document's whole object graph for the life of the
@@ -2026,21 +2033,21 @@ impl WorldState {
         // `document.close()` lands before the loop reaches
         // `drain_binding_events`.
         if new_context {
-            self.page.binding_calls.borrow_mut().clear();
+            self.frame.binding_calls.borrow_mut().clear();
         }
         // Minted from the page's counter rather than bumped locally: ids must
         // be unique across documents *and* worlds, so a driver holding one from
         // the outgoing document gets a clean "no such context" (ADR-0033 D10).
         if new_context {
-            self.context_id.set(self.page.next_context_id());
+            self.context_id.set(self.frame.next_context_id());
         }
         self.dom.borrow_mut().clear_custom_elements();
-        self.page.current_script.set(None);
-        self.page.parser_script_active.set(false);
+        self.frame.current_script.set(None);
+        self.frame.parser_script_active.set(false);
         self.mutation_microtask_queued.set(false);
-        self.page.pending_parser_write.borrow_mut().clear();
-        self.page.parser_write_calls.set(0);
-        self.page.parser_write_bytes.set(0);
+        self.frame.pending_parser_write.borrow_mut().clear();
+        self.frame.parser_write_calls.set(0);
+        self.frame.parser_write_bytes.set(0);
         // A script-created parser belongs to the document that opened it, and a
         // real navigation ends it. A *replacement* does not: the commit it is
         // reacting to is the one this very parser produced, and script keeps
@@ -2048,11 +2055,11 @@ impl WorldState {
         // parser as a side effect of its own first flush, and every later write
         // would land nowhere.
         if new_context {
-            self.page.script_parser_buffer.borrow_mut().take();
-            self.page.script_parser_flushed.set(0);
+            self.frame.script_parser_buffer.borrow_mut().take();
+            self.frame.script_parser_flushed.set(0);
         }
         // A group the outgoing document opened must not indent the next one.
-        self.page.console_group_depth.set(0);
+        self.frame.console_group_depth.set(0);
         // `pending_navigation` is deliberately *not* cleared. The commit path
         // takes the request before it starts loading, so nothing stale is left
         // here for the incoming document — and a navigation the outgoing
@@ -2065,14 +2072,14 @@ impl WorldState {
     /// (`None` = the viewport). The page dispatches `scroll` events for them.
     #[must_use]
     pub fn take_pending_scroll_targets(&self) -> Vec<Option<oxidepage_base::NodeId>> {
-        std::mem::take(&mut self.page.pending_scroll_targets.borrow_mut())
+        std::mem::take(&mut self.frame.pending_scroll_targets.borrow_mut())
     }
 
     /// Queues a `scroll` event for `target` (`None` = the viewport) on the
     /// page's event loop — the same path a script scroll takes, so an
     /// embedder-driven scroll has no event path of its own.
     pub fn queue_scroll_event(&self, target: Option<oxidepage_base::NodeId>) {
-        self.page.pending_scroll_targets.borrow_mut().push(target);
+        self.frame.pending_scroll_targets.borrow_mut().push(target);
     }
 
     /// [`Self::queue_scroll_event`] for the viewport.
@@ -2087,7 +2094,7 @@ impl WorldState {
     /// beyond it, because the page thread is inside that fetch and services no
     /// ordinary job until it returns (ADR-0027 D3).
     pub fn clear_pending_navigations(&self) -> usize {
-        let mut queue = self.page.pending_navigation.borrow_mut();
+        let mut queue = self.frame.pending_navigation.borrow_mut();
         let dropped = queue.len();
         queue.clear();
         dropped
@@ -2114,7 +2121,7 @@ impl WorldState {
     /// Queues a navigation for the page's event loop (see
     /// [`WorldState::pending_navigation`] for what does and does not collapse).
     pub fn request_navigation(&self, navigation: PendingNavigation) {
-        let mut queue = self.page.pending_navigation.borrow_mut();
+        let mut queue = self.frame.pending_navigation.borrow_mut();
         // A load supersedes a load that has not started yet.
         if matches!(navigation, PendingNavigation::Load { .. })
             && matches!(queue.back(), Some(PendingNavigation::Load { .. }))
@@ -2134,30 +2141,30 @@ impl WorldState {
     /// Takes the next queued navigation, if any.
     #[must_use]
     pub fn take_pending_navigation(&self) -> Option<PendingNavigation> {
-        self.page.pending_navigation.borrow_mut().pop_front()
+        self.frame.pending_navigation.borrow_mut().pop_front()
     }
 
     /// True when script has queued a navigation the page has not run yet.
     #[must_use]
     pub fn has_pending_navigation(&self) -> bool {
-        !self.page.pending_navigation.borrow().is_empty()
+        !self.frame.pending_navigation.borrow().is_empty()
     }
 
     /// The session history, for the page's navigation driver.
     #[must_use]
     pub fn history(&self) -> std::cell::RefMut<'_, SessionHistory> {
-        self.page.history.borrow_mut()
+        self.frame.history.borrow_mut()
     }
 
     /// `document.referrer` — the URL the current document was navigated from.
     #[must_use]
     pub fn referrer(&self) -> String {
-        self.page.referrer.borrow().clone()
+        self.frame.referrer.borrow().clone()
     }
 
     /// Sets `document.referrer` (the page, at commit time).
     pub fn set_referrer(&self, referrer: String) {
-        *self.page.referrer.borrow_mut() = referrer;
+        *self.frame.referrer.borrow_mut() = referrer;
     }
 }
 

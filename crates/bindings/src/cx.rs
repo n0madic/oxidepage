@@ -2521,7 +2521,7 @@ impl BindCx<'_> {
 
     /// Milliseconds since the page's time origin.
     pub fn now_ms(&self) -> f64 {
-        self.state.page.start.elapsed().as_secs_f64() * 1000.0
+        self.state.frame.start.elapsed().as_secs_f64() * 1000.0
     }
 
     /// Creates a slab-backed host object with the given interface prototype.
@@ -2542,7 +2542,7 @@ impl BindCx<'_> {
     /// Frees detached, unpinned trees left behind by a mutation, unless the
     /// parser is active or mutation records may still reference them.
     pub(crate) fn free_detached(&self, nodes: &[NodeId]) {
-        if self.state.page.parsing.get() {
+        if self.state.frame.parsing.get() {
             return;
         }
         let mut dom = self.state.dom.borrow_mut();

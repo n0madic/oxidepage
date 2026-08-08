@@ -1554,7 +1554,7 @@ pub struct Page {
     /// process. `Drop` clears it first for the same reason.
     pending_awaits: RefCell<Vec<remote::PendingAwait>>,
     state: Rc<WorldState>,
-    shared: Rc<oxidepage_bindings::PageShared>,
+    shared: Rc<oxidepage_bindings::FrameShared>,
     worlds: Rc<worlds::WorldTable>,
     net: Rc<NetService>,
     net_rx: Receiver<NetEvent>,
@@ -1861,7 +1861,7 @@ impl Page {
             *hooks.local_storage.borrow_mut() = local_storage;
         }
         install_rejection_tracker(&realm, &hooks);
-        let shared = oxidepage_bindings::install_page(
+        let shared = oxidepage_bindings::install_frame(
             dom,
             Rc::clone(&hooks) as Rc<dyn HostHooks>,
             viewport,
@@ -1873,7 +1873,7 @@ impl Page {
         let world_table = Rc::new(worlds::WorldTable::new());
         world_table.push(oxidepage_bindings::MAIN_WORLD, "", realm, Rc::clone(&state));
         // The hop a host callback in one world uses to reach another. Weak, so
-        // the `Page -> WorldTable -> realm -> WorldState -> PageShared` chain
+        // the `Page -> WorldTable -> realm -> WorldState -> FrameShared` chain
         // stays acyclic and every runtime is freed on drop.
         shared.set_world_enter(Rc::downgrade(&world_table) as std::rc::Weak<dyn WorldEnter>);
         state.set_whole_document_visible(whole_document_visible);
@@ -2072,10 +2072,10 @@ impl Page {
     /// returning its identifier. CDP's
     /// `Page.addScriptToEvaluateOnNewDocument`.
     pub fn add_init_script(&self, source: &str) -> u64 {
-        let id = self.state.page.next_init_script.get() + 1;
-        self.state.page.next_init_script.set(id);
+        let id = self.state.frame.next_init_script.get() + 1;
+        self.state.frame.next_init_script.set(id);
         self.state
-            .page
+            .frame
             .init_scripts
             .borrow_mut()
             .push(oxidepage_bindings::InitScript {
@@ -2099,10 +2099,10 @@ impl Page {
             self.hooks
                 .report_resource_error(format!("could not create world {name:?}: {error}"));
         }
-        let id = self.state.page.next_init_script.get() + 1;
-        self.state.page.next_init_script.set(id);
+        let id = self.state.frame.next_init_script.get() + 1;
+        self.state.frame.next_init_script.set(id);
         self.state
-            .page
+            .frame
             .init_scripts
             .borrow_mut()
             .push(oxidepage_bindings::InitScript {
@@ -2115,7 +2115,7 @@ impl Page {
 
     /// Removes an init script. `false` if no script has that id.
     pub fn remove_init_script(&self, id: u64) -> bool {
-        let mut scripts = self.state.page.init_scripts.borrow_mut();
+        let mut scripts = self.state.frame.init_scripts.borrow_mut();
         let before = scripts.len();
         scripts.retain(|script| script.id != id);
         scripts.len() != before
@@ -2128,7 +2128,7 @@ impl Page {
     /// stop the others from running either.
     fn run_init_scripts(&self) {
         let scripts: Vec<oxidepage_bindings::InitScript> =
-            self.state.page.init_scripts.borrow().clone();
+            self.state.frame.init_scripts.borrow().clone();
         for script in scripts {
             // Routed to its own world: a `worldName` init script is the
             // driver's own code and must not run against page globals.
@@ -3558,12 +3558,12 @@ impl Page {
     }
 
     fn eval_classic(&self, source: &str, url: &str, node: Option<NodeId>) -> bool {
-        let previous = self.state.page.current_script.replace(node);
+        let previous = self.state.frame.current_script.replace(node);
         self.with_cx(|cx| {
             let result = cx.scope.eval(source, url);
             // `document.currentScript` is null in promise reactions and other
             // microtasks queued by the script, so restore before the checkpoint.
-            cx.state.page.current_script.set(previous);
+            cx.state.frame.current_script.set(previous);
             let succeeded = match result {
                 Ok(_) => true,
                 Err(error) => {
@@ -4465,7 +4465,7 @@ impl Page {
         // Every other world's retention too (ADR-0033 D7). An isolated world
         // otherwise drains only from its own host calls, so an idle one — which
         // is what a driver's utility world is between commands — never advances
-        // its cursor, and `PageShared::connectivity` is trimmed below the
+        // its cursor, and the page-level connectivity log is trimmed below the
         // *minimum* live cursor: the log then grows by one entry per pinned-node
         // connect/disconnect for the whole life of the document.
         for world in self.worlds.all() {
@@ -5115,7 +5115,7 @@ impl Page {
                     buffer: Vec::new(),
                 },
             );
-            self.state.page.fonts_loading.set(true);
+            self.state.frame.fonts_loading.set(true);
             return;
         }
         // Every source exhausted: the family never resolves and text keeps its
@@ -5180,7 +5180,7 @@ impl Page {
     /// after a font load's fallback chain is exhausted.
     fn settle_font_ready(&self) {
         let loading = !self.pending_fonts.borrow().is_empty();
-        self.state.page.fonts_loading.set(loading);
+        self.state.frame.fonts_loading.set(loading);
         if loading || self.state.ready_state() == oxidepage_bindings::ReadyState::Loading {
             return;
         }
@@ -5318,7 +5318,7 @@ impl Page {
         }
         let calls: Vec<oxidepage_bindings::BindingCall> = self
             .state
-            .page
+            .frame
             .binding_calls
             .borrow_mut()
             .drain(..)

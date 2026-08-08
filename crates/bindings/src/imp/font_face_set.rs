@@ -8,7 +8,7 @@ use crate::cx::BindCx;
 use crate::state::ReadyState;
 
 pub(crate) fn status(cx: &BindCx<'_>, _this: u64) -> Result<String, JsThrow> {
-    Ok(if cx.state.page.fonts_loading.get() {
+    Ok(if cx.state.frame.fonts_loading.get() {
         "loading"
     } else {
         "loaded"
@@ -38,7 +38,7 @@ pub(crate) fn ready(cx: &BindCx<'_>, _this: u64) -> Result<JsValue, JsThrow> {
         .clone()
         .expect("ready() is reachable only through the cached document.fonts wrapper");
     let settled =
-        !cx.state.page.fonts_loading.get() && cx.state.ready_state() != ReadyState::Loading;
+        !cx.state.frame.fonts_loading.get() && cx.state.ready_state() != ReadyState::Loading;
     if settled {
         return cx.resolved_promise(value);
     }
@@ -67,7 +67,7 @@ pub(crate) fn load(
         .eval("[]", "oxidepage:font-load")
         .map_err(JsThrow::from)?;
     let settled =
-        !cx.state.page.fonts_loading.get() && cx.state.ready_state() != ReadyState::Loading;
+        !cx.state.frame.fonts_loading.get() && cx.state.ready_state() != ReadyState::Loading;
     if settled {
         return cx.resolved_promise(empty);
     }

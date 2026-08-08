@@ -68,12 +68,12 @@ pub(crate) fn submit(
         // `onsubmit = e => { e.preventDefault(); validate(); form.submit(); }`,
         // the canonical validate-then-submit idiom, leaving the page looking
         // hung with no warning.
-        if cx.state.page.firing_submission_events.get() {
+        if cx.state.frame.firing_submission_events.get() {
             return Ok(());
         }
-        cx.state.page.firing_submission_events.set(true);
+        cx.state.frame.firing_submission_events.set(true);
         let proceed = fire_submit_event(cx, form, submitter);
-        cx.state.page.firing_submission_events.set(false);
+        cx.state.frame.firing_submission_events.set(false);
         if !proceed? {
             return Ok(());
         }

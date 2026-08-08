@@ -5,7 +5,7 @@ use oxidepage_js::{JsThrow, JsValue};
 use crate::cx::BindCx;
 
 pub(crate) fn time_origin(cx: &BindCx<'_>, _this: u64) -> Result<f64, JsThrow> {
-    Ok(cx.state.page.time_origin_epoch_ms)
+    Ok(cx.state.frame.time_origin_epoch_ms)
 }
 
 pub(crate) fn now(cx: &BindCx<'_>, _this: u64) -> Result<f64, JsThrow> {

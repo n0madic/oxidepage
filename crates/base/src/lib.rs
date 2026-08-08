@@ -11,4 +11,4 @@ pub mod id;
 
 pub use error::{DomException, DomExceptionKind, EngineError, NetErrorKind};
 pub use geometry::{Point, Rect, Size, Transform2D};
-pub use id::{NodeId, RequestId, StyleSheetId};
+pub use id::{FrameId, NodeId, RequestId, StyleSheetId};

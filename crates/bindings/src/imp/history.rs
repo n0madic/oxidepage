@@ -21,13 +21,13 @@ use crate::cx::BindCx;
 use crate::state::PendingNavigation;
 
 pub(crate) fn length(cx: &BindCx<'_>, _this: u64) -> Result<f64, JsThrow> {
-    Ok(cx.state.page.history.borrow().len() as f64)
+    Ok(cx.state.frame.history.borrow().len() as f64)
 }
 
 pub(crate) fn scroll_restoration(cx: &BindCx<'_>, _this: u64) -> Result<String, JsThrow> {
     Ok(cx
         .state
-        .page
+        .frame
         .history
         .borrow()
         .scroll_restoration()
@@ -43,7 +43,7 @@ pub(crate) fn set_scroll_restoration(
     value: String,
 ) -> Result<(), JsThrow> {
     cx.state
-        .page
+        .frame
         .history
         .borrow_mut()
         .set_scroll_restoration(&value);
@@ -53,7 +53,7 @@ pub(crate) fn set_scroll_restoration(
 pub(crate) fn state(cx: &BindCx<'_>, _this: u64) -> Result<JsValue, JsThrow> {
     let serialized = cx
         .state
-        .page
+        .frame
         .history
         .borrow()
         .current()
@@ -128,7 +128,7 @@ pub(crate) fn go(cx: &BindCx<'_>, _this: u64, delta: i32) -> Result<(), JsThrow>
     }
     // Out of range is a silent no-op, per HTML's "traverse the history by a
     // delta": if there is no such entry, return.
-    if cx.state.page.history.borrow().target_of(delta).is_none() {
+    if cx.state.frame.history.borrow().target_of(delta).is_none() {
         return Ok(());
     }
     cx.state
@@ -206,7 +206,7 @@ fn shared_history_push(
     let serialized = serialize_state(cx, &cloned)?;
 
     cx.state.dom.borrow_mut().set_document_url(target.clone());
-    let mut history = cx.state.page.history.borrow_mut();
+    let mut history = cx.state.frame.history.borrow_mut();
     let seq = history.document_seq();
     if replace {
         history.replace(target, serialized, seq);

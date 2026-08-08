@@ -56,8 +56,8 @@ pub use preview::{
 };
 pub use script::is_classic_script_type;
 pub use state::{
-    BindingCall, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES, NavigationBody,
-    NavigatorData, PageShared, PendingNavigation, ReadyState, ScreenData, SessionHistory,
+    BindingCall, FrameShared, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES,
+    NavigationBody, NavigatorData, PendingNavigation, ReadyState, ScreenData, SessionHistory,
     TimingMilestone, WorldEnter, WorldId, WorldState,
 };
 pub use storage::{
@@ -119,7 +119,7 @@ pub fn install_with_navigator<R: JsRealm>(
 /// Installs bindings with embedder-provided immutable Navigator and Screen
 /// profiles, creating the page and its main world in one step.
 ///
-/// The two halves are [`install_page`] and [`install_world`]; this is the
+/// The two halves are [`install_frame`] and [`install_world`]; this is the
 /// single-world shorthand every direct embedder and most tests use.
 pub fn install_with_profiles<R: JsRealm>(
     realm: &R,
@@ -129,23 +129,24 @@ pub fn install_with_profiles<R: JsRealm>(
     navigator: NavigatorData,
     screen: ScreenData,
 ) -> Result<Rc<WorldState>, JsError> {
-    let page = install_page(dom, hooks, viewport, navigator, screen);
+    let page = install_frame(dom, hooks, viewport, navigator, screen);
     install_world(realm, &page, crate::state::MAIN_WORLD, "")
 }
 
-/// Creates the page-level bindings state (ADR-0033 D3).
+/// Creates one browsing context's bindings state (ADR-0033 D3, ADR-0035 D2).
 ///
-/// One per page. Every world is then installed over it with [`install_world`],
-/// which is what gives N globals one shared DOM, style engine and layout tree.
+/// One per frame. Every world of that frame is then installed over it with
+/// [`install_world`], which is what gives N globals one shared DOM, style
+/// engine and layout tree.
 #[must_use]
-pub fn install_page(
+pub fn install_frame(
     dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
     hooks: Rc<dyn HostHooks>,
     viewport: Viewport,
     navigator: NavigatorData,
     screen: ScreenData,
-) -> Rc<crate::state::PageShared> {
-    crate::state::PageShared::new(dom, hooks, viewport, navigator, screen)
+) -> Rc<crate::state::FrameShared> {
+    crate::state::FrameShared::new(dom, hooks, viewport, navigator, screen)
 }
 
 /// Installs one world's globals into `realm` over shared page state.
@@ -158,7 +159,7 @@ pub fn install_page(
 /// (D8, and P6 "absent beats fake").
 pub fn install_world<R: JsRealm>(
     realm: &R,
-    page: &Rc<crate::state::PageShared>,
+    page: &Rc<crate::state::FrameShared>,
     id: crate::state::WorldId,
     name: &str,
 ) -> Result<Rc<WorldState>, JsError> {
@@ -709,7 +710,7 @@ pub fn sync_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
 
     // Named properties are per browsing context, so the ids are this realm's
     // document's — not every rendered document's (ADR-0035 D1).
-    let document = cx.state.page.document();
+    let document = cx.state.frame.document();
     let wanted: std::collections::HashSet<String> = cx
         .state
         .dom
@@ -762,7 +763,7 @@ fn define_named_property(
                     scope,
                     state: cx::world_state(scope)?,
                 };
-                let document = cx.state.page.document();
+                let document = cx.state.frame.document();
                 let node = cx.state.dom.borrow().element_by_id(document, &id);
                 match node {
                     Some(node) => cx.node_to_js(node),
@@ -1217,7 +1218,7 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let id = cx.state.hooks.start_fetch(request);
     // Tag the request with this world, so its completion is delivered here
     // and not to whichever world happens to be current (ADR-0033 D10).
-    cx.state.page.note_net_world(id, cx.state.id);
+    cx.state.frame.note_net_world(id, cx.state.id);
     cx.state.pending_net.borrow_mut().insert(
         id,
         PendingNet::Fetch {
@@ -1544,7 +1545,7 @@ fn record_console(cx: &BindCx<'_>, level: ConsoleLevel, message: String, args: V
         message,
         args,
         location,
-        group_depth: cx.state.page.console_group_depth.get(),
+        group_depth: cx.state.frame.console_group_depth.get(),
         timestamp: cx.state.epoch_now_ms(),
         context_id: Some(cx.state.context_id.get()),
     });
@@ -1607,9 +1608,9 @@ fn install_console(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<(
     define_fn(cx, &console, "group", 0, console_group)?;
     define_fn(cx, &console, "groupCollapsed", 0, console_group)?;
     define_fn(cx, &console, "groupEnd", 0, |cx, _call| {
-        let depth = cx.state.page.console_group_depth.get();
+        let depth = cx.state.frame.console_group_depth.get();
         cx.state
-            .page
+            .frame
             .console_group_depth
             .set(depth.saturating_sub(1));
         Ok(JsValue::Undefined)
@@ -1626,9 +1627,9 @@ fn console_group(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     if !call.args.is_empty() {
         console_write(cx, &call.args, ConsoleLevel::Log, true)?;
     }
-    let depth = cx.state.page.console_group_depth.get();
+    let depth = cx.state.frame.console_group_depth.get();
     cx.state
-        .page
+        .frame
         .console_group_depth
         .set(depth.saturating_add(1));
     Ok(JsValue::Undefined)
@@ -1740,7 +1741,7 @@ pub fn microtask_checkpoint(cx: &BindCx<'_>) {
 /// there), and the hold is dropped on disconnect so detached subtrees still
 /// free. Returns whether any change was applied.
 pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
-    let page = Rc::clone(&cx.state.page);
+    let frame = Rc::clone(&cx.state.frame);
     // Move whatever the DOM has queued into the page-level log *first*.
     // `DomTree::take_pinned_connectivity` is `std::mem::take`, so with more than
     // one world the first to reach it would consume changes every other world
@@ -1749,18 +1750,18 @@ pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
     {
         let fresh = cx.state.dom.borrow_mut().take_pinned_connectivity();
         if !fresh.is_empty() {
-            let mut log = page.connectivity.borrow_mut();
-            let mut seq = page.connectivity_seq.get();
+            let mut log = frame.connectivity.borrow_mut();
+            let mut seq = frame.connectivity_seq.get();
             for (id, connected) in fresh {
                 seq += 1;
                 log.push_back((seq, id, connected));
             }
-            page.connectivity_seq.set(seq);
+            frame.connectivity_seq.set(seq);
         }
     }
 
-    let cursor = page.conn_cursor(cx.state.id);
-    let changes: Vec<(u64, oxidepage_base::NodeId, bool)> = page
+    let cursor = frame.conn_cursor(cx.state.id);
+    let changes: Vec<(u64, oxidepage_base::NodeId, bool)> = frame
         .connectivity
         .borrow()
         .iter()
@@ -1816,19 +1817,20 @@ pub fn drain_pinned_connectivity(cx: &BindCx<'_>) -> bool {
     }
 
     if let Some((last, _, _)) = changes.last() {
-        page.set_conn_cursor(cx.state.id, *last);
+        frame.set_conn_cursor(cx.state.id, *last);
     }
     // Trim below the slowest world's cursor. A world that has been torn down
     // reports no cursor, so a rebuilt world starting at 0 cannot resurrect
     // entries: `world_ids` only lists live worlds, and a fresh world's caches
     // name a document whose nodes are all gone anyway.
-    let low = page
+    let low = frame
         .world_ids()
         .into_iter()
-        .map(|w| page.conn_cursor(w))
+        .map(|w| frame.conn_cursor(w))
         .min()
-        .unwrap_or_else(|| page.conn_cursor(cx.state.id));
-    page.connectivity
+        .unwrap_or_else(|| frame.conn_cursor(cx.state.id));
+    frame
+        .connectivity
         .borrow_mut()
         .retain(|(seq, _, _)| *seq > low);
 
@@ -2391,7 +2393,7 @@ fn io_root_rect(
         None => {
             let vp = layout.viewport();
             let (mut width, mut height) = (vp.width, vp.height);
-            if state.page.whole_document_visible.get()
+            if state.frame.whole_document_visible.get()
                 && let Some(root) = dom.document_element()
                 && let Some((scroll_w, scroll_h)) = layout.scroll_size(root)
             {
@@ -2608,7 +2610,7 @@ pub fn process_finalized(state: &Rc<WorldState>, finalized: Vec<(u32, u64)>) {
                 {
                     let mut dom = state.dom.borrow_mut();
                     dom.unpin(id);
-                    if !state.page.parsing.get() && !dom.observers().has_pending_records() {
+                    if !state.frame.parsing.get() && !dom.observers().has_pending_records() {
                         dom.free_detached_tree_if_unpinned(id);
                     }
                 }
