@@ -77,8 +77,8 @@ answer is no longer unique. That re-audit is the real cost of this decision and
 it is enumerable rather than open-ended: `note_style_element_closed`, the script
 push in `note_children_changed`, the id index in `set_connectedness_composed`,
 custom-element upgrades, ADR-0028 D3's image gate (which becomes
-`is_rendered_root(node_document(el))`, restoring the rule the flag was standing
-in for), and bubbling to the `Window`. On the bindings side the checklist anchor
+`is_rendered_root(containing_document(el))`, restoring the rule the flag was
+standing in for), and bubbling to the `Window`. On the bindings side the checklist anchor
 is `imp/document.rs::is_page_document`, which CLAUDE.md already names as the
 "does this member reflect a browsing context" test: each of its call sites
 becomes "route to *this document's* frame".
@@ -99,10 +99,33 @@ tree-global, so with N engines the first to finish would destroy snapshots the
 others have not consumed and silently lose their invalidation. It must filter by
 document.
 
-`style_version` and `structure_version` stay tree-global for now. That is a
-performance cost — a mutation in frame B invalidates frame A's `ReflowStamp` and
-forces a full box-tree rebuild — accepted deliberately, because per-document
-counters are a contained follow-up and correctness does not depend on them.
+**"Which document" is not `node_document`.** A node inside a shadow tree is
+owned by its *shadow root* — `attach_shadow` allocates the fragment as its own
+owner root so an unattached shadow tree stays self-contained — so
+`node_document` can answer with a `DocumentFragment` that carries no
+`DocumentData` and no browsing context. Every routing question added by this ADR
+therefore goes through `DomTree::containing_document`, which crosses shadow
+hosts and is HTML's node document. Getting this wrong is silent in the worst
+way: routing style updates by `node_document` drops every shadow-scoped
+`<style>`, and the stylo glue answers `is_html_document = false` for shadow
+content, changing the cascade with nothing to show for it.
+
+`style_version` and `structure_version` become **per document**, bumped by the
+same invalidation hook. Tree-global counters are correct but pathological here:
+a mutation in frame B moves frame A's `ReflowStamp` *and* fails the
+`structure_version` equality that incremental patching turns on, so every frame
+does a full box-tree rebuild on any mutation anywhere. They also have to land
+with the per-frame engines rather than after — retrofitting means touching every
+stamp site a second time.
+
+The tree-wide **queues** need the opposite treatment, and the distinction is
+easy to get backwards. `style_updates`, `image_updates`, `script_updates`,
+`custom_reactions` and `pinned_connectivity` are each one shared `Vec`, and a
+per-frame `drain()` inside the reflow walk would let the first frame eat entries
+belonging to the rest, which are then never applied. Each drain takes the
+**whole** queue once and routes every entry to the frame of its containing
+document — the same shape as the `clear_snapshots` landmine above, and the same
+silent failure if missed.
 
 ### D2 — A frame owns its engines; `PageShared` splits
 
@@ -111,9 +134,8 @@ one-per-*document* rather than one-per-*world*". That was already the right
 partition; there was simply one document. It becomes **`FrameShared`**, one per
 browsing context, keeping `style`, `layout`, `pending_navigation`, `history`,
 `referrer`, `parsing`, `ready_state`, `current_script`, `timing`,
-`script_parser_buffer`, `pending_scroll_targets`, `storage_subscriber`,
-`worlds` and the connectivity log, and gaining `document: NodeId` and
-`frame: FrameId`.
+`script_parser_buffer`, `pending_scroll_targets`, `storage_subscriber` and
+`worlds`, and gaining `document: NodeId` and `frame: FrameId`.
 
 What is left is genuinely page-level and moves to a new `PageGlobal`: the shared
 `dom`, `hooks`, `navigator`, `screen`, the monotonic `next_context_id` and
@@ -148,6 +170,12 @@ frame whose ancestors already show the same URL loads `about:blank` and warns,
 which is what stops `<iframe src="self.html">` from being an exhaustion
 primitive.
 
+The `ScriptBudget` is armed at the **outermost** entry into JS and a frame hop
+must not re-arm it, or a page buys itself another ten seconds every time it
+bounces through a child. Same for the native-stack anchor: it is taken once per
+runtime entry, and re-anchoring mid-stack would hand a nested frame a fresh full
+stack budget.
+
 ### D4 — Cross-frame DOM is real; cross-frame JS object graphs are not
 
 The shared arena makes `iframe.contentDocument` a real Document the parent realm
@@ -169,9 +197,26 @@ object reached across a frame boundary carries the *accessing* realm's
 prototypes, so `childDoc.body instanceof parentWindow.HTMLElement` is true where
 a browser says false; and a child's globals (`contentWindow.myVar`) are not
 reachable. Neither touches automation — a driver's `frame.evaluate()` runs
-through CDP in the frame's own realm — and the alternative, one `Runtime` shared
-by same-origin frames, is the multi-`Context` design ADR-0033 D1 rejected on
-grounds that have not changed.
+through CDP in the frame's own realm.
+
+**The alternative is a real fork in the road, and it is closed.** Making
+`contentWindow` the child's actual global means the two realms share a
+`Runtime`, because `Persistent::restore` compares runtime pointers and would
+otherwise reject every value that crossed. Sharing one is worse than it looks:
+`Context::with` is a `RefCell::borrow_mut` on the runtime, so reaching a
+sibling frame's realm while the calling frame's scope is live would **panic** —
+and that is the only situation such a hop exists for. The way past that panic
+is to enter through a raw `Ctx` when the runtime is already entered, which
+means `unsafe` in `crates/js`; `unsafe` is denied workspace-wide with exactly
+one audited exception, and buying cross-frame object identity is not a reason
+to open a second.
+
+Separate runtimes are what make the hop *legal* rather than merely tolerable —
+the same argument ADR-0033 D1 made for worlds, one level down. It is also why
+`RealmInner::fin` stays per realm: a finalizer payload is a slab key into one
+realm's slab, and a queue spanning a world's frames would route
+`process_finalized` at the wrong one — a missed unpin at best, and at worst an
+unrelated node unpinned on an index collision, silently.
 
 Origin comparison is `(scheme, host, port)`, as `pushState` already does
 (ADR-0022 §4) — `Url::origin()` yields an opaque origin for `file:`, which is
@@ -228,6 +273,12 @@ The `dom` borrow is taken and released **once per frame**, never nested. That is
 what keeps the loop free of `BorrowMutError`, and it is the reason the ordering
 lives in `page` rather than as a callback from inside `LayoutEngine::reflow`.
 
+A frame's viewport moves in **both** engines or in neither: the layout engine
+lays out to it and the stylist's `Device` evaluates media queries against it, so
+a child whose content box changed and only had its layout viewport updated
+answers `@media (max-width: …)` for the size it used to be. `Page::set_viewport`
+already pairs them; the frame loop has to as well.
+
 ### D7 — Paint splices the child's display list
 
 `build_display_list` stays a whole-document function and `paint` stays a dumb
@@ -236,13 +287,23 @@ through `PaintOptions`. At the iframe box, `paint_replaced` emits the child's
 items between a `PushClip` on the content box and a `PushLayer` translating by
 the content origin less the child's scroll.
 
-Two details are load-bearing. `ImageId` is minted by a per-`ImageStore` counter
-and every frame has its own store, so merging resource tables **must** rebase
-image ids — getting it wrong yields silently wrong pictures, not a crash.
-(`FontId` is content-hashed and merges as is.) And a child's scroll behaves like
-*element* scroll, not document scroll: it is baked into the parent's list at
-build time, so the parent's cache must be keyed on the descendants' stamps and
-scrolls as well as its own. That fold lives in `page`'s `RenderState`, leaving
+Two details are load-bearing. `ImageId` is minted by an `ImageStore`'s own
+counter, and a store per frame would mean two frames both minting `1` — so
+merging resource tables would have to rebase every image id, and getting that
+wrong yields silently wrong pictures rather than a crash. Rather than do that
+work per build and hope it is right, **the `ImageStore` is shared page-wide**:
+`LayoutEngine` takes an `Rc<RefCell<ImageStore>>` instead of owning one, so
+there is one id space, no merge step at all, and a URL used in two frames
+decodes once. The cost is that any decode bumps the images version for every
+frame's stamp, which is a repaint we would mostly have done anyway. (`FontId` is
+content-hashed and merges safely either way.)
+
+And a child's scroll behaves like *element* scroll, not document scroll: there
+is exactly one raster-time scroll translation, the top document's, so the
+child's has to be baked into the parent's list at build time. The parent's cache
+must therefore be keyed on its descendants' stamps **and their document
+scrolls** — the one place the rule "document scroll is deliberately outside the
+paint stamp" inverts. That fold lives in `page`'s `RenderState`, leaving
 `PaintStamp` — and therefore `layout` — unaware that frames exist.
 
 `position: fixed` inside a frame is the sharp edge. The child's list contains
@@ -250,8 +311,12 @@ scrolls as well as its own. That fold lives in `page`'s `RenderState`, leaving
 anchor would suppress the *page's* scroll translation, when the iframe box itself
 must move with page scroll; and the splice layer would make the fixed content
 move with the *child's* scroll, when it must pin to the iframe's viewport.
-Anchored segments are therefore re-emitted at the content origin with neither
-the child-scroll term nor a page-level anchor, still inside the content-box clip.
+The anchor is therefore **dropped** inside the splice: the child's fixed content
+is emitted at the content origin with no child-scroll term, still inside the
+content-box clip, and with no marker exempting it from the page's scroll — so
+the banner stays put inside its frame and the frame itself scrolls with the
+page. An anchor wraps the *whole* splice only when the `<iframe>` box is itself
+viewport-anchored.
 
 Rasterizing the child to an image was the alternative. It is simpler and it is
 what inline SVG does today, but it would put a bitmap in every PDF and turn text
@@ -366,8 +431,10 @@ regenerated in the same commits as the behaviour changes.
   (design §7, ADR-0027 D1) and one session per page; a frame is not a `Target`.
 - **A child's globals are unreachable from another frame** and cross-frame
   objects carry the accessing realm's prototypes (D4).
-- **`postMessage` clones a JSON subset**: no `Map`, `Set`, typed arrays, cycles,
-  transferables or `MessagePort`. `MessageChannel` is not installed.
+- **`postMessage` clones a JSON subset**: no `Map`, `Set`, `Date`, `ArrayBuffer`,
+  typed arrays or cycles. `MessageChannel` is not installed, and a non-empty
+  `transfer` list is **rejected with `DataCloneError`** rather than ignored —
+  silently not transferring is the fake P6 forbids.
 - **`sandbox` enforces `allow-scripts` and `allow-same-origin` only** (D11).
 - **No Permissions Policy (`allow`), no `csp` attribute, no per-frame CSP** — no
   CSP is enforced anywhere (ADR-0034 D6).
