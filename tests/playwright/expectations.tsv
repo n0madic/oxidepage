@@ -1,3 +1,2 @@
 # playwright conformance expectations. Regenerate with `cargo xtask playwright --update`.
 # Only non-PASS outcomes are listed; absent means the check is expected to pass.
-page.waitForSelector	FAIL

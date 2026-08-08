@@ -160,10 +160,18 @@ try {
       setTimeout(() => {
         const el = document.createElement('div');
         el.id = 'late';
+        // Text, not an empty div. `waitForSelector` defaults to
+        // `state: 'visible'`, and Playwright's `isElementVisible` requires a
+        // non-empty bounding box — an unstyled empty `<div>` is 0px high and
+        // stays "hidden" forever. That is not an engine limitation: the check
+        // would time out against real Chrome too.
+        el.textContent = 'late';
         document.body.appendChild(el);
       }, 20);
     });
-    await within(10000, 'waitForSelector', requirePage().waitForSelector('#late'));
+    const handle = await within(10000, 'waitForSelector', requirePage().waitForSelector('#late'));
+    assert(handle, 'waitForSelector resolved to nothing');
+    assertEqual(await handle.textContent(), 'late', 'the element it waited for');
   });
 
   // The stage's own milestone: Playwright's injected helpers live in a utility
