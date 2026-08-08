@@ -929,3 +929,107 @@ fn a_commit_forgets_the_handles_it_invalidates() {
     // …and a handle from before the commit is a clean error, not a stale hit.
     assert!(page.get_properties(1, None).is_err());
 }
+
+/// A `callFunctionOn` that replaces the document must not leave its `this`
+/// handle alive across the commit.
+///
+/// The handle is a `JsValue` of the world it was minted in, and the trailing
+/// `run_until_stalled` is where a queued replacement runs. Holding it to the
+/// end of the call let it outlive the runtime the commit freed, and
+/// `JS_FreeRuntime` **aborts the process** on a non-empty `gc_obj_list`
+/// (ADR-0033 D4) — a crash, not a failing assertion. Playwright's `setContent`
+/// is exactly this shape: `document.close()` from a utility-world handle.
+#[test]
+fn a_call_that_replaces_the_document_releases_its_this_handle() {
+    let page = page();
+    page.load_html("<!doctype html><p>old</p>").expect("load");
+    let utility = page.create_isolated_world("utility").expect("created");
+
+    let holder = page
+        .evaluate_in(
+            Some(utility.context_id),
+            "({ marker: 1 })",
+            &EvaluateOptions::default(),
+        )
+        .expect("context")
+        .expect_done();
+    let id = holder.result.object_id.expect("objectId");
+
+    page.call_function_on(
+        "function () { document.open(); \
+         document.write('<!doctype html><p id=s>new</p>'); \
+         document.close(); }",
+        Some(id),
+        None,
+        &[],
+        &EvaluateOptions {
+            await_promise: true,
+            defer_await: true,
+            ..EvaluateOptions::default()
+        },
+    )
+    .expect("call");
+    page.settle(std::time::Duration::from_secs(5));
+
+    assert_eq!(
+        eval_in(&page, None, "document.getElementById('s').textContent"),
+        "new"
+    );
+}
+
+/// The replacement keeps its execution contexts (ADR-0034 D2): HTML's
+/// `document.open()` reuses the `Document`, the `Window` and the environment
+/// settings object, so ids stay put and handles minted before it still resolve.
+/// Telling a driver otherwise makes it reject every command in flight —
+/// including the one that asked for the replacement.
+#[test]
+fn a_script_created_parser_replacement_keeps_its_contexts() {
+    let page = page();
+    page.load_html("<!doctype html><p>old</p>").expect("load");
+    let utility = page.create_isolated_world("utility").expect("created");
+    let main_before = page.execution_context_id();
+
+    let handle = page
+        .evaluate_in(
+            Some(utility.context_id),
+            "({ kept: 'yes' })",
+            &EvaluateOptions::default(),
+        )
+        .expect("context")
+        .expect_done()
+        .result
+        .object_id
+        .expect("objectId");
+
+    eval_in(
+        &page,
+        None,
+        "document.open(); document.write('<!doctype html><p id=s>new</p>'); document.close();",
+    );
+    page.settle(std::time::Duration::from_secs(5));
+
+    assert_eq!(
+        eval_in(&page, None, "document.getElementById('s').textContent"),
+        "new"
+    );
+    assert_eq!(
+        page.execution_context_id(),
+        main_before,
+        "a replacement must not renumber the main world"
+    );
+    assert!(
+        page.worlds()
+            .iter()
+            .any(|w| w.context_id == utility.context_id),
+        "the utility world must keep its id across a replacement"
+    );
+    assert!(
+        page.get_properties(handle, None).is_ok(),
+        "a handle minted before the replacement must survive it"
+    );
+
+    // A real navigation still does the opposite, so ADR-0033 D9 is intact.
+    page.load_html("<!doctype html><p>next</p>").expect("load");
+    assert_ne!(page.execution_context_id(), main_before);
+    assert!(page.get_properties(handle, None).is_err());
+}

@@ -72,6 +72,13 @@ pub struct ConsoleMessage {
     /// Unix-epoch milliseconds, from the page's monotonic time origin (the
     /// same clock as `NavigationEvent::timestamp`).
     pub timestamp: f64,
+    /// The execution context the call came from, exactly as
+    /// [`BindingCall`](crate::BindingCall) carries it (ADR-0033 D10).
+    ///
+    /// `None` for an engine-originated line, which belongs to no world. A
+    /// driver's injected script logs from its utility world, and reporting the
+    /// main context for that is a lie a consumer can act on.
+    pub context_id: Option<u64>,
 }
 
 impl ConsoleMessage {
@@ -88,6 +95,7 @@ impl ConsoleMessage {
             location: None,
             group_depth: 0,
             timestamp,
+            context_id: None,
         }
     }
 }

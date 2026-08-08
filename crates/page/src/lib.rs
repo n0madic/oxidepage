@@ -267,6 +267,16 @@ pub struct NavigationEvent {
     pub error: Option<String>,
     /// Unix-epoch milliseconds, from the page's monotonic time origin.
     pub timestamp: f64,
+    /// Whether this commit kept the document's execution contexts alive
+    /// (ADR-0034 D2).
+    ///
+    /// True only for a `document.open()`/`close()` replacement, where HTML
+    /// keeps the same `Document`, the same `Window` and the same environment
+    /// settings object — so the realms, their ids and the handles minted
+    /// against them all survive. Every other commit renumbers the main world
+    /// and rebuilds the isolated ones (ADR-0033 D9), and a driver must be told
+    /// its contexts died.
+    pub contexts_preserved: bool,
 }
 
 /// One observable thing the page did, pushed to an [`EventSink`] as it
@@ -1599,6 +1609,9 @@ pub struct Page {
     /// `dispatch_mouse`, `dispatch_key` — and a milestone is a milestone of one
     /// navigation, not of one call.
     network_idle_recorded: Cell<bool>,
+    /// Set for the extent of a `document.open()` replacement's load
+    /// (ADR-0034 D2), which keeps its execution contexts.
+    preserving_contexts: Cell<bool>,
     /// Set for the whole of a document load or a chain of navigations.
     ///
     /// This is the single thing standing between a nested `load_document` and a
@@ -1906,6 +1919,7 @@ impl Page {
             deferred: RefCell::new(Vec::new()),
             load_fired: Cell::new(false),
             network_idle_recorded: Cell::new(false),
+            preserving_contexts: Cell::new(false),
             navigating: Cell::new(false),
             navigation_events: RefCell::new(VecDeque::new()),
             viewport: Cell::new(viewport),
@@ -1943,11 +1957,46 @@ impl Page {
     /// A script in the loaded document may navigate; that navigation is chained
     /// off this call, exactly as it would be off a `navigate`.
     pub fn load_html(&self, html: &str) -> Result<(), JsError> {
-        let url = self.state.dom.borrow().document_url().to_owned();
-        self.commit_history(url, HistoryTarget::Replace);
-        self.load_document(html, WaitUntil::Load)?;
+        // An embedder replacing the content is a navigation in every way that
+        // matters: fresh globals, fresh context ids, dead handles (ADR-0033
+        // D9). Only `document.open()` keeps its `Window`, and only because
+        // HTML says so.
+        self.commit_replacement_document(
+            html,
+            WaitUntil::Load,
+            /* preserve_contexts */ false,
+        )?;
         self.run_chained_navigations(WaitUntil::Load);
         Ok(())
+    }
+
+    /// Replaces the document in place, keeping the URL and the history entry.
+    ///
+    /// The one path for "new markup, same URL": [`Page::load_html`] and the
+    /// script-created parser's `document.close()` (ADR-0034 D2). It records
+    /// `Started`/`Committed` like any other commit, which is what a driver
+    /// waiting on `Page.frameNavigated` and `Page.lifecycleEvent { load }`
+    /// keys off — `load_html` recorded neither before, so an embedder's
+    /// `set_content` looked to CDP like nothing had happened at all.
+    fn commit_replacement_document(
+        &self,
+        html: &str,
+        wait_until: WaitUntil,
+        preserve_contexts: bool,
+    ) -> Result<(), JsError> {
+        let url = self.state.dom.borrow().document_url().to_owned();
+        self.record_navigation_with(NavigationEventKind::Started, &url, None, preserve_contexts);
+        self.commit_history(url.clone(), HistoryTarget::Replace);
+        self.record_navigation_with(
+            NavigationEventKind::Committed,
+            &url,
+            None,
+            preserve_contexts,
+        );
+        self.preserving_contexts.set(preserve_contexts);
+        let result = self.load_document(html, wait_until);
+        self.preserving_contexts.set(false);
+        result
     }
 
     /// Navigates to `url`: fetches the document over the net stack (SSRF- and
@@ -2242,11 +2291,22 @@ impl Page {
     }
 
     fn record_navigation(&self, kind: NavigationEventKind, url: &str, error: Option<String>) {
+        self.record_navigation_with(kind, url, error, /* contexts_preserved */ false);
+    }
+
+    fn record_navigation_with(
+        &self,
+        kind: NavigationEventKind,
+        url: &str,
+        error: Option<String>,
+        contexts_preserved: bool,
+    ) {
         let event = NavigationEvent {
             kind,
             url: url.to_owned(),
             error,
             timestamp: self.state.epoch_now_ms(),
+            contexts_preserved,
         };
         self.hooks.emit_or_push(
             &self.navigation_events,
@@ -2570,6 +2630,17 @@ impl Page {
                 }
                 PendingNavigation::JavaScriptUrl { source } => {
                     self.run_javascript_url(&source, wait_until)?;
+                }
+                PendingNavigation::ReplaceDocument { html } => {
+                    // HTML's `document.open()` keeps the `Document`, the
+                    // `Window` and the environment settings object, so the
+                    // realms and every handle minted against them survive
+                    // (ADR-0034 D2). A driver's own `callFunctionOn` is what
+                    // asked for this replacement — tearing its context down
+                    // under it would fail the very call that requested it.
+                    self.commit_replacement_document(
+                        &html, wait_until, /* preserve_contexts */ true,
+                    )?;
                 }
             }
             pending = self.state.take_pending_navigation();
@@ -3031,16 +3102,23 @@ impl Page {
         }
         // Timers, intervals and animation frames belong to the old document too.
         self.hooks.reset_for_navigation();
-        // Evaluations parked on a promise of the outgoing document (ADR-0034
-        // D1). **Before** the worlds are torn down: an isolated world's
-        // `JsValue` would otherwise outlive its runtime, which aborts the
-        // process rather than failing a test. Every world, not only the ones
-        // about to be destroyed — a main-world promise belongs to the dead
-        // document just as much, and nothing will ever settle it.
-        self.fail_pending_awaits(None, "Execution context was destroyed.");
-        // Every isolated world is destroyed and rebuilt against a fresh global
-        // before any init script runs (ADR-0033 D9).
-        self.reset_worlds_for_navigation();
+        // A `document.open()` replacement keeps its execution contexts, so the
+        // three things below — all of which exist to make a *new* realm — are
+        // exactly what it skips (ADR-0034 D2). Everything else in this reset
+        // still runs, `RenderState::reset` above most of all.
+        if !self.preserving_contexts.get() {
+            // Evaluations parked on a promise of the outgoing document
+            // (ADR-0034 D1). **Before** the worlds are torn down: an isolated
+            // world's `JsValue` would otherwise outlive its runtime, which
+            // aborts the process rather than failing a test. Every world, not
+            // only the ones about to be destroyed — a main-world promise
+            // belongs to the dead document just as much, and nothing will ever
+            // settle it.
+            self.fail_pending_awaits(None, "Execution context was destroyed.");
+            // Every isolated world is destroyed and rebuilt against a fresh
+            // global before any init script runs (ADR-0033 D9).
+            self.reset_worlds_for_navigation();
+        }
         // A request the outgoing document started must not be routed into the
         // new one; the ids were aborted just above.
         self.shared.clear_net_worlds();
@@ -4047,6 +4125,13 @@ impl Page {
             if self.suspended.get() {
                 return;
             }
+            // A script-created parser the task opened and wrote to but never
+            // closed (ADR-0034 D2). `document.open(); document.write(…)` with
+            // no `close()` is the legacy idiom, and a browser shows that
+            // content; queueing the replacement here is what makes it appear.
+            // Immediately before the navigation drain, so it commits on this
+            // pass rather than the next.
+            self.flush_unclosed_script_parser();
             // A navigation queued by script (ADR-0022). It comes first because
             // it invalidates everything below it: the document, and with it
             // every queued update keyed on a node of the outgoing tree.
@@ -5126,6 +5211,24 @@ impl Page {
         true
     }
 
+    /// Commits a script-created parser that was written to and never closed
+    /// (ADR-0034 D2).
+    ///
+    /// **Only when it holds something.** An empty buffer is an `open()` whose
+    /// `write()`s have not happened yet, and flushing that would replace the
+    /// document with nothing and leave the writes with no parser to reach.
+    fn flush_unclosed_script_parser(&self) {
+        if !self.state.script_parser_is_open() {
+            return;
+        }
+        match self.state.take_script_parser() {
+            Some(html) if !html.is_empty() => self.state.queue_document_replacement(html),
+            // Put an empty buffer back: taking it is what closes the parser.
+            Some(_) => self.state.open_script_parser(),
+            None => {}
+        }
+    }
+
     /// Answers the evaluations parked on a promise (ADR-0034 D1).
     ///
     /// A settled promise is described **in its own world** — the value is a
@@ -5697,7 +5800,12 @@ impl Page {
     /// world is about to be destroyed, so only its in-flight requests are
     /// harvested here — `reset_worlds_for_navigation` does the teardown.
     fn reset_worlds_pending_net(&self) -> Vec<RequestId> {
-        let mut ids = self.state.reset_for_navigation();
+        // A replacement keeps its contexts, so the main world keeps its id
+        // (ADR-0034 D2); the isolated worlds are not touched at all, which is
+        // why the loop below still only harvests their in-flight requests.
+        let mut ids = self
+            .state
+            .reset_for_navigation_with(!self.preserving_contexts.get());
         for world in self.worlds.all() {
             if world.id == oxidepage_bindings::MAIN_WORLD {
                 continue;

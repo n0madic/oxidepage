@@ -643,6 +643,12 @@ partial interface Document {
   [CEReactions] attribute DOMString title;
   readonly attribute HTMLElement? body;
   readonly attribute HTMLElement? head;
+  // Only the argument-less overload of `open()`: the three-argument form is
+  // `window.open` under another name and needs a browsing context to return.
+  // It returns the document, as the spec says, so `document.open().write(…)`
+  // chains.
+  Document open();
+  undefined close();
   undefined write(DOMString... text);
   undefined writeln(DOMString... text);
 };

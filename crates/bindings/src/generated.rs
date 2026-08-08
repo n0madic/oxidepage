@@ -844,6 +844,8 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
     cx.define_getter(&proto_document, "body", gen_document_get_body)?;
     cx.define_getter(&proto_document, "head", gen_document_get_head)?;
+    cx.define_method(&proto_document, "open", 0, gen_document_open)?;
+    cx.define_method(&proto_document, "close", 0, gen_document_close)?;
     cx.define_method(&proto_document, "write", 0, gen_document_write)?;
     cx.define_method(&proto_document, "writeln", 0, gen_document_writeln)?;
     cx.define_method(
@@ -7041,6 +7043,18 @@ fn gen_document_get_head(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
     let this = cx.this_document(&call.this)?;
     let ret = imp::document::head(cx, this)?;
     cx.opt_node_to_js(ret)
+}
+
+fn gen_document_open(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_document(&call.this)?;
+    let ret = imp::document::open(cx, this)?;
+    cx.node_to_js(ret)
+}
+
+fn gen_document_close(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_document(&call.this)?;
+    imp::document::close(cx, this)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_document_write(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

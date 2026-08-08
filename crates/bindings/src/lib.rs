@@ -1542,6 +1542,7 @@ fn record_console(cx: &BindCx<'_>, level: ConsoleLevel, message: String, args: V
         location,
         group_depth: cx.state.page.console_group_depth.get(),
         timestamp: cx.state.epoch_now_ms(),
+        context_id: Some(cx.state.context_id.get()),
     });
 }
 

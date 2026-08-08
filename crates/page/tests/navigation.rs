@@ -1136,3 +1136,153 @@ fn an_empty_file_input_contributes_an_empty_part() {
         seen[0].body
     );
 }
+
+// === the script-created parser (ADR-0034 D2) ===
+
+/// `document.open()` / `write()` / `close()` replaces the document, and the
+/// replacement travels the ordinary commit path — so it records the same
+/// milestones a URL navigation does. Playwright's `setContent` is exactly this
+/// sequence, and it waits for the `load` at the end of it.
+#[test]
+fn open_write_close_replaces_the_document_and_records_a_commit() {
+    let page = load_html_page(
+        "<!doctype html><title>first</title><p>old</p>",
+        PageOptions::default(),
+    )
+    .expect("page");
+    let _ = page.drain_navigation_events();
+
+    page.eval(
+        "document.open();
+         document.write('<!doctype html><title>second</title><p id=s>new</p>');
+         document.close();",
+    )
+    .expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("document.getElementById('s').textContent")
+            .unwrap(),
+        "new"
+    );
+    assert_eq!(page.eval_to_string("document.title").unwrap(), "second");
+
+    let kinds: Vec<NavigationEventKind> = page
+        .drain_navigation_events()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    for expected in [
+        NavigationEventKind::Started,
+        NavigationEventKind::Committed,
+        NavigationEventKind::Load,
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "a document replacement must record {expected:?}, got {kinds:?}"
+        );
+    }
+}
+
+/// The replacement keeps the document URL: `open()`/`close()` is not a
+/// navigation to anywhere, and a driver reading `page.url()` afterwards must
+/// see what it saw before.
+#[test]
+fn a_document_replacement_keeps_the_url() {
+    let server = spawn_server();
+    let page = loopback_page();
+    page.navigate(&server.url("/start.html"), WaitUntil::Load)
+        .unwrap();
+    let before = page.eval_to_string("location.href").unwrap();
+
+    page.eval("document.open(); document.write('<p>x</p>'); document.close();")
+        .expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(page.eval_to_string("location.href").unwrap(), before);
+}
+
+/// `document.open()` and `write()` with no `close()` is the legacy idiom, and a
+/// browser still shows the content. The task boundary commits it.
+#[test]
+fn an_unclosed_script_parser_still_commits_at_the_task_boundary() {
+    let page = load_html_page("<!doctype html><p>old</p>", PageOptions::default()).expect("page");
+    page.eval("document.open(); document.write('<p id=s>written</p>');")
+        .expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("document.getElementById('s').textContent")
+            .unwrap(),
+        "written"
+    );
+}
+
+/// `document.write` **without** `open()` keeps the behaviour it always had —
+/// the script-created parser is opt-in, and the old path is untouched.
+#[test]
+fn write_without_open_is_still_ignored_outside_a_parser() {
+    let page = load_html_page(
+        "<!doctype html><p id=keep>original</p>",
+        PageOptions::default(),
+    )
+    .expect("page");
+    page.eval("document.write('<p id=s>ignored</p>')")
+        .expect("eval");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("document.getElementById('keep').textContent")
+            .unwrap(),
+        "original"
+    );
+    assert_eq!(
+        page.eval_to_string("String(document.getElementById('s'))")
+            .unwrap(),
+        "null"
+    );
+}
+
+/// A document with no browsing context has nothing to replace, so `open()`
+/// throws there rather than quietly building a buffer that would replace the
+/// *rendered* document (ADR-0017's rule, kept).
+#[test]
+fn open_on_a_second_document_throws() {
+    let page = load_html_page("<!doctype html><p>x</p>", PageOptions::default()).expect("page");
+    assert_eq!(
+        page.eval_to_string(
+            "(() => { try { new DOMParser().parseFromString('<p>a</p>', 'text/html').open(); \
+              return 'no throw'; } catch (e) { return e.name; } })()"
+        )
+        .unwrap(),
+        "InvalidStateError"
+    );
+}
+
+/// `Page::load_html` is the embedder's own document replacement and records the
+/// same milestones — without them a driver's `set_content` looked like nothing
+/// had happened at all.
+#[test]
+fn load_html_records_the_navigation_milestones() {
+    let page = load_html_page("<!doctype html><p>first</p>", PageOptions::default()).expect("page");
+    let _ = page.drain_navigation_events();
+
+    page.load_html("<!doctype html><p>second</p>")
+        .expect("load");
+
+    let kinds: Vec<NavigationEventKind> = page
+        .drain_navigation_events()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    for expected in [
+        NavigationEventKind::Started,
+        NavigationEventKind::Committed,
+        NavigationEventKind::Load,
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "load_html must record {expected:?}, got {kinds:?}"
+        );
+    }
+}

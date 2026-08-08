@@ -35,7 +35,16 @@ pub(crate) fn implementation(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue, J
     })
 }
 
-fn write_text(cx: &BindCx<'_>, text: String) -> Result<(), JsThrow> {
+fn write_text(cx: &BindCx<'_>, this: NodeId, text: String) -> Result<(), JsThrow> {
+    // A script-created parser takes precedence, and only on the rendered
+    // document — that is the one `open()` can have opened (ADR-0034 D2).
+    if is_page_document(cx, this) {
+        match cx.state.append_script_parser(&text) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(message) => return Err(JsThrow::Range(message.to_owned())),
+        }
+    }
     match cx.state.queue_parser_write(&text) {
         Ok(true) => Ok(()),
         Ok(false) => {
@@ -48,7 +57,7 @@ fn write_text(cx: &BindCx<'_>, text: String) -> Result<(), JsThrow> {
 
 /// `document.write` on an XML document throws; on a second HTML document there
 /// is no parser to write into, so it warns and no-ops as it already did off the
-/// parser path. (`open()`/`close()` are not implemented — see ADR-0017.)
+/// parser path.
 fn ensure_writable(cx: &BindCx<'_>, this: NodeId) -> Result<(), JsThrow> {
     if cx.state.dom.borrow().is_html_document(this) {
         Ok(())
@@ -60,16 +69,53 @@ fn ensure_writable(cx: &BindCx<'_>, this: NodeId) -> Result<(), JsThrow> {
     }
 }
 
+/// `document.open()`: throws away the current document and starts a
+/// **script-created parser** collecting its replacement (ADR-0034 D2).
+///
+/// Only on the rendered document, and only for HTML. A `DOMParser` or
+/// `createHTMLDocument` document has no browsing context to replace — the
+/// same rule that gates `defaultView` and `readyState`. The replacement is
+/// applied at the task boundary rather than here, because this runs inside JS
+/// with live `RefCell` borrows on the DOM, style and layout.
+pub(crate) fn open(cx: &BindCx<'_>, this: NodeId) -> Result<NodeId, JsThrow> {
+    ensure_writable(cx, this)?;
+    if !is_page_document(cx, this) {
+        return Err(cx.dom_throw(
+            DomExceptionKind::InvalidStateError,
+            "document.open on a document with no browsing context",
+        ));
+    }
+    cx.state.open_script_parser();
+    // The spec returns the document, so `document.open().write(…)` chains.
+    Ok(this)
+}
+
+/// `document.close()`: hands the collected markup to the page, which replaces
+/// the document at the task boundary.
+///
+/// A `close()` with nothing open is a no-op rather than an error — the spec
+/// says so, and a driver that closes twice must not throw.
+pub(crate) fn close(cx: &BindCx<'_>, this: NodeId) -> Result<(), JsThrow> {
+    ensure_writable(cx, this)?;
+    if !is_page_document(cx, this) {
+        return Ok(());
+    }
+    if let Some(html) = cx.state.take_script_parser() {
+        cx.state.queue_document_replacement(html);
+    }
+    Ok(())
+}
+
 pub(crate) fn write(cx: &BindCx<'_>, this: NodeId, text: Vec<String>) -> Result<(), JsThrow> {
     ensure_writable(cx, this)?;
-    write_text(cx, text.concat())
+    write_text(cx, this, text.concat())
 }
 
 pub(crate) fn writeln(cx: &BindCx<'_>, this: NodeId, text: Vec<String>) -> Result<(), JsThrow> {
     ensure_writable(cx, this)?;
     let mut text = text.concat();
     text.push('\n');
-    write_text(cx, text)
+    write_text(cx, this, text)
 }
 
 /// The document URL, not the base URL: `<base href>` moves `document.baseURI`

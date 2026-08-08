@@ -743,3 +743,65 @@ fn a_navigation_answers_the_awaits_of_the_outgoing_document() {
         "expected a destroyed-context answer, got: {settled}"
     );
 }
+
+/// A `document.open()` replacement driven from a `callFunctionOn` answers with
+/// its real result and does **not** announce that the contexts died
+/// (ADR-0034 D2).
+///
+/// Both halves are the same fact. HTML keeps the `Document`, the `Window` and
+/// the environment settings object across `document.open()`, so the contexts
+/// really do survive; and a driver told otherwise rejects every command it has
+/// in flight against them — including this very call, which is what left
+/// Playwright's `setContent` failing with "Execution context was destroyed".
+#[test]
+fn a_document_replacement_keeps_the_contexts_it_ran_in() {
+    let harness = Harness::start();
+    let (mut client, session, _) = harness.attached();
+    client.call_on(&session, "Runtime.enable", json!({}));
+    client.call_on(&session, "Page.enable", json!({}));
+    client.forget_events(Duration::from_millis(200));
+
+    let before = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "({ kept: 'yes' })" }),
+    );
+    let handle = before["result"]["objectId"].as_str().unwrap().to_owned();
+
+    let replaced = client.call_on(
+        &session,
+        "Runtime.callFunctionOn",
+        json!({
+            "functionDeclaration": "function () { \
+                 document.open(); \
+                 document.write('<!doctype html><p id=s>new</p>'); \
+                 document.close(); \
+                 return 'done'; }",
+            "objectId": &handle,
+            "awaitPromise": true,
+            "returnByValue": true,
+        }),
+    );
+    assert_eq!(replaced["result"]["value"], "done");
+
+    // The commit still happened: the document really was replaced.
+    let events = client.drain_events(Duration::from_millis(500));
+    assert!(
+        events.iter().any(|e| e["method"] == "Page.frameNavigated"),
+        "a replacement is still a commit"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["method"] == "Runtime.executionContextsCleared"),
+        "a replacement must not report its contexts destroyed: {events:?}"
+    );
+
+    // …and the handle minted before it is still live, which is the property a
+    // driver's injected script is built on.
+    client.call_on(
+        &session,
+        "Runtime.getProperties",
+        json!({ "objectId": &handle }),
+    );
+}

@@ -254,6 +254,15 @@ pub enum PendingNavigation {
     /// that produced it runs under live borrows, and the script may replace the
     /// document.
     JavaScriptUrl { source: String },
+    /// The markup a script-created parser collected between `document.open()`
+    /// and `document.close()` (ADR-0034 D2).
+    ///
+    /// A navigation and not a special case: it replaces the document in place,
+    /// keeps the URL, and must reach the same commit path so the milestones,
+    /// the world rebuild and the context re-announcement all happen. Queued for
+    /// exactly the reason `JavaScriptUrl` is — `close()` runs inside JS, under
+    /// live borrows on the DOM, style and layout.
+    ReplaceDocument { html: String },
 }
 
 /// The request body of a form submission that navigates.
@@ -969,6 +978,13 @@ pub struct PageShared {
     /// Per-document bounds for parser writes.
     pub(crate) parser_write_calls: Cell<usize>,
     pub(crate) parser_write_bytes: Cell<usize>,
+    /// Markup a **script-created parser** has collected (ADR-0034 D2).
+    ///
+    /// `document.open()` opens this buffer, `write`/`writeln` append to it, and
+    /// `close()` hands it to the page as a document replacement. `None` means
+    /// no script-created parser is open, which is the ordinary state and the
+    /// one in which `write` still goes to the real parser.
+    pub(crate) script_parser_buffer: RefCell<Option<String>>,
     /// `console.group` nesting depth. Grouping has no other observable effect
     /// in a headless console, so the depth *is* the feature — it rides on
     /// every `ConsoleMessage` and the CLI indents by it.
@@ -1282,6 +1298,7 @@ impl PageShared {
             pending_parser_write: RefCell::new(String::new()),
             parser_write_calls: Cell::new(0),
             parser_write_bytes: Cell::new(0),
+            script_parser_buffer: RefCell::new(None),
             console_group_depth: Cell::new(0),
             current_script: Cell::new(None),
             fonts_loading: Cell::new(false),
@@ -1771,6 +1788,47 @@ impl WorldState {
         std::mem::take(&mut *self.page.pending_parser_write.borrow_mut())
     }
 
+    // === the script-created parser (ADR-0034 D2) ===
+
+    /// `document.open()`: starts collecting markup that will replace the
+    /// document. Re-opening an already-open buffer discards what it held,
+    /// which is what a second `open()` means.
+    pub fn open_script_parser(&self) {
+        *self.page.script_parser_buffer.borrow_mut() = Some(String::new());
+    }
+
+    /// Whether a script-created parser is collecting.
+    #[must_use]
+    pub fn script_parser_is_open(&self) -> bool {
+        self.page.script_parser_buffer.borrow().is_some()
+    }
+
+    /// Appends to the script-created parser, if one is open.
+    ///
+    /// Returns `false` when there is none, so the caller can fall through to
+    /// the real parser — which is what keeps `document.write` **without**
+    /// `open()` on exactly the path it always took.
+    pub fn append_script_parser(&self, text: &str) -> Result<bool, &'static str> {
+        const MAX_BYTES: usize = 1024 * 1024;
+        let mut buffer = self.page.script_parser_buffer.borrow_mut();
+        let Some(buffer) = buffer.as_mut() else {
+            return Ok(false);
+        };
+        if buffer.len().saturating_add(text.len()) > MAX_BYTES {
+            return Err("document.write budget exceeded");
+        }
+        buffer.push_str(text);
+        Ok(true)
+    }
+
+    /// Closes the script-created parser and hands back what it collected.
+    ///
+    /// `None` when none was open — `close()` on a document nobody opened is a
+    /// no-op, not an error.
+    pub fn take_script_parser(&self) -> Option<String> {
+        self.page.script_parser_buffer.borrow_mut().take()
+    }
+
     /// Number of in-flight `fetch`/XHR requests (the page's event loop keeps
     /// settling while this is non-zero).
     #[must_use]
@@ -1787,6 +1845,18 @@ impl WorldState {
     /// events at node ids belonging to the replaced tree.
     #[must_use]
     pub fn reset_for_navigation(&self) -> Vec<RequestId> {
+        self.reset_for_navigation_with(/* new_context */ true)
+    }
+
+    /// [`Self::reset_for_navigation`], with the option to keep the execution
+    /// context alive.
+    ///
+    /// `new_context == false` is the `document.open()` replacement (ADR-0034
+    /// D2): HTML keeps the same `Window` and environment settings object, so
+    /// renumbering would tell a driver its context died when it did not — and
+    /// the driver would drop every later event naming the id it still holds.
+    #[must_use]
+    pub fn reset_for_navigation_with(&self, new_context: bool) -> Vec<RequestId> {
         let aborted = self
             .pending_net
             .borrow_mut()
@@ -1825,7 +1895,16 @@ impl WorldState {
         // would pin that document's whole object graph for the life of the
         // realm, and would let a driver read a stale handle as if it were live.
         // The bumped context id is how the driver learns they all died at once.
-        self.remote_objects.borrow_mut().clear();
+        //
+        // A replacement that keeps its context keeps them too (ADR-0034 D2):
+        // the realm is the same one, so the values are genuinely still live,
+        // and there is no bumped id to have told the driver otherwise. A handle
+        // naming a *node* of the replaced tree is safe regardless — node ids
+        // are generation-checked, so a stale one is a clean error rather than a
+        // hit on whatever now occupies the slot.
+        if new_context {
+            self.remote_objects.borrow_mut().clear();
+        }
         // A payload the outgoing document queued belongs to a world that is
         // gone; reporting it against the new document would attribute it to the
         // wrong execution context.
@@ -1833,7 +1912,9 @@ impl WorldState {
         // Minted from the page's counter rather than bumped locally: ids must
         // be unique across documents *and* worlds, so a driver holding one from
         // the outgoing document gets a clean "no such context" (ADR-0033 D10).
-        self.context_id.set(self.page.next_context_id());
+        if new_context {
+            self.context_id.set(self.page.next_context_id());
+        }
         self.dom.borrow_mut().clear_custom_elements();
         self.page.current_script.set(None);
         self.page.parser_script_active.set(false);
@@ -1841,6 +1922,9 @@ impl WorldState {
         self.page.pending_parser_write.borrow_mut().clear();
         self.page.parser_write_calls.set(0);
         self.page.parser_write_bytes.set(0);
+        // A script-created parser belongs to the document that opened it; the
+        // replacement it was collecting *is* the incoming document.
+        self.page.script_parser_buffer.borrow_mut().take();
         // A group the outgoing document opened must not indent the next one.
         self.page.console_group_depth.set(0);
         // `pending_navigation` is deliberately *not* cleared. The commit path
@@ -1881,6 +1965,12 @@ impl WorldState {
         let dropped = queue.len();
         queue.clear();
         dropped
+    }
+
+    /// Queues the replacement document a script-created parser collected
+    /// (ADR-0034 D2).
+    pub fn queue_document_replacement(&self, html: String) {
+        self.request_navigation(PendingNavigation::ReplaceDocument { html });
     }
 
     /// Queues a navigation for the page's event loop (see

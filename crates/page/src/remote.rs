@@ -285,6 +285,13 @@ impl Page {
             (Some(world), _) | (None, Some(world)) => world,
             (None, None) => oxidepage_bindings::MAIN_WORLD,
         };
+        // Scoped, not held to the end of the function: `run_until_stalled`
+        // below can commit a document replacement, and that destroys every
+        // isolated world's `Runtime`. A `JsValue` of that world still on this
+        // stack would then outlive it — `JS_FreeRuntime` aborts the process on
+        // a non-empty `gc_obj_list` (ADR-0033 D4), which is a crash and not a
+        // failure. `document.close()` from a utility-world `callFunctionOn` —
+        // Playwright's `setContent` exactly — is how it is reached.
         let this_value = match object_id {
             Some(id) => Some(self.lookup(id)?),
             None => None,
@@ -336,6 +343,9 @@ impl Page {
                     "the execution context could not be entered",
                 )))
             })?;
+        // The `this` handle has served its purpose; release it before anything
+        // can tear its world down.
+        drop(this_value);
 
         let result = match outcome {
             Ok(value) => self.finish_value(world, value, options),

@@ -306,7 +306,16 @@ fn console_json(session: &Arc<SessionState>, message: &ConsoleMessage) -> serde_
     json!({
         "type": console_type(message.level),
         "args": args,
-        "executionContextId": session.page.execution_context_id().unwrap_or(1),
+        // The world the call came from, carried on the message — not a guess
+        // at the main context. A driver keys its context map by id and drops
+        // any event naming an id it does not know, so attributing a
+        // utility-world `console.debug` to the main context is not a cosmetic
+        // lie: it is the message being silently discarded. Playwright's
+        // `setContent` waits on exactly such a message.
+        "executionContextId": message
+            .context_id
+            .or_else(|| session.page.execution_context_id().ok())
+            .unwrap_or(1),
         "timestamp": message.timestamp,
         "stackTrace": { "callFrames": message.location.iter().map(frame_json_for_stack).collect::<Vec<_>>() },
     })
@@ -455,7 +464,14 @@ fn navigation_events(
             // event naming an id it does not know — so without this, every
             // `consoleAPICalled` and `bindingCalled` after the first navigation
             // is silently discarded by the driver, not by us.
-            if session.flags.runtime.load(Ordering::Relaxed) {
+            //
+            // **Unless the contexts survived** (ADR-0034 D2). A
+            // `document.open()` replacement keeps the same `Window`, so
+            // announcing a teardown would be false — and expensively so: a
+            // driver rejects every command in flight against a context it is
+            // told has died, including the `callFunctionOn` that ran
+            // `document.close()` in the first place.
+            if session.flags.runtime.load(Ordering::Relaxed) && !navigation.contexts_preserved {
                 connection.emit(Event::session(
                     &session.id,
                     "Runtime.executionContextsCleared",
