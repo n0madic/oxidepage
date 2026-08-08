@@ -4022,8 +4022,14 @@ impl Page {
     }
 
     /// Freezes the page's **own** work: no timers fire, no rendering
-    /// opportunity runs, no queued navigation starts, no subresource load
-    /// begins, and no script of the page's own runs.
+    /// opportunity runs, no queued navigation starts, and no subresource load
+    /// begins.
+    ///
+    /// Not script-free, and deliberately so: a net event delivered while
+    /// suspended still resolves the `fetch`/XHR promise waiting on it and runs
+    /// a microtask checkpoint, and a driver's evaluate runs page script by
+    /// definition. The line is between the page's own scheduling and the
+    /// driver's turn.
     ///
     /// The driver keeps being served (ADR-0034 D3). Embedder jobs run and net
     /// events are delivered, because that is what

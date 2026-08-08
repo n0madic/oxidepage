@@ -111,8 +111,14 @@ embedder's `set_content` produced no `init`, `frameNavigated` or `load` at all.
 ### D3. `Page::suspend` freezes the page, not the protocol
 
 A suspended page runs none of its **own** sources — no timers, no rendering
-opportunities, no queued navigation, no subresource load, no script of its own
-— while embedder jobs and net events keep being served.
+opportunities, no queued navigation, no subresource load — while embedder jobs
+and net events keep being served.
+
+Note what that does *not* say: a suspended page is not script-free. A net event
+delivered while suspended resolves the `fetch`/XHR promise waiting on it and
+runs a microtask checkpoint, so page script does run — and an evaluate from the
+driver runs page script by definition. The line is between the page's own
+*scheduling* and the driver's turn, not between script and no script.
 
 That is what `Target.setAutoAttach { waitForDebuggerOnStart: true }` means: the
 page is stopped so it can be inspected and configured *before* it starts. Under

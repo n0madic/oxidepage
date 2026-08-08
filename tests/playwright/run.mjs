@@ -9,11 +9,12 @@
 // `playwright-core`, not `playwright`: the latter downloads browser binaries at
 // install time, and the whole point here is to drive OxidePage over CDP.
 //
-// This is the stage-9 milestone (ADR-0033). Playwright runs **all** of its
-// injected script in a utility world created with `Page.createIsolatedWorld`,
-// and `addInitScript` and `exposeBinding` ride the same mechanism — so nothing
-// below works at all without real isolated worlds. Checks that need stage 10's
-// frame plumbing are expected to fail and are listed in `expectations.tsv`.
+// Playwright runs **all** of its injected script in a utility world created
+// with `Page.createIsolatedWorld`, and `addInitScript` and `exposeBinding` ride
+// the same mechanism — so nothing below works at all without real isolated
+// worlds (stage 9, ADR-0033). Stage 10 (ADR-0034) took the suite to green:
+// `expectations.tsv` is empty, so any line appearing in it is a regression
+// somebody wrote down instead of fixing.
 
 import { chromium } from 'playwright-core';
 
@@ -82,8 +83,11 @@ function assertEqual(actual, expected, what) {
 /** A promise that rejects if `inner` has not settled within `ms`.
  *
  * The connect/newPage/goto budgets are generous on purpose: they gate every
- * other check, so a timeout there reports 16 failures instead of one, and CI
- * runs this straight after WPT's 10-way-parallel sweep. */
+ * other check, so a timeout there reports every later failure as its own. They
+ * are no longer covering for a race — `Target.attachedToTarget` now precedes
+ * the `createTarget` reply it belongs to (ADR-0034 D7), which is what the
+ * "known flake" actually was — and CI runs this as a job of its own rather
+ * than after the WPT sweep. */
 function within(ms, what, inner) {
   let timer;
   const guard = new Promise((_, reject) => {
