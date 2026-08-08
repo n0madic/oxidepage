@@ -654,7 +654,27 @@ Conformance work landing outside the phase plan:
   and `stopImmediatePropagation` shared, and a value created in one world reads
   as `null` in another. `customElements` is deliberately **not installed**
   outside the main world. `cargo xtask puppeteer` is 48/48 and the new
-  `cargo xtask playwright` is 13/17. Decisions and v1 limits: ADR-0033.
+  `cargo xtask playwright` landed at 13/17 — closed to 17/17 by the next entry.
+  Decisions and v1 limits: ADR-0033.
+- **Frame plumbing and the Playwright surface**: done, and with it the automation
+  roadmap's stage-10 milestone. `cargo xtask playwright` is **17/17 with an empty
+  `expectations.tsv`** and has a CI job; `cargo xtask puppeteer` stayed 48/48.
+  The four remaining failures had four independent causes, not the one the
+  roadmap predicted: `awaitPromise` blocked the session lane and could only be
+  resolved by a later command on that same lane, so it now answers later over a
+  token map, and **every** exit answers (a parked `JsValue` outliving its
+  `Runtime` is a process abort); `document.open`/`write`/`close` were not
+  installed at all, and arrived as a script-created parser buffer committed at
+  the task boundary, where a replacement **preserves** its execution contexts;
+  focus no longer erases an explicit selection, which is what `page.fill` needs;
+  and `waitForSelector` was a bug in our own harness. Three latent defects
+  surfaced on the way: `callFunctionOn` held a `this` handle across the commit
+  that freed the handle's runtime, `Target.attachedToTarget` raced the
+  `Target.createTarget` reply it is supposed to precede, and a console message
+  was attributed to the main context whatever world made it. A frame's state
+  (id, URL, committed loader, in-flight loader) moved into `crates/cdp/src/frame.rs`
+  so real iframes become a change of ownership rather than a rewrite.
+  Decisions and v1 limits: ADR-0034.
 
 ## Deliberate limits at the Puppeteer milestone
 
@@ -678,13 +698,16 @@ context per call. No per-world CSP and no per-world prototype-poisoning
 protection: isolation is of globals and wrappers, and the DOM underneath is one
 shared, equally-trusted tree.
 
-**Playwright.** `cargo xtask playwright` is 13 of 17. `page.fill` appends rather
-than replacing (the `Input` domain does not honour a selection);
-`page.setContent`, `page.waitForSelector` and `page.exposeBinding` need the
-injected-script and frame plumbing of the next stage. `Emulation.setEmulatedMedia`
-accepts each media feature's **default** and refuses every other value — and
-note that `matchMedia` reports `prefers-reduced-motion` and `forced-colors` as
-not matching regardless, a pre-existing gap in stylo's media-feature support.
+**Playwright.** `cargo xtask playwright` is 17 of 17 with an empty expectation
+file. `browserType.launch()` is not supported — `connectOverCDP` is the entry
+point, and the pipe transport, Chromium's flag surface and the stderr handshake
+are out of scope. No video recording, no tracing, no `page.accessibility`, no
+coverage APIs. `Emulation.setEmulatedMedia` accepts each media feature's
+**default** and refuses every other value — and note that `matchMedia` reports
+`prefers-reduced-motion` and `forced-colors` as not matching regardless, a
+pre-existing gap in stylo's media-feature support. `page.fill` on a
+`contenteditable` fails and drag-and-drop is unavailable: there is no `Range`
+/`Selection` over arbitrary DOM and no `DataTransfer`.
 
 **Interception and network.** Response-stage interception is absent:
 `Fetch.continueResponse`, `Fetch.getResponseBody` and
