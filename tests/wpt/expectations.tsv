@@ -2732,8 +2732,8 @@ custom-elements/microtasks-and-constructors.html	Microtasks evaluate immediately
 custom-elements/microtasks-and-constructors.html	__harness__	OK
 custom-elements/overwritten-customElements-global.html	__harness__	OK
 custom-elements/perform-microtask-checkpoint-before-construction.html	HTML parser must perform a microtask checkpoint before constructing a custom element	FAIL
-custom-elements/perform-microtask-checkpoint-before-construction.html	HTML parser must perform a microtask checkpoint before constructing a custom element during the adoption agency algorithm	TIMEOUT
-custom-elements/perform-microtask-checkpoint-before-construction.html	__harness__	TIMEOUT
+custom-elements/perform-microtask-checkpoint-before-construction.html	HTML parser must perform a microtask checkpoint before constructing a custom element during the adoption agency algorithm	FAIL
+custom-elements/perform-microtask-checkpoint-before-construction.html	__harness__	OK
 custom-elements/pseudo-class-defined-customized-builtins.html	__harness__	TIMEOUT
 custom-elements/pseudo-class-defined-customized-builtins.html	createElementNS("http://www.w3.org/2000/svg", "abbr", is:"my-abbr") should be :defined	FAIL
 custom-elements/pseudo-class-defined.html	<div> should be :defined	FAIL

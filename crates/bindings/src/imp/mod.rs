@@ -57,6 +57,7 @@ pub(crate) mod html_image_element;
 pub(crate) mod html_input_element;
 pub(crate) mod html_label_element;
 pub(crate) mod html_link_element;
+pub(crate) mod html_meta_element;
 pub(crate) mod html_opt_group_element;
 pub(crate) mod html_option_element;
 pub(crate) mod html_script_element;

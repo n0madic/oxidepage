@@ -3310,6 +3310,30 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
 
     let proto_html_meta_element = cx.begin_interface("HTMLMetaElement", Some("HTMLElement"))?;
+    cx.define_accessor_ce(
+        &proto_html_meta_element,
+        "name",
+        gen_html_meta_element_get_name,
+        gen_html_meta_element_set_name,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_meta_element,
+        "httpEquiv",
+        gen_html_meta_element_get_http_equiv,
+        gen_html_meta_element_set_http_equiv,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_meta_element,
+        "content",
+        gen_html_meta_element_get_content,
+        gen_html_meta_element_set_content,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_meta_element,
+        "media",
+        gen_html_meta_element_get_media,
+        gen_html_meta_element_set_media,
+    )?;
     cx.finish_interface(
         "HTMLMetaElement",
         &proto_html_meta_element,
@@ -12035,6 +12059,62 @@ fn gen_html_body_element_set_onunload(
     let this = cx.this_element(&call.this)?;
     let value = call.arg(0);
     imp::set_event_handler(cx, this, "unload", value);
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_meta_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_meta_element::name(cx, this)?))
+}
+
+fn gen_html_meta_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_meta_element::set_name(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_meta_element_get_http_equiv(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_meta_element::http_equiv(
+        cx, this,
+    )?))
+}
+
+fn gen_html_meta_element_set_http_equiv(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_meta_element::set_http_equiv(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_meta_element_get_content(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_meta_element::content(cx, this)?))
+}
+
+fn gen_html_meta_element_set_content(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_meta_element::set_content(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_meta_element_get_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_meta_element::media(cx, this)?))
+}
+
+fn gen_html_meta_element_set_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_meta_element::set_media(cx, this, a0)?;
     Ok(JsValue::Undefined)
 }
 

@@ -1271,3 +1271,59 @@ fn a_scripted_template_has_content_too() {
         "11,B,0"
     );
 }
+
+/// `<meta>` reflects the attributes HTML gives it.
+///
+/// Regression: the interface had **no members**, so `meta.name` was
+/// `undefined` — and a page (or a harness) asking a `<meta>` what it declares
+/// got "there is no such metadata" rather than an answer. WPT's own
+/// `testharness.js` reads `<meta name=timeout content=long>` exactly that way,
+/// so every file declaring itself slow silently got the short deadline.
+#[test]
+fn meta_reflects_its_attributes() {
+    let page = load_html_page(
+        "<!DOCTYPE html><head>\
+         <meta id='m' name='timeout' content='long' media='screen'>\
+         <meta id='e' http-equiv='refresh' content='0'>\
+         </head><body>",
+        PageOptions::default(),
+    )
+    .unwrap();
+    let s = |expr: &str| page.eval_to_string(expr).unwrap();
+
+    assert_eq!(s("document.getElementById('m').name"), "timeout");
+    assert_eq!(s("document.getElementById('m').content"), "long");
+    assert_eq!(s("document.getElementById('m').media"), "screen");
+    // Absent reflects as the empty string, not `undefined` — that difference is
+    // the whole bug.
+    assert_eq!(s("document.getElementById('m').httpEquiv"), "");
+    // `httpEquiv` names the hyphenated content attribute.
+    assert_eq!(s("document.getElementById('e').httpEquiv"), "refresh");
+
+    // And the setters write the attribute back.
+    assert_eq!(
+        s(
+            "(() => { const m = document.getElementById('m'); m.name = 'viewport'; \
+           return m.getAttribute('name'); })()"
+        ),
+        "viewport"
+    );
+    assert_eq!(
+        s(
+            "(() => { const e = document.getElementById('e'); e.httpEquiv = 'content-type'; \
+           return e.getAttribute('http-equiv'); })()"
+        ),
+        "content-type"
+    );
+
+    // The lookup `testharness.js` performs, end to end.
+    assert_eq!(
+        s(
+            "(() => { const metas = document.getElementsByTagName('meta'); \
+           for (let i = 0; i < metas.length; i++) \
+             if (metas[i].name === 'viewport') return metas[i].content; \
+           return 'not found'; })()"
+        ),
+        "long"
+    );
+}

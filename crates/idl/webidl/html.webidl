@@ -175,7 +175,12 @@ interface HTMLHtmlElement : HTMLElement {};
 interface HTMLHeadElement : HTMLElement {};
 interface HTMLBodyElement : HTMLElement {};
 interface HTMLTitleElement : HTMLElement {};
-interface HTMLMetaElement : HTMLElement {};
+interface HTMLMetaElement : HTMLElement {
+  [CEReactions] attribute DOMString name;
+  [CEReactions] attribute DOMString httpEquiv;
+  [CEReactions] attribute DOMString content;
+  [CEReactions] attribute DOMString media;
+};
 interface HTMLBaseElement : HTMLElement {};
 interface HTMLStyleElement : HTMLElement {};
 interface HTMLTemplateElement : HTMLElement {

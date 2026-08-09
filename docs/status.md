@@ -27,7 +27,7 @@ v1 limits.
   NodeList/HTMLCollection (live, Proxy-indexed), HTMLElement plus the per-tag
   interfaces HTMLAnchorElement/HTMLAreaElement (full
   `HTMLHyperlinkElementUtils`), HTMLImageElement, HTMLLinkElement,
-  HTMLFormElement, HTMLScriptElement, Event,
+  HTMLMetaElement, HTMLFormElement, HTMLScriptElement, Event,
   CustomEvent, MutationObserver/MutationRecord, DOMException. Document base URL
   (`<base href>`) backs URL reflection, `baseURI`, and subresource resolution.
   `querySelector*`/`matches`/`closest` via the `selectors` crate over the
