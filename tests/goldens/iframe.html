@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!--
+  The frame splice (ADR-0035 D7): the child's items ride into the embedder's
+  list between a `PushClip` on the `<iframe>` content box and a `PushLayer`
+  translating to its origin, so this golden is where the *shape* of that
+  sequence is pinned rather than only its effect.
+
+  The child's content is 70px tall in a 50px frame, so the clip is what keeps
+  it inside — the pair of pops at the end is as load-bearing as the pushes.
+  `iframe-basic` is the pixel half of the same statement.
+-->
+<html>
+<body style="margin:0;background:#ffffff">
+  <div style="width:120px;height:20px;background:#0000ff"></div>
+  <iframe width="150" height="50" style="display:block;border:0"
+    srcdoc="<body style='margin:0'>
+      <div style='width:80px;height:30px;background:#ff0000'></div>
+      <div style='width:60px;height:40px;background:#008000'></div>"></iframe>
+</body>
+</html>

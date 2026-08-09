@@ -1,0 +1,20 @@
+{
+  "viewport": [800.00, 600.00],
+  "content_size": [800.00, 600.00],
+  "items": [
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 800.00, 600.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 120.00, 20.00], "radii": null, "brush": { "solid": "#0000ffff" } },
+    { "type": "PushClip", "rect": [0.00, 20.00, 150.00, 50.00], "radii": null },
+    { "type": "PushLayer", "opacity": 1.00, "transform": [1.00, 0.00, 0.00, 1.00, 0.00, 20.00] },
+    { "type": "Fill", "rect": [0.00, 0.00, 150.00, 70.00], "radii": null, "brush": { "solid": "#ffffffff" } },
+    { "type": "Fill", "rect": [0.00, 0.00, 80.00, 30.00], "radii": null, "brush": { "solid": "#ff0000ff" } },
+    { "type": "Fill", "rect": [0.00, 30.00, 60.00, 40.00], "radii": null, "brush": { "solid": "#008000ff" } },
+    { "type": "PopLayer" },
+    { "type": "PopClip" }
+  ],
+  "resources": {
+    "fonts": [],
+    "images": []
+  }
+}

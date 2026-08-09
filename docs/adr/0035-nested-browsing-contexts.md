@@ -457,7 +457,11 @@ discard, `src`/`srcdoc` loading, scripts running in the frame's own realm,
 `contentDocument`, replaced-element sizing, the frame laying out in its own
 viewport, and the display-list splice — structurally, walking
 `PushClip → PushLayer → the frame's own fill → PopLayer`, with a frameless page
-asserted to gain no splice at all. `crates/page/tests/frame_scripting.rs` (18)
+asserted to gain no splice at all. The splice is pinned twice more outside
+Rust: `tests/goldens/iframe.json` fixes the exact
+`PushClip → PushLayer → the child's items → PopLayer → PopClip` sequence, and
+the `tests/reftests/iframe-basic{,-ref}.html` pair asserts the pixels it
+produces — including that the clip holds content taller than the frame. `crates/page/tests/frame_scripting.rs` (18)
 covers the window family, `postMessage` in both directions and its
 `DataCloneError` refusals, a child's globals staying unreachable, the
 `sandbox` slice, a frame navigating itself, a context being named and renamed,
@@ -481,8 +485,7 @@ now run — no line moved from PASS to a failure.
 
 **Not implemented, and tracked rather than hidden:** `Network.*` events
 carrying the initiating frame; `<form target>`, which has never been read at
-all; a download started inside a frame; and a dedicated display-list golden and
-Ahem reftest pair for a frame, the splice being covered structurally instead.
+all; and a download started inside a frame.
 
 ## Deliberate limits (P6 — absent beats fake)
 
