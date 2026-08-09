@@ -1521,6 +1521,7 @@ impl FrameShared {
             viewport,
             Rc::new(navigator),
             Rc::new(screen),
+            None,
         )
     }
 
@@ -1534,9 +1535,12 @@ impl FrameShared {
         viewport: Viewport,
         navigator: Rc<NavigatorData>,
         screen: Rc<ScreenData>,
+        images: Option<Rc<RefCell<oxidepage_layout::images::ImageStore>>>,
     ) -> Rc<Self> {
         let mut style_engine = StyleEngine::for_document(&dom.borrow(), document, viewport);
-        let layout = Rc::new(RefCell::new(LayoutEngine::new(viewport)));
+        let layout = Rc::new(RefCell::new(LayoutEngine::with_image_store(
+            viewport, images,
+        )));
         // Wire real font metrics (parley/skrifa) into the cascade so
         // `ex`/`ch`/`ic` units resolve against actual fonts (WP-H).
         style_engine.set_font_metrics_provider(layout.borrow().font_metrics_factory());
@@ -1619,6 +1623,8 @@ impl FrameShared {
             viewport,
             Rc::clone(&self.navigator),
             Rc::clone(&self.screen),
+            // One image store for the whole page (ADR-0035 D7).
+            Some(self.layout.borrow().image_store()),
         )
     }
 

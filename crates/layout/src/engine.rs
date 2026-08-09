@@ -11,7 +11,9 @@
 //! pointer diffing against a per-build snapshot (a deliberate deviation from
 //! blitz-dom's RestyleDamage bits; ADR-0006).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use oxidepage_base::NodeId;
 use oxidepage_dom::select::enter_active_tree;
@@ -88,7 +90,15 @@ pub struct LayoutEngine {
     fonts: FontSystem,
     viewport: Viewport,
     pub(crate) scroll: ScrollState,
-    images: crate::images::ImageStore,
+    /// Decoded images, **shared by every browsing context of the page**
+    /// (ADR-0035 D7).
+    ///
+    /// One id space rather than one per frame: `ImageId` is minted by a store's
+    /// own counter, so per-frame stores would both mint `1` and splicing a
+    /// child's display list into its parent would have to rebase every image
+    /// id — work whose failure mode is silently wrong pictures rather than a
+    /// crash. Sharing also decodes a URL used in two frames once.
+    images: Rc<RefCell<crate::images::ImageStore>>,
     /// Monotonic counter bumped when a web font is registered; folded into the
     /// reflow/paint stamps so a newly loaded `@font-face` forces a re-shape.
     fonts_version: u64,
@@ -103,12 +113,23 @@ pub struct LayoutEngine {
 impl LayoutEngine {
     #[must_use]
     pub fn new(viewport: Viewport) -> Self {
+        Self::with_image_store(viewport, None)
+    }
+
+    /// A layout engine sharing an existing image store — how a nested browsing
+    /// context, and a frame's replacement document, keep one id space and one
+    /// decode per URL (ADR-0035 D7).
+    #[must_use]
+    pub fn with_image_store(
+        viewport: Viewport,
+        images: Option<Rc<RefCell<crate::images::ImageStore>>>,
+    ) -> Self {
         Self {
             tree: LayoutTree::new(viewport),
             fonts: FontSystem::new(),
             viewport,
             scroll: ScrollState::default(),
-            images: crate::images::ImageStore::default(),
+            images: images.unwrap_or_default(),
             fonts_version: 0,
             stamp: None,
             snapshot: None,
@@ -167,7 +188,7 @@ impl LayoutEngine {
             style_version,
             viewport: self.viewport,
             element_scroll_version: self.scroll.element_version,
-            images_version: self.images.version(),
+            images_version: self.images.borrow().version(),
             fonts_version: self.fonts_version,
         }
     }
@@ -201,8 +222,15 @@ impl LayoutEngine {
     /// The decoded-image store (read by paint for `<img>` and background
     /// images).
     #[must_use]
-    pub fn images(&self) -> &crate::images::ImageStore {
-        &self.images
+    pub fn images(&self) -> std::cell::Ref<'_, crate::images::ImageStore> {
+        self.images.borrow()
+    }
+
+    /// The shared store itself, so a nested browsing context's engine can be
+    /// built over the same one.
+    #[must_use]
+    pub fn image_store(&self) -> Rc<RefCell<crate::images::ImageStore>> {
+        Rc::clone(&self.images)
     }
 
     /// Inserts a decoded raster image for `url`, bumping the store version so
@@ -214,7 +242,9 @@ impl LayoutEngine {
         height: u32,
         rgba: std::sync::Arc<Vec<u8>>,
     ) {
-        self.images.insert_raster(url, width, height, rgba);
+        self.images
+            .borrow_mut()
+            .insert_raster(url, width, height, rgba);
     }
 
     /// Inserts a vector (SVG) image for `url`: `width`/`height` are its
@@ -227,12 +257,14 @@ impl LayoutEngine {
         height: u32,
         svg: std::sync::Arc<Vec<u8>>,
     ) {
-        self.images.insert_vector(url, width, height, svg);
+        self.images
+            .borrow_mut()
+            .insert_vector(url, width, height, svg);
     }
 
     /// Marks `url` as a broken image (failed load/decode).
     pub fn mark_image_broken(&mut self, url: String) {
-        self.images.insert_broken(url);
+        self.images.borrow_mut().insert_broken(url);
     }
 
     /// Replaces the viewport; the next reflow rebuilds the layout.
@@ -249,7 +281,7 @@ impl LayoutEngine {
             dom_version: dom.style_version(),
             style_version: style.version(),
             viewport: self.viewport,
-            images_version: self.images.version(),
+            images_version: self.images.borrow().version(),
             fonts_version: self.fonts_version,
         };
         if self.stamp == Some(stamp) {
@@ -271,7 +303,13 @@ impl LayoutEngine {
             // active-tree scope. The compute passes below don't need it —
             // they only see captured data.
             let _scope = enter_active_tree(dom);
-            self.tree = build_layout_tree(dom, style, &mut self.fonts, self.viewport, &self.images);
+            self.tree = build_layout_tree(
+                dom,
+                style,
+                &mut self.fonts,
+                self.viewport,
+                &self.images.borrow(),
+            );
             hoist_out_of_flow(&mut self.tree);
             self.snapshot = Some(self.take_snapshot(dom, style.document()));
             self.rebuild_count += 1;
@@ -397,7 +435,7 @@ impl LayoutEngine {
             index_by_node,
             pseudo_styles,
             ifc_contributors,
-            images_version: self.images.version(),
+            images_version: self.images.borrow().version(),
             fonts_version: self.fonts_version,
         }
     }
@@ -425,7 +463,7 @@ impl LayoutEngine {
             return false;
         }
         // A decoded image changes intrinsic sizes captured at construction.
-        if snapshot.images_version != self.images.version() {
+        if snapshot.images_version != self.images.borrow().version() {
             return false;
         }
         // A newly registered web font changes glyph resolution: text must
