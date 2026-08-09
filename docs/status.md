@@ -739,7 +739,11 @@ implemented at all, so `history` inside a frame addresses nothing. Inside a
 frame, `async`/`defer` scripts run where they appear rather than being
 reordered, and a module script is **refused with a diagnostic** rather than run:
 the loader is per realm, and a half-wired module graph is worse than an absent
-one. There are no `<frameset>`, `<frame>`, `<object>`, `<embed>`, `<portal>` or
+one. A `display: none` `<iframe>` still gets a
+browsing context that loads and lays out, so `getComputedStyle` inside one
+answers with a box where a browser reports none — the context is right (HTML
+creates it either way), the *rendering* of it is what should be suppressed.
+There are no `<frameset>`, `<frame>`, `<object>`, `<embed>`, `<portal>` or
 `<fencedframe>` embedders — `<iframe>` is the only one. Cross-frame objects
 carry the *accessing* realm's prototypes and a child's globals are unreachable,
 both deliberate (ADR-0035 D4).
