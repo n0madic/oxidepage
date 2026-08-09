@@ -8,6 +8,8 @@
 //! (steps 3–7) in a padding-box clip. Children paint back-to-front, ordered by
 //! `(stacking bucket, z-index, tree order)`.
 
+use std::collections::HashMap;
+
 use oxidepage_base::{Point, Rect, Size, Transform2D};
 use oxidepage_dom::{DomTree, NodeId};
 use oxidepage_layout::{BoxId, LayoutEngine, PseudoBox, ReplacedContent};
@@ -37,7 +39,7 @@ const MAX_PAINT_DEPTH: usize = 256;
 /// export time an element background is an ordinary [`DisplayItem::Fill`],
 /// indistinguishable from any other fill, so the only place that can drop it is
 /// the walk that knows what it is (ADR-0026).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PaintOptions {
     /// Paint element backgrounds — colors, gradients and background images —
     /// and the canvas background propagated from `<html>`/`<body>`. The opaque
@@ -46,12 +48,33 @@ pub struct PaintOptions {
     /// **Defaults to `true`, unlike Chrome's `printBackground`**, so
     /// `render -o page.pdf` keeps meaning "the page as it looks" (ADR-0026).
     pub print_background: bool,
+    /// The display list of each nested browsing context, keyed by the
+    /// `<iframe>` element that embeds it, with the frame's own document scroll
+    /// (ADR-0035 D7).
+    ///
+    /// Built by the caller — `page` owns the frame tree; `paint` stays a dumb
+    /// consumer (P5) and only splices what it is handed.
+    pub subframes: HashMap<NodeId, SubframeList>,
+}
+
+/// One nested context's painted content, ready to splice into its embedder.
+#[derive(Clone, Debug)]
+pub struct SubframeList {
+    pub list: std::sync::Arc<DisplayList>,
+    /// The frame's own document scroll, baked in at splice time.
+    ///
+    /// There is exactly one raster-time scroll translation — the top
+    /// document's — so a child's has to be applied here. That is the one place
+    /// the "document scroll stays out of the paint stamp" rule inverts, and the
+    /// reason the embedder's cache key has to include it.
+    pub scroll: Point,
 }
 
 impl Default for PaintOptions {
     fn default() -> Self {
         Self {
             print_background: true,
+            subframes: HashMap::new(),
         }
     }
 }
@@ -97,7 +120,7 @@ pub fn build_display_list(
     let mut builder = Builder {
         dom,
         engine,
-        options: *options,
+        options: options.clone(),
         items: Vec::new(),
         resources: ResourceTable::default(),
         suppressed_bg: None,
@@ -564,14 +587,83 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Splices a nested browsing context's display list into this one
+    /// (ADR-0035 D7).
+    ///
+    /// Clipped to the `<iframe>`'s content box and translated to its origin,
+    /// less the frame's own scroll — a child's document scroll behaves like
+    /// *element* scroll here, because the rasterizer applies exactly one, the
+    /// top document's.
+    ///
+    /// **Viewport anchors are dropped, not re-emitted.** That marker tells the
+    /// rasterizer to withhold the *top document's* scroll translation. A
+    /// `position: fixed` banner inside a frame is fixed to the frame's
+    /// viewport, so it needs no child-scroll term — but keeping the anchor
+    /// would also exempt it from the page's scroll, and it would then float
+    /// over the page whenever the `<iframe>` scrolled away.
+    fn paint_subframe(&mut self, owner: NodeId, content: Rect) {
+        let Some(subframe) = self.options.subframes.get(&owner).cloned() else {
+            return;
+        };
+        if content.is_empty() {
+            return;
+        }
+        self.items.push(DisplayItem::PushClip {
+            rect: content,
+            radii: BorderRadii::default(),
+        });
+        self.items.push(DisplayItem::PushLayer {
+            opacity: 1.0,
+            transform: Transform2D::translation(
+                content.origin.x - subframe.scroll.x,
+                content.origin.y - subframe.scroll.y,
+            ),
+        });
+        self.items.extend(
+            subframe
+                .list
+                .items
+                .iter()
+                .filter(|item| {
+                    !matches!(
+                        item,
+                        DisplayItem::PushViewportAnchor | DisplayItem::PopViewportAnchor
+                    )
+                })
+                .cloned(),
+        );
+        self.items.push(DisplayItem::PopLayer);
+        self.items.push(DisplayItem::PopClip);
+        // Ids need no rebasing: font ids are content hashes and the page shares
+        // one image store.
+        self.resources.merge(&subframe.list.resources);
+    }
+
     /// Paints a replaced element's content: a decoded `<img>` over its content
     /// box (stretched), or a gray placeholder when the image is broken/missing
     /// but the box has a size (ADR-0007 D7, WP-L).
     fn paint_replaced(&mut self, box_id: BoxId, abs_origin: Point, style: Option<&ComputedValues>) {
         let (content, data) = {
             let b = self.engine.tree().box_(box_id);
-            let Some(ReplacedContent::Image(ctx)) = &b.replaced else {
-                return;
+            let ctx = match &b.replaced {
+                Some(ReplacedContent::Image(ctx)) => ctx,
+                Some(ReplacedContent::Document(_)) => {
+                    let node = b.dom_node;
+                    let bl = b.final_layout.border;
+                    let pad = b.final_layout.padding;
+                    let size = b.final_layout.size;
+                    let content = Rect::from_xywh(
+                        abs_origin.x + bl.left + pad.left,
+                        abs_origin.y + bl.top + pad.top,
+                        (size.width - bl.left - bl.right - pad.left - pad.right).max(0.0),
+                        (size.height - bl.top - bl.bottom - pad.top - pad.bottom).max(0.0),
+                    );
+                    if let Some(node) = node {
+                        self.paint_subframe(node, content);
+                    }
+                    return;
+                }
+                _ => return,
             };
             let bl = b.final_layout.border;
             let pad = b.final_layout.padding;

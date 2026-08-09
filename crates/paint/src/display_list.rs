@@ -437,6 +437,21 @@ impl ResourceTable {
         self.fonts.iter().find(|f| f.id == id).map(|f| &f.data)
     }
 
+    /// Folds another list's resources in, skipping what is already present.
+    ///
+    /// No id rebasing, and that is a property of the design rather than luck: a
+    /// `FontId` is a content hash, and every browsing context of a page shares
+    /// one `ImageStore` and therefore one `ImageId` space (ADR-0035 D7). Give
+    /// frames their own stores again and this becomes silently wrong pictures.
+    pub fn merge(&mut self, other: &Self) {
+        for font in &other.fonts {
+            self.add_font(font.clone());
+        }
+        for image in &other.images {
+            self.add_image(Arc::clone(image));
+        }
+    }
+
     /// Records a decoded image if its [`ImageId`] is not already present.
     pub fn add_image(&mut self, image: Arc<DecodedImage>) {
         if !self.images.iter().any(|i| i.id == image.id) {

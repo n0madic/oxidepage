@@ -76,6 +76,10 @@ impl Default for ScreenshotOptions {
 pub(crate) struct RenderState {
     cache: RefCell<Option<Arc<DisplayList>>>,
     stamp: Cell<Option<PaintStamp>>,
+    /// A rolling key over every nested context's paint stamp and document
+    /// scroll (ADR-0035 D7). A child's scroll is *baked* into this list, so the
+    /// embedder's own stamp cannot see it move.
+    subframe_key: Cell<Option<u64>>,
     /// Set once a consumer asked for rendered output, so a rendering
     /// opportunity refreshes the cached display list.
     consumer: Cell<bool>,
@@ -88,6 +92,7 @@ impl RenderState {
     pub(crate) fn reset(&self) {
         *self.cache.borrow_mut() = None;
         self.stamp.set(None);
+        self.subframe_key.set(None);
     }
 }
 
@@ -251,9 +256,73 @@ impl Page {
     /// the ordinary one.
     fn full_page_display_list(&self, options: &PaintOptions) -> DisplayList {
         self.update_the_rendering();
+        let options = PaintOptions {
+            subframes: self.build_subframe_lists(options),
+            ..options.clone()
+        };
         let dom = self.state.dom.borrow();
         let engine = self.state.layout.borrow();
-        build_display_list(&dom, &engine, options)
+        build_display_list(&dom, &engine, &options)
+    }
+
+    /// Builds every nested browsing context's display list, deepest first, so a
+    /// frame that itself embeds frames already carries them when its embedder
+    /// splices it (ADR-0035 D7).
+    ///
+    /// `paint` stays a dumb consumer: it knows nothing of the frame tree and
+    /// only splices the lists it is handed.
+    fn build_subframe_lists(
+        &self,
+        options: &PaintOptions,
+    ) -> std::collections::HashMap<oxidepage_base::NodeId, oxidepage_paint::SubframeList> {
+        let mut lists = std::collections::HashMap::new();
+        // `pre_order` is parents-first; reversing it makes it deepest-first.
+        for frame in self.frames.pre_order().into_iter().rev() {
+            let Some(owner) = frame.owner() else {
+                continue; // the top-level context is the one being painted into
+            };
+            let shared = frame.shared();
+            let list = {
+                let dom = shared.dom.borrow();
+                let engine = shared.layout.borrow();
+                let nested = PaintOptions {
+                    subframes: lists.clone(),
+                    ..options.clone()
+                };
+                Arc::new(build_display_list(&dom, &engine, &nested))
+            };
+            let scroll = shared.layout.borrow().viewport_scroll();
+            lists.insert(owner, oxidepage_paint::SubframeList { list, scroll });
+        }
+        lists
+    }
+
+    /// A rolling key over every nested context's paint stamp **and document
+    /// scroll**.
+    ///
+    /// A child's scroll is baked into its embedder's list at build time — there
+    /// is only one raster-time scroll — so the embedder's cache must notice it
+    /// moving. This is the one place the rule "document scroll stays out of the
+    /// paint stamp" inverts, and it lives here rather than in `PaintStamp` so
+    /// `layout` keeps knowing nothing about frames.
+    fn subframe_key(&self) -> u64 {
+        let mut key: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |value: u64| {
+            key ^= value;
+            key = key.wrapping_mul(0x100_0000_01b3);
+        };
+        for frame in self.frames.pre_order() {
+            if frame.owner().is_none() {
+                continue;
+            }
+            let engine = frame.shared().layout.borrow();
+            let stamp = engine.paint_stamp();
+            mix(stamp.hash_value());
+            let scroll = engine.viewport_scroll();
+            mix(scroll.x.to_bits().into());
+            mix(scroll.y.to_bits().into());
+        }
+        key
     }
 
     /// The HTML "update the rendering" step (ADR-0007 D8): fire pending
@@ -290,19 +359,27 @@ impl Page {
     /// Returns the cached display list, rebuilding it if the paint stamp
     /// changed. Assumes layout is already flushed.
     fn build_cached_display_list(&self) -> Arc<DisplayList> {
+        let subframe_key = self.subframe_key();
+        let subframes = self.build_subframe_lists(&PaintOptions::default());
         let dom = self.state.dom.borrow();
         let engine = self.state.layout.borrow();
         let stamp = engine.paint_stamp();
 
         if self.render.stamp.get() == Some(stamp)
+            && self.render.subframe_key.get() == Some(subframe_key)
             && let Some(cached) = self.render.cache.borrow().clone()
         {
             return cached;
         }
 
-        let list = Arc::new(build_display_list(&dom, &engine, &PaintOptions::default()));
+        let options = PaintOptions {
+            subframes,
+            ..PaintOptions::default()
+        };
+        let list = Arc::new(build_display_list(&dom, &engine, &options));
         *self.render.cache.borrow_mut() = Some(Arc::clone(&list));
         self.render.stamp.set(Some(stamp));
+        self.render.subframe_key.set(Some(subframe_key));
         list
     }
 }

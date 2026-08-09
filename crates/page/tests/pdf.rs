@@ -216,6 +216,7 @@ fn print_background_false_drops_the_background_fill() {
         &PdfOptions::default(),
         &PaintOptions {
             print_background: false,
+            ..PaintOptions::default()
         },
     ))
     .into_owned();

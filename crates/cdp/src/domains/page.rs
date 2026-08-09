@@ -379,6 +379,8 @@ fn print_to_pdf(connection: &Arc<Connection>, request: &Request) -> CommandResul
         print_background: params
             .print_background
             .unwrap_or(PaintOptions::default().print_background),
+        // The page fills these in from its own frame tree at build time.
+        ..PaintOptions::default()
     };
 
     let bytes = session.page.pdf(options, paint)?;

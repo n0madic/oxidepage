@@ -403,3 +403,56 @@ fn iframe_children_do_not_render() {
     // The box keeps its specified size: the fallback text contributes nothing.
     assert_eq!(s(&page, "document.getElementById('f').offsetHeight"), "40");
 }
+
+/// The frame's content reaches the page's display list: `paint` is handed the
+/// child's list and splices it inside a clip at the `<iframe>`'s content box
+/// (ADR-0035 D7).
+#[test]
+fn frame_content_reaches_the_display_list() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' width='200' height='100' \
+          srcdoc='<body style=\"margin:0\">\
+            <div style=\"width:50px;height:20px;background:rgb(1,2,3)\"></div></body>'>\
+         </iframe></body>",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+
+    let json = page.display_list_json();
+    // The splice is structural: a clip at the `<iframe>`'s content box, a layer
+    // translating to its origin, the frame's own items, then the two pops.
+    let clip = json
+        .find("\"PushClip\"")
+        .expect("the frame's content is clipped to its box");
+    let layer = json[clip..]
+        .find("\"PushLayer\"")
+        .expect("and translated into place");
+    let painted = json[clip + layer..]
+        .find("#010203ff")
+        .expect("the div painted inside the frame reaches the page's list");
+    let pop = json[clip + layer + painted..]
+        .find("\"PopLayer\"")
+        .expect("and the layer closes after it");
+    assert!(pop > 0);
+    // The clip is the iframe's 200x100 content box, not the page viewport.
+    assert!(
+        json[clip..].contains("200.0"),
+        "clipped to the frame box:\n{json}"
+    );
+}
+
+/// A page with no frames pays nothing: no splice, so no clip/layer pair
+/// appears around its content.
+#[test]
+fn a_frameless_page_gains_no_splice() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <div style='width:10px;height:10px;background:rgb(4,5,6)'></div></body>",
+    );
+    let json = page.display_list_json();
+    assert!(json.contains("#040506ff"), "the div painted:\n{json}");
+    assert!(
+        !json.contains("\"PushClip\""),
+        "nothing to splice, so nothing is clipped:\n{json}"
+    );
+}

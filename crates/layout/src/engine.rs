@@ -59,6 +59,28 @@ pub struct PaintStamp {
     pub fonts_version: u64,
 }
 
+impl PaintStamp {
+    /// A single value folding every field, so a caller keying a cache on
+    /// several stamps can mix them without duplicating the field list.
+    #[must_use]
+    pub fn hash_value(&self) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |value: u64| {
+            hash ^= value;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        };
+        mix(self.dom_version);
+        mix(self.style_version);
+        mix(u64::from(self.viewport.width.to_bits()));
+        mix(u64::from(self.viewport.height.to_bits()));
+        mix(u64::from(self.viewport.dpr.to_bits()));
+        mix(self.element_scroll_version);
+        mix(self.images_version);
+        mix(self.fonts_version);
+        hash
+    }
+}
+
 /// Per-build record of every styled element's computed values, for the
 /// incremental patch's pointer diffing.
 struct BuildSnapshot {
