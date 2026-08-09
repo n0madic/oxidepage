@@ -104,7 +104,20 @@ fn submit_inner(cx: &BindCx<'_>, form: NodeId, submitter: Option<NodeId>) -> Res
     };
     let entries = crate::imp::form_data::construct_the_entry_list(cx, form, submitter);
     let navigation = encode(cx, &plan, entries);
-    cx.state.request_navigation(navigation);
+    // `target` names the context that receives the response — a named frame, an
+    // ancestor, or this one (ADR-0035 D10). A name nothing answers to would
+    // open a context in a browser; here it falls back to this one, with a
+    // warning, rather than silently submitting somewhere else.
+    match crate::window_open::resolve_target(&cx.state.frame, &plan.target) {
+        Some(context) => context.request_navigation(navigation),
+        None => {
+            cx.warn(&format!(
+                "form submission: target=`{}` names no browsing context; submitting in place",
+                plan.target
+            ));
+            cx.state.request_navigation(navigation);
+        }
+    }
     Ok(())
 }
 
@@ -115,6 +128,9 @@ struct Plan {
     action: Url,
     post: bool,
     enctype: &'static str,
+    /// The `target`/`formtarget` attribute, uninterpreted. Resolved to a
+    /// browsing context at the moment the navigation is queued (ADR-0035 D10).
+    target: String,
 }
 
 fn plan_submission(cx: &BindCx<'_>, form: NodeId, submitter: Option<NodeId>) -> Option<Plan> {
@@ -129,8 +145,20 @@ fn plan_submission(cx: &BindCx<'_>, form: NodeId, submitter: Option<NodeId>) -> 
             overridden("formaction", "action"),
             overridden("formmethod", "method"),
             overridden("formenctype", "enctype"),
-            dom.document_url().to_owned(),
+            // The **submitting** document's URL: an empty `action` is its own
+            // URL, and a relative one resolves against it. `dom.document_url()`
+            // is the top-level document's, so a form inside a frame submitted
+            // to the embedder's URL (ADR-0035 D1).
+            dom.document_url_of(cx.state.frame.document()).to_owned(),
         )
+    };
+    // `target`/`formtarget`: which browsing context receives the response.
+    let target = {
+        let dom = cx.state.dom.borrow();
+        submitter
+            .and_then(|s| attr(&dom, s, "formtarget"))
+            .or_else(|| attr(&dom, form, "target"))
+            .unwrap_or_default()
     };
 
     // An empty (or absent) action is the document's own URL.
@@ -174,6 +202,7 @@ fn plan_submission(cx: &BindCx<'_>, form: NodeId, submitter: Option<NodeId>) -> 
         action,
         post,
         enctype,
+        target,
     })
 }
 

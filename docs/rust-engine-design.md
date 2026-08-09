@@ -899,9 +899,11 @@ this list alone as it ages:
   `src`/`srcdoc` load, scripts inside a frame run in that frame's realm, the element is a
   replaced box, the frame's content is spliced into screenshots and PDFs, the window
   family and `postMessage` cross the boundary, and the protocol reports the real frame
-  tree — so `page.frames()` and `frame.evaluate()` work in both drivers. Still out:
-  event and input routing across the boundary, a per-frame utility world
-  (`Page.createIsolatedWorld { frameId }`), frame history, named targets, and `sandbox`.
+  tree — so `page.frames()`, `frame.evaluate()` and `frameLocator()` all work in both
+  drivers. Input, hit testing, `:hover` and focus cross the boundary; *events* do not, as
+  the spec says. Named targets, `window.name` and the `allow-scripts`/`allow-same-origin`
+  slice of `sandbox` are in. Still out: joint session history (a frame's is replace-only),
+  indexed `window[0]`, `<object>`/`<embed>`/`<frameset>`, and out-of-process frames.
 - **Workers, service workers, WASM** (under QuickJS): absent. WASM arrives with the V8
   configuration if ever needed.
 - ~~Shadow DOM: absent in v1~~ — **landed** (ADR-0010); struck through rather than

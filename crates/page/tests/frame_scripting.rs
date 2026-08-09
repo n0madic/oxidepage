@@ -432,3 +432,42 @@ fn top_reaches_out_of_a_frame() {
     // The page's own frame went with its document.
     assert_eq!(rendered_roots_count(&page), 1);
 }
+
+/// `<form target="<name>">` submits into the frame that answers to the name.
+///
+/// The response is a `data:` document, so the frame ends up cross-origin with
+/// its embedder and `contentDocument` is null — a browser's answer too. The
+/// assertion is therefore on the page's own view of its rendered documents,
+/// which is the one thing an opaque origin does not hide.
+#[test]
+fn a_form_target_names_a_context() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' name='side' srcdoc='<p id=p>before</p>'></iframe>\
+         <form id='form' method='post' action='data:text/html,<p>landed' \
+          target='side'><input name='q' value='1'></form>\
+         </body>",
+    );
+    let frame_url = |page: &oxidepage_page::Page| {
+        let dom = page.dom();
+        let top = dom.document();
+        dom.rendered_roots()
+            .find(|&root| root != top)
+            .map(|root| dom.document_url_of(root).to_owned())
+            .expect("a frame")
+    };
+    assert_eq!(frame_url(&page), "about:blank", "the srcdoc frame's URL");
+
+    page.eval_to_string("document.getElementById('form').submit(); 0")
+        .unwrap();
+    page.settle(Duration::from_millis(600));
+
+    assert!(
+        frame_url(&page).starts_with("data:text/html"),
+        "the named frame received the submission, not the page: {}",
+        frame_url(&page)
+    );
+    // The embedder stayed where it was, and no context was created.
+    assert_eq!(s(&page, "!!document.getElementById('form')"), "true");
+    assert_eq!(rendered_roots_count(&page), 2);
+}

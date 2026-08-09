@@ -4895,7 +4895,7 @@ impl Page {
             return true;
         }
 
-        self.load_frame_url(&frame, owner, &url, &parent_url);
+        self.load_frame_url(&frame, owner, &url, &parent_url, None);
         true
     }
 
@@ -4903,15 +4903,34 @@ impl Page {
     ///
     /// Shared by the `src` attribute path and by a navigation the frame's own
     /// script asked for, so both produce the same milestones.
-    fn load_frame_url(&self, frame: &Rc<frame::Frame>, owner: NodeId, url: &str, referrer: &str) {
+    fn load_frame_url(
+        &self,
+        frame: &Rc<frame::Frame>,
+        owner: NodeId,
+        url: &str,
+        referrer: &str,
+        body: Option<oxidepage_bindings::NavigationBody>,
+    ) {
         // `about:blank` has no bytes to fetch, but it is still a navigation.
         if url == "about:blank" {
             self.load_frame_document(frame, owner, "", url);
             return;
         }
-        let request = NetRequest::subresource(url, referrer)
-            .of_type(ResourceType::Document)
-            .in_frame(frame.id());
+        // A form submission targeting this frame carries its entry list, and
+        // dropping it would turn a POST into a GET of the same URL — a
+        // different request with the same shape, which is the worst kind of
+        // silent divergence.
+        let request = match body {
+            Some(body) => NetRequest::form_navigation(
+                url.to_owned(),
+                body.bytes,
+                body.content_type,
+                Some(referrer.to_owned()),
+            ),
+            None => NetRequest::subresource(url, referrer),
+        }
+        .of_type(ResourceType::Document)
+        .in_frame(frame.id());
         match self.net.fetch_blocking(request) {
             Ok(outcome) => {
                 let final_url = outcome.head.final_url.clone();
@@ -4955,7 +4974,12 @@ impl Page {
                 .document_url_of(frame.document())
                 .to_owned();
             match navigation {
-                oxidepage_bindings::PendingNavigation::Load { url, download, .. } => {
+                oxidepage_bindings::PendingNavigation::Load {
+                    url,
+                    body,
+                    download,
+                    ..
+                } => {
                     if download.is_some() {
                         // A download is the operator's decision and the page's
                         // machinery, neither of which is per frame yet.
@@ -4964,7 +4988,7 @@ impl Page {
                         ));
                         continue;
                     }
-                    self.load_frame_url(&frame, owner, &url, &referrer);
+                    self.load_frame_url(&frame, owner, &url, &referrer, body);
                 }
                 oxidepage_bindings::PendingNavigation::ReplaceDocument { html, .. } => {
                     self.load_frame_document(&frame, owner, &html, &referrer);

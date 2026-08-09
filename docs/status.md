@@ -700,9 +700,14 @@ Conformance work landing outside the phase plan:
   (frame, world) keep its own `Runtime`. Over the protocol,
   `Page.getFrameTree` reports the real tree, `Page.frameAttached`/`frameDetached`
   and per-frame `Runtime.executionContextCreated` are emitted, and
-  `DOM.Node.frameId` names the context an `<iframe>` owns — so **`page.frames()`
-  and `frame.evaluate()` work in both drivers**: `cargo xtask puppeteer` is
-  50/50 and `cargo xtask playwright` 22/23. Decisions and v1 limits: ADR-0035.
+  `DOM.Node.frameId` names the context an `<iframe>` owns. Each frame reports a
+  `loaderId` of its own, its execution contexts are retired on detach, a
+  `worldName` init script reaches every frame — which is what a driver's
+  locators are evaluated in — and a `Network.*` event names the frame that
+  started the request. Both driver suites are **green**: `cargo xtask
+  puppeteer` 50/50 and `cargo xtask playwright` 23/23, so `page.frames()`,
+  `frame.evaluate()` and `frameLocator()` all work. Decisions and v1 limits:
+  ADR-0035.
 
 ## Deliberate limits at the Puppeteer milestone
 
@@ -737,37 +742,33 @@ pre-existing gap in stylo's media-feature support. `page.fill` on a
 `contenteditable` fails and drag-and-drop is unavailable: there is no `Range`
 /`Selection` over arbitrary DOM and no `DataTransfer`.
 
-**Nested browsing contexts.** `Page.createIsolatedWorld` ignores `frameId`, so
-a driver's utility world is always the main frame's — which is why
-Playwright's `frameLocator()` times out and is a recorded expected failure,
-while `page.frames()` and `frame.evaluate()`, which need no utility world, pass.
-`postMessage` carries a JSON subset and **refuses** anything outside it with
-`DataCloneError`: no `Map`, `Set`, `Date`, `ArrayBuffer`, typed arrays, cycles
-or transferables, and no `MessageChannel`. An object reached across a frame
-boundary carries the *accessing* realm's prototypes, and a child's globals
-(`contentWindow.myVar`) are unreachable — both deliberate (ADR-0035 D4).
-`window.name` and named frame targets are absent, as is indexed access
-(`window[0]`). `sandbox` enforces **`allow-scripts` and `allow-same-origin`
-only** — the rest of HTML's tokens are not implemented and the attribute
-reflects as a string rather than a `DOMTokenList`, so nothing can appear to
-grant one of them. Frame session history is absent, so `history` inside a frame
-addresses nothing. Events do not cross a document boundary (as the spec says);
-**input does** — a click over an `<iframe>` presses what the frame is showing —
-but
-`:hover` still stops at the `<iframe>` rather than crossing into it, and
-`document.activeElement` is not derived per document. `allow` (Permissions Policy) and `loading="lazy"` are not
-implemented on `<iframe>`. Inside a
-frame, `async`/`defer` scripts run where they appear rather than being
-reordered, and a module script is **refused with a diagnostic** rather than run:
-the loader is per realm, and a half-wired module graph is worse than an absent
-one. A `display: none` `<iframe>` still gets a
-browsing context that loads and lays out, so `getComputedStyle` inside one
-answers with a box where a browser reports none — the context is right (HTML
-creates it either way), the *rendering* of it is what should be suppressed.
-There are no `<frameset>`, `<frame>`, `<object>`, `<embed>`, `<portal>` or
-`<fencedframe>` embedders — `<iframe>` is the only one. Cross-frame objects
-carry the *accessing* realm's prototypes and a child's globals are unreachable,
-both deliberate (ADR-0035 D4).
+**Nested browsing contexts.** `postMessage` carries a JSON subset and
+**refuses** anything outside it with `DataCloneError`: no `Map`, `Set`, `Date`,
+`ArrayBuffer`, typed arrays, cycles or transferables, and no `MessageChannel`.
+An object reached across a frame boundary carries the *accessing* realm's
+prototypes, and a child's globals (`contentWindow.myVar`) are unreachable —
+both deliberate (ADR-0035 D4). Indexed access (`window[0]`) is absent, though
+`window.name` and named targets are not: `_self`/`_parent`/`_top`/`<name>`
+resolve to a real context for links, `window.open` and `<form target>`.
+`sandbox` enforces **`allow-scripts` and `allow-same-origin` only** — the rest
+of HTML's tokens are not implemented and the attribute reflects as a string
+rather than a `DOMTokenList`, so nothing can appear to grant one of them. A
+frame's session history is replace-only, so `history.go()` inside one is a
+**reported** no-op rather than a silent one. Events do not cross a document
+boundary (as the spec says); input, hit testing and `:hover` do — a click over
+an `<iframe>` presses what the frame is showing, typing reaches the frame that
+holds the focus, and `document.activeElement` answers per document (the
+embedder reports the `<iframe>`). A download started inside a frame is
+reported and refused. `allow` (Permissions Policy) and `loading="lazy"` are not
+implemented on `<iframe>`. Inside a frame, `async`/`defer` scripts run where
+they appear rather than being reordered, and a module script is **refused with
+a diagnostic** rather than run: the loader is per realm, and a half-wired
+module graph is worse than an absent one. A `display: none` `<iframe>` still
+gets a browsing context that loads and lays out, so `getComputedStyle` inside
+one answers with a box where a browser reports none — the context is right
+(HTML creates it either way), the *rendering* of it is what should be
+suppressed. There are no `<frameset>`, `<frame>`, `<object>`, `<embed>`,
+`<portal>` or `<fencedframe>` embedders — `<iframe>` is the only one.
 
 **Interception and network.** Response-stage interception is absent:
 `Fetch.continueResponse`, `Fetch.getResponseBody` and

@@ -486,10 +486,10 @@ both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`
 diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
-**Not implemented, and tracked rather than hidden:** `<form target>`, which
-has never been read at all, so a form submission always navigates its own
-context; and a download started inside a frame, which is reported and refused
-rather than performed.
+**Not implemented, and tracked rather than hidden:** a download started inside
+a frame, which is reported and refused rather than performed; and indexed
+access to a frame from its embedder (`window[0]`), where `window.length` and
+`frames` are present but the index is not.
 
 ## Deliberate limits (P6 — absent beats fake)
 

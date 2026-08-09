@@ -62,7 +62,7 @@ stub).
 | 8 | `Fetch` interception, file inputs, downloads — **landed** | Puppeteer feature-complete (90%) | ADR-0032 | 4–5 w |
 | 9 | Isolated worlds — **landed** | the gate to Playwright | ADR-0033 | 4–6 w |
 | 10 | Frame plumbing + Playwright compat surface — **landed** | **Playwright green** | ADR-0034 | 5–7 w |
-| 11 | Nested browsing contexts (real iframes) — **largely landed** | sites that hide content in iframes | ADR-0035 | 10+ w |
+| 11 | Nested browsing contexts (real iframes) — **landed** | sites that hide content in iframes | ADR-0035 | 10+ w |
 
 Estimates assume one experienced engineer and are planning aids, in the spirit
 of design §10 — not commitments. Milestone "Puppeteer" is end of stage 8;
@@ -863,16 +863,19 @@ recording, tracing, `page.accessibility`, coverage APIs, Chromium-only
 Deliberately **after** the Playwright milestone: it is the single largest item in
 this document, and the 90% automation run does not reach into an iframe.
 
-**Largely landed** (ADR-0035). An `<iframe>` owns a real browsing context: its
-own document in one shared arena, its own style and layout engines, its own
-realm. `src`/`srcdoc` load, scripts inside run in the frame's realm,
+**Landed** (ADR-0035). An `<iframe>` owns a real browsing context: its own
+document in one shared arena, its own style and layout engines, its own realm.
+`src`/`srcdoc` load, a frame's own subresources are fetched against *its* base
+URL and reported as *its* requests, scripts inside run in the frame's realm,
 `contentDocument`/`contentWindow` and the window family work, `postMessage`
 crosses, the element is a replaced box whose content is spliced into screenshots
-and PDFs, input crosses into a frame while events do not, and the protocol
-reports the tree — so `page.frames()` and `frame.evaluate()` work in both
-drivers. Still out: cross-frame `:hover` and per-document `activeElement`, frame
-session history, named targets, per-frame `loaderId`, and Playwright's
-`frameLocator`.
+and PDFs, input/hit-testing/`:hover`/focus cross into a frame while events do
+not, a frame navigates itself, `window.name` and named targets resolve, and the
+protocol reports the tree with per-frame loaders and contexts. **Both driver
+suites are green** — `cargo xtask puppeteer` 50/50, `cargo xtask playwright`
+23/23 — so `page.frames()`, `frame.evaluate()` and `frameLocator()` all work.
+Deliberate limits (joint session history, indexed `window[0]`, OOPIFs, the rest
+of `sandbox`) are in ADR-0035.
 
 ### What the plan did not predict
 
@@ -909,6 +912,25 @@ someone who has not paid it.
   `EventTargetKey::Window(FrameId)` was unnecessary (the listener registry is
   per world), and `ResourceTable::merge` needed no id rebasing (the image store
   became page-wide). Both were designed for and then not needed.
+- **`frameLocator` was not a frame bug.** It hung while `page.frames()`,
+  `frame.evaluate()` and `DOM.describeNode`'s `frameId` all worked, because a
+  locator is evaluated in a *utility world of the frame it is in* and
+  `addScriptToEvaluateOnNewDocument { worldName }` is a standing order every
+  later frame must honour. Reading the wire (`DEBUG=pw:protocol`) found it in
+  minutes; two plausible fixes had already been implemented and ruled out by
+  guessing. **Capture the traffic before the second guess.**
+- **The plan's own site table was the best predictor, and still short.** Every
+  entry in it was real; what it missed were the *mirrors* of those entries —
+  once "which document" was fixed for style, the same question was still
+  answered with the page's for the image-load gate, the base URL of every
+  subresource, `fire_element_event`'s world, an `on…` handler's scope chain,
+  `getComputedStyle`'s stylist, `@font-face`, and the frame's own navigation
+  queue. When you find one "the top document is assumed" site, grep for the
+  shape rather than fixing the instance.
+- **`page.resolve_url` being dead code was the proof.** The page-wide "resolve
+  against *the* document" helper ended with zero callers, and the compiler
+  saying so is what confirmed the migration was complete rather than mostly
+  complete.
 
 ---
 
