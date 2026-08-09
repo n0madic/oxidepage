@@ -60,9 +60,9 @@ stub).
 | 6 | CDP transport + Target/Page/Runtime/Network/Log — **landed** | Puppeteer basic green | ADR-0030 | 5–7 w |
 | 7 | `Input` + `DOM` domains — **landed** | Puppeteer interaction green | ADR-0031 | 2–3 w |
 | 8 | `Fetch` interception, file inputs, downloads — **landed** | Puppeteer feature-complete (90%) | ADR-0032 | 4–5 w |
-| 9 | Isolated worlds | the gate to Playwright | **yes** | 4–6 w |
-| 10 | Frame plumbing + Playwright compat surface | **Playwright green** | yes | 5–7 w |
-| 11 | Nested browsing contexts (real iframes) | sites that hide content in iframes | yes | 10+ w |
+| 9 | Isolated worlds — **landed** | the gate to Playwright | ADR-0033 | 4–6 w |
+| 10 | Frame plumbing + Playwright compat surface — **landed** | **Playwright green** | ADR-0034 | 5–7 w |
+| 11 | Nested browsing contexts (real iframes) — **largely landed** | sites that hide content in iframes | ADR-0035 | 10+ w |
 
 Estimates assume one experienced engineer and are planning aids, in the spirit
 of design §10 — not commitments. Milestone "Puppeteer" is end of stage 8;
@@ -863,15 +863,52 @@ recording, tracing, `page.accessibility`, coverage APIs, Chromium-only
 Deliberately **after** the Playwright milestone: it is the single largest item in
 this document, and the 90% automation run does not reach into an iframe.
 
-`HTMLIFrameElement` is an empty interface today
-(`crates/idl/webidl/html.webidl:174`) and design §12 lists iframes as an explicit
-v1 limit. Loading them breaks the invariant CLAUDE.md states plainly — "there are
-many documents, but only one *rendered* one". A real iframe needs: N rendered
-documents with `IS_CONNECTED` semantics per browsing context, a realm per frame,
-box-tree embedding of a child document, hit-testing and event routing across
-frame boundaries, `contentWindow`/`contentDocument` with same-origin checks,
-`postMessage`, and per-frame navigation history. Its own ADR and its own phase
-plan; sketching it further here would be guessing.
+**Largely landed** (ADR-0035). An `<iframe>` owns a real browsing context: its
+own document in one shared arena, its own style and layout engines, its own
+realm. `src`/`srcdoc` load, scripts inside run in the frame's realm,
+`contentDocument`/`contentWindow` and the window family work, `postMessage`
+crosses, the element is a replaced box whose content is spliced into screenshots
+and PDFs, input crosses into a frame while events do not, and the protocol
+reports the tree — so `page.frames()` and `frame.evaluate()` work in both
+drivers. Still out: cross-frame `:hover` and per-document `activeElement`, frame
+session history, named targets, per-frame `loaderId`, and Playwright's
+`frameLocator`.
+
+### What the plan did not predict
+
+Kept because each cost real time, and the next stage's plan will be written by
+someone who has not paid it.
+
+- **The seam is insertion, not `src`.** HTML creates a nested browsing context
+  when the `<iframe>` is *inserted*, independently of any `src`. Taking that as
+  the entry point let the whole model — documents, engines, realms, teardown —
+  land and be tested before a single byte was fetched. The plan started from
+  `src` and would have brought the network along for the ride.
+- **`window.document` was bound to `dom.document()`**, so the first script that
+  ran inside a frame silently mutated the *page's* tree. The property is a
+  non-configurable data value, which is why a frame navigation now rebuilds the
+  frame's realm.
+- **`MAIN_WORLD` meant two things.** The constant `WorldId` 0 was read at ~15
+  sites as "the default world", but every frame has one and ids must stay
+  page-unique. Left alone, it installs `customElements` in exactly one frame.
+- **"Which document" is not `node_document`.** A node inside a shadow tree is
+  owned by its *shadow root*, so `node_document` can answer with a
+  `DocumentFragment`. Routing by it dropped every shadow-scoped `<style>`.
+- **`w.location` returning a string** made `w.location.href = url` a silent
+  no-op — assignment to a property of a temporary. WPT caught it as two
+  timeouts, because a page waiting on the frame's `load` waits forever.
+- **`Page.getFrameTree` is not enough for a driver.** Both build their frame set
+  **once** and index every later event into it, so a frame appearing after
+  attach is invisible without `Page.frameAttached`.
+- **A WPT rebaseline can grow and still be an improvement.** Non-PASS lines went
+  from 5003 to 6053, and almost all of it is suites whose `<iframe>` fixtures
+  never loaded before, now running and reporting pre-existing failures. Nothing
+  moved from PASS to a failure. Count what became *visible* separately from what
+  broke.
+- **Two ADR predictions were wrong, in the cheap direction.**
+  `EventTargetKey::Window(FrameId)` was unnecessary (the listener registry is
+  per world), and `ResourceTable::merge` needed no id rebasing (the image store
+  became page-wide). Both were designed for and then not needed.
 
 ---
 
