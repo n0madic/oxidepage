@@ -3316,6 +3316,13 @@ impl Page {
     /// document (the sink's `get_document()` returns the existing root), and a
     /// stale completion would drive the in-flight counter negative (H-page-2).
     fn reset_document_state(&self) {
+        // Every nested browsing context the outgoing document owned goes with
+        // it (ADR-0035 D1). Its `<iframe>` elements are about to stop existing,
+        // and because a commit *replaces* the arena rather than mutating it, no
+        // disconnection is ever queued for them — a frame left behind would
+        // name a freed document, and this runs before anything below can start
+        // a load into one.
+        self.discard_frames(self.frames.detach_nested());
         // Abort every in-flight subresource from the previous document so a
         // late completion cannot apply to — or corrupt the counters of — the
         // next one.
@@ -3620,7 +3627,7 @@ impl Page {
 
         if is_module {
             match src {
-                Some(src) => match self.resolve_url(&src) {
+                Some(src) => match self.resolve_url_for(node, &src) {
                     Some(url) => self
                         .deferred
                         .borrow_mut()
@@ -3648,7 +3655,7 @@ impl Page {
             self.eval_classic(&source, &url, Some(node));
             return;
         };
-        let Some(url) = self.resolve_url(&src) else {
+        let Some(url) = self.resolve_url_for(node, &src) else {
             self.hooks
                 .report_resource_error(format!("cannot resolve script src `{src}`"));
             return;
@@ -3680,7 +3687,7 @@ impl Page {
         dispatch_events: bool,
         ordered: Option<u64>,
     ) {
-        let doc_url = self.state.dom.borrow().document_url().to_owned();
+        let doc_url = self.document_url_for(node);
         let id = self
             .net
             .start_resource(NetRequest::subresource(&url, doc_url).of_type(ResourceType::Script));
@@ -3735,7 +3742,10 @@ impl Page {
     fn fetch_and_eval_classic(&self, url: &str, node: Option<NodeId>) {
         // Render-blocking sheets ordered before this script must load first.
         self.await_pending_stylesheets(SUBRESOURCE_BUDGET);
-        let doc_url = self.state.dom.borrow().document_url().to_owned();
+        let doc_url = node.map_or_else(
+            || self.state.dom.borrow().document_url().to_owned(),
+            |node| self.document_url_for(node),
+        );
         match self
             .net
             .fetch_blocking(NetRequest::subresource(url, doc_url).of_type(ResourceType::Script))
@@ -3824,6 +3834,71 @@ impl Page {
             .map(|u| u.to_string())
     }
 
+    /// The rendered document `node` belongs to, falling back to the page's own.
+    ///
+    /// [`DomTree::containing_document`], never `node_document`: a node inside a
+    /// shadow tree is owned by its shadow root, which is a `DocumentFragment`
+    /// and names no document at all.
+    fn document_of(&self, node: NodeId) -> NodeId {
+        let dom = self.state.dom.borrow();
+        dom.containing_document(node)
+            .unwrap_or_else(|| dom.document())
+    }
+
+    /// Resolves `rel` against the base URL of the document `node` is in.
+    ///
+    /// Not the page's. A relative URL written in a frame is relative to *that
+    /// frame's* document, and resolving it against the embedder's fetches the
+    /// wrong resource — from a different origin, when the frame is not
+    /// same-origin with the page (ADR-0035 D1).
+    fn resolve_url_for(&self, node: NodeId, rel: &str) -> Option<String> {
+        let base = {
+            let dom = self.state.dom.borrow();
+            let doc = dom
+                .containing_document(node)
+                .unwrap_or_else(|| dom.document());
+            dom.base_url_of(doc)
+        };
+        url::Url::parse(&base)
+            .ok()?
+            .join(rel)
+            .ok()
+            .map(|u| u.to_string())
+    }
+
+    /// The URL of the document `node` is in — a subresource request's referrer.
+    fn document_url_for(&self, node: NodeId) -> String {
+        let doc = self.document_of(node);
+        self.state.dom.borrow().document_url_of(doc).to_owned()
+    }
+
+    /// Every node of every *rendered* document, each document's own subtree in
+    /// document order.
+    ///
+    /// The whole-page walks — background images, inline SVG — used to start at
+    /// `dom.document()`, which is the top-level document and reaches no frame's
+    /// content at all (ADR-0035 D1). Collected rather than iterated lazily
+    /// because the callers hold the borrow only long enough to gather.
+    fn rendered_nodes(&self, dom: &oxidepage_dom::DomTree) -> Vec<NodeId> {
+        let mut roots: Vec<NodeId> = dom.rendered_roots().collect();
+        // Stable order: the arena's, so two runs collect the same list.
+        roots.sort_by_key(|id| (id.index(), id.generation()));
+        roots
+            .into_iter()
+            .flat_map(|root| dom.inclusive_descendants(root).collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// Resolves styles in every browsing context, without a reflow.
+    fn resolve_styles_everywhere(&self) {
+        self.drain_style_updates();
+        for frame in self.frames.pre_order() {
+            let shared = frame.shared();
+            let mut dom = self.state.dom.borrow_mut();
+            shared.style.borrow_mut().resolve_styles(&mut dom);
+        }
+    }
+
     /// Prepares connected scripts discovered by DOM mutations. The DOM owns
     /// discovery and the sticky already-started bit; Page owns timing, fetch,
     /// evaluation, and events.
@@ -3902,7 +3977,7 @@ impl Page {
             return;
         };
 
-        let Some(url) = self.resolve_url(&src) else {
+        let Some(url) = self.resolve_url_for(node, &src) else {
             self.hooks
                 .report_resource_error(format!("cannot resolve dynamic script src `{src}`"));
             self.fire_element_event(node, "error");
@@ -3923,11 +3998,18 @@ impl Page {
     /// so it is re-validated here: the element may have been removed and freed in
     /// the meantime. A *detached but live* element still gets the event, as HTML
     /// requires — only a freed one is skipped.
+    /// Fires a simple event at `node`, **in the world of the frame that node
+    /// belongs to**.
+    ///
+    /// Not the page's main world. A listener is registered in the realm the
+    /// script that added it ran in, and a frame's realm is its own — so an
+    /// `<img onload>` written inside an iframe is invisible from here, and the
+    /// event dispatched from the top world reaches nobody at all (ADR-0035 D4).
     fn fire_element_event(&self, node: NodeId, event_type: &str) {
         if self.state.dom.borrow().get(node).is_none() {
             return;
         }
-        self.with_cx(|cx| {
+        self.with_cx_in(self.world_of_node(node), |cx| {
             if let Err(error) = oxidepage_bindings::fire_simple_event(
                 cx,
                 EventTargetKey::Node(node),
@@ -3937,6 +4019,13 @@ impl Page {
                 report_throw(&self.hooks, error);
             }
         });
+    }
+
+    /// The default world of the browsing context `node` belongs to, or the
+    /// page's own for a node no rendered document holds.
+    fn world_of_node(&self, node: NodeId) -> oxidepage_bindings::WorldId {
+        self.frame_of(node)
+            .map_or(self.state.id, |frame| frame.shared().default_world())
     }
 
     fn finish_dynamic_script(&self, completed: CompletedDynamicScript) {
@@ -4976,8 +5065,10 @@ impl Page {
 
     /// Fires `load` or `error` on an `<iframe>` element, in the **embedding**
     /// document's world — the element lives there, not in the frame.
+    /// `load`/`error` on an `<iframe>` element — dispatched in the world of the
+    /// frame that *embeds* it, which for a nested `<iframe>` is not the page's.
     fn fire_frame_event(&self, owner: NodeId, kind: &str) {
-        self.with_cx(|cx| {
+        self.with_cx_in(self.world_of_node(owner), |cx| {
             if let Err(e) = oxidepage_bindings::fire_simple_event(
                 cx,
                 EventTargetKey::Node(owner),
@@ -5264,11 +5355,19 @@ impl Page {
             // subtree (`innerHTML`) frees the `<img>` outright, so the id can be
             // stale, not merely disconnected. Disconnected is fine and expected
             // — `new Image()` never enters the tree — but the node must still
-            // belong to the rendered document and be outside any `<template>`
+            // belong to a rendered document and be outside any `<template>`
             // contents, the two things `IS_CONNECTED` used to stand in for.
-            let Some(el) = dom.get(node).filter(|_| {
-                dom.node_document(node) == dom.document() && !dom.in_template_contents(node)
-            }) else {
+            //
+            // **A rendered document, not *the* one** (ADR-0035 D1). Spelling
+            // this as `node_document(node) == dom.document()` — which is how
+            // ADR-0028 D3 wrote it when there was one — left an `<img>` inside
+            // a frame never firing `load` or `error`, and an `<img>` inside a
+            // *shadow tree* the same, since `node_document` answers with the
+            // shadow root.
+            let Some(el) = dom
+                .get(node)
+                .filter(|_| dom.in_rendered_document(node) && !dom.in_template_contents(node))
+            else {
                 return;
             };
             (
@@ -5280,7 +5379,7 @@ impl Page {
         let Some(src) = src.filter(|s| !s.is_empty()) else {
             return;
         };
-        let Some(url) = self.resolve_url(&src) else {
+        let Some(url) = self.resolve_url_for(node, &src) else {
             return;
         };
 
@@ -5333,7 +5432,7 @@ impl Page {
             return;
         }
         self.register_image_waiter(node, url);
-        self.start_image_load_url(url);
+        self.start_image_load_url(url, &self.document_url_for(node));
     }
 
     /// Registers `node` as a waiter on `url` and pins it for the wait.
@@ -5455,7 +5554,7 @@ impl Page {
             // Off the queue as it starts, or every open gate re-walks the
             // geometry of every image ever deferred.
             self.deferred_images.borrow_mut().remove(&node);
-            if let Some(url) = self.resolve_url(&src) {
+            if let Some(url) = self.resolve_url_for(node, &src) {
                 // Through `begin_image_load`, not `start_image_load_url`: a
                 // deferred image registers no waiter (it holds no pin while it
                 // waits for the viewport), so this is where it starts waiting —
@@ -5501,7 +5600,7 @@ impl Page {
 
     /// Starts a load for an absolute image `url`, deduplicating and decoding
     /// `data:` URLs inline (shared by `<img>` and background images).
-    fn start_image_load_url(&self, url: &str) {
+    fn start_image_load_url(&self, url: &str, referrer: &str) {
         // Deduplicate: a URL already loaded or in flight is not re-fetched.
         if !self.requested_images.borrow_mut().insert(url.to_owned()) {
             return;
@@ -5522,10 +5621,9 @@ impl Page {
             return;
         }
 
-        let doc_url = self.state.dom.borrow().document_url().to_owned();
-        let id = self
-            .net
-            .start_resource(NetRequest::subresource(url, doc_url).of_type(ResourceType::Image));
+        let id = self.net.start_resource(
+            NetRequest::subresource(url, referrer.to_owned()).of_type(ResourceType::Image),
+        );
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_images.borrow_mut().insert(
             id,
@@ -5558,31 +5656,32 @@ impl Page {
         self.last_bg_scan.set(version);
 
         // Resolve styles so `background-image` is available (idempotent when
-        // already current).
-        {
-            let mut dom = self.state.dom.borrow_mut();
-            let mut style = self.state.style.borrow_mut();
-            style.resolve_styles(&mut dom);
-        }
+        // already current). Every browsing context's, since every one of them
+        // can carry a `background-image` of its own.
+        self.resolve_styles_everywhere();
 
-        let urls: Vec<String> = {
+        // Paired with the node that declared them: a background image of a
+        // frame's element is that frame's request, and the referrer says so.
+        let urls: Vec<(NodeId, String)> = {
             let dom = self.state.dom.borrow();
             let mut urls = Vec::new();
-            for node in dom.inclusive_descendants(dom.document()) {
+            for node in self.rendered_nodes(&dom) {
+                let mut of_node = Vec::new();
                 if let Some(style) = dom.primary_style(node) {
-                    collect_background_image_urls(&style, &mut urls);
+                    collect_background_image_urls(&style, &mut of_node);
                 }
                 // `::before`/`::after` can carry their own `background-image`.
                 for pseudo in [&PseudoElement::Before, &PseudoElement::After] {
                     if let Some(style) = dom.pseudo_style(node, pseudo) {
-                        collect_background_image_urls(&style, &mut urls);
+                        collect_background_image_urls(&style, &mut of_node);
                     }
                 }
+                urls.extend(of_node.into_iter().map(|url| (node, url)));
             }
             urls
         };
-        for url in urls {
-            self.start_image_load_url(&url);
+        for (node, url) in urls {
+            self.start_image_load_url(&url, &self.document_url_for(node));
         }
     }
 
@@ -5628,7 +5727,8 @@ impl Page {
 
         let sources: Vec<(String, String)> = {
             let dom = self.state.dom.borrow();
-            dom.inclusive_descendants(dom.document())
+            self.rendered_nodes(&dom)
+                .into_iter()
                 .filter(|&node| {
                     dom.node(node)
                         .as_element()
@@ -5765,7 +5865,7 @@ impl Page {
                 let dom = self.state.dom.borrow();
                 dom.get(node)
                     .and_then(|n| attr_value(n, "src"))
-                    .and_then(|src| self.resolve_url(&src))
+                    .and_then(|src| self.resolve_url_for(node, &src))
                     .is_some_and(|current| current == url)
             };
             if still_ours {
@@ -6228,7 +6328,9 @@ impl Page {
                 continue;
             };
             match update {
-                StyleUpdate::StyleElement(node) => self.upsert_inline_stylesheet(node),
+                StyleUpdate::StyleElement(node) => {
+                    self.upsert_inline_stylesheet(&frame, node);
+                }
                 StyleUpdate::StyleElementRemoved(node) | StyleUpdate::LinkElementRemoved(node) => {
                     frame
                         .shared()
@@ -6237,7 +6339,7 @@ impl Page {
                         .remove_sheet_for_node(node);
                     self.link_sheets.borrow_mut().remove(&node);
                 }
-                StyleUpdate::LinkElement(node) => self.start_link_stylesheet(node),
+                StyleUpdate::LinkElement(node) => self.start_link_stylesheet(&frame, node),
             }
         }
     }
@@ -6251,7 +6353,11 @@ impl Page {
 
     /// Builds (or replaces) the stylesheet for a connected `<style>` element
     /// from its text content and `media` attribute.
-    fn upsert_inline_stylesheet(&self, node: NodeId) {
+    ///
+    /// The sheet goes into the engine of the frame that renders the element's
+    /// document, and `@import` resolves against *that* document's URL — a
+    /// `<style>` in a frame belongs to the frame (ADR-0035 D1).
+    fn upsert_inline_stylesheet(&self, frame: &Rc<frame::Frame>, node: NodeId) {
         let dom = self.state.dom.borrow();
         // Snapshot id from the `StyleUpdate` queue: the `<style>` may have been
         // removed and freed between queueing and this drain.
@@ -6260,33 +6366,31 @@ impl Page {
         };
         let media = attr_value(el, "media");
         let css = dom.text_content(node);
-        let url_data = dom.url_extra_data().clone();
-        let doc_url = dom.document_url().to_owned();
+        let url_data = dom.url_extra_data_of_node(node).clone();
+        let doc_url = dom.document_url_of(frame.document()).to_owned();
         let fetcher = PageCssFetcher {
             net: Rc::clone(&self.net),
             doc_url,
         };
+        let style = &frame.shared().style;
         let loader = BlockingImportLoader::new(
             &fetcher,
-            self.state.style.borrow().lock().clone(),
+            style.borrow().lock().clone(),
             Origin::Author,
             None,
         );
-        let sheet = self.state.style.borrow().make_stylesheet_with_loader(
+        let sheet = style.borrow().make_stylesheet_with_loader(
             &css,
             &url_data,
             media.as_deref(),
             Some(&loader),
         );
-        self.state
-            .style
-            .borrow_mut()
-            .add_sheet_for_node(&dom, node, sheet);
+        style.borrow_mut().add_sheet_for_node(&dom, node, sheet);
     }
 
     /// Starts fetching an external stylesheet for a connected `<link>`; scripts
     /// block until it (and every other pending sheet) completes.
-    fn start_link_stylesheet(&self, node: NodeId) {
+    fn start_link_stylesheet(&self, frame: &Rc<frame::Frame>, node: NodeId) {
         let (href, media, doc_url) = {
             let dom = self.state.dom.borrow();
             // Snapshot id from the `StyleUpdate` queue — see
@@ -6297,7 +6401,9 @@ impl Page {
             (
                 attr_value(el, "href"),
                 attr_value(el, "media"),
-                dom.document_url().to_owned(),
+                // The frame's document, so a relative `@import` inside the
+                // sheet resolves where the sheet was asked for.
+                dom.document_url_of(frame.document()).to_owned(),
             )
         };
         let Some(href) = href else {
@@ -6306,7 +6412,7 @@ impl Page {
             self.link_sheets.borrow_mut().remove(&node);
             return;
         };
-        let Some(url) = self.resolve_url(&href) else {
+        let Some(url) = self.resolve_url_for(node, &href) else {
             self.hooks
                 .report_resource_error(format!("cannot resolve stylesheet href `{href}`"));
             return;
@@ -6378,15 +6484,19 @@ impl Page {
         if !dom.get(node).is_some_and(|n| n.is_connected()) {
             return;
         }
+        let Some(frame) = self.frames.of_node(&dom, node) else {
+            return;
+        };
         let url_data = url::Url::parse(url)
             .map(style::stylesheets::UrlExtraData::from)
-            .unwrap_or_else(|_| dom.url_extra_data().clone());
-        let doc_url = dom.document_url().to_owned();
+            .unwrap_or_else(|_| dom.url_extra_data_of_node(node).clone());
+        let doc_url = dom.document_url_of(frame.document()).to_owned();
         let fetcher = PageCssFetcher {
             net: Rc::clone(&self.net),
             doc_url,
         };
-        let engine = self.state.style.borrow();
+        let style = &frame.shared().style;
+        let engine = style.borrow();
         let loader =
             BlockingImportLoader::new(&fetcher, engine.lock().clone(), Origin::Author, None);
         let charset = content_type.as_deref().and_then(content_type_charset);
@@ -6399,10 +6509,7 @@ impl Page {
             Some(&loader),
         );
         drop(engine);
-        self.state
-            .style
-            .borrow_mut()
-            .add_sheet_for_node(&dom, node, sheet);
+        style.borrow_mut().add_sheet_for_node(&dom, node, sheet);
     }
 
     fn handle_stylesheet_event(&self, id: RequestId, event: NetEvent) {
@@ -6473,15 +6580,19 @@ impl Page {
         if !dom.get(pending.node).is_some_and(|n| n.is_connected()) {
             return;
         }
+        let Some(frame) = self.frames.of_node(&dom, pending.node) else {
+            return;
+        };
         let url_data = url::Url::parse(&pending.url)
             .map(style::stylesheets::UrlExtraData::from)
-            .unwrap_or_else(|_| dom.url_extra_data().clone());
-        let doc_url = dom.document_url().to_owned();
+            .unwrap_or_else(|_| dom.url_extra_data_of_node(pending.node).clone());
+        let doc_url = dom.document_url_of(frame.document()).to_owned();
         let fetcher = PageCssFetcher {
             net: Rc::clone(&self.net),
             doc_url,
         };
-        let engine = self.state.style.borrow();
+        let style = &frame.shared().style;
+        let engine = style.borrow();
         let loader =
             BlockingImportLoader::new(&fetcher, engine.lock().clone(), Origin::Author, None);
         // Spec-compliant charset detection on the raw bytes; the `media`
@@ -6500,8 +6611,7 @@ impl Page {
             Some(&loader),
         );
         drop(engine);
-        self.state
-            .style
+        style
             .borrow_mut()
             .add_sheet_for_node(&dom, pending.node, sheet);
     }

@@ -203,9 +203,15 @@ fn source_element(cx: &BindCx<'_>, key: EventTargetKey, event_type: &str) -> Opt
             dom.get(id)?.as_element().map(|_| id)
         }
         EventTargetKey::Window if WINDOW_REFLECTED.contains(&event_type) => {
-            // The Window reflects the *page* document's body, by definition.
-            let document = cx.state.dom.borrow().document();
-            crate::imp::document::html_child_of_root(cx, document, &["body", "frameset"])
+            // The Window reflects **its own** browsing context's document body.
+            // `dom.document()` is the top-level document, so a frame's
+            // `<body onload>` would be looked for in the embedder's tree
+            // (ADR-0035 D1).
+            crate::imp::document::html_child_of_root(
+                cx,
+                cx.state.frame.document(),
+                &["body", "frameset"],
+            )
         }
         _ => None,
     }
@@ -235,10 +241,12 @@ fn attribute_source(cx: &BindCx<'_>, element: NodeId, event_type: &str) -> Optio
 /// body handler that reflects onto the window sees the window, as the spec says.
 fn compile(cx: &BindCx<'_>, element: NodeId, event_type: &str, source: &str) -> Option<JsValue> {
     let element_js = cx.node_to_js(element).ok()?;
-    let document_js = {
-        let document = cx.state.dom.borrow().document();
-        cx.node_to_js(document).ok()?
-    };
+    // The realm's **own** document, not `dom.document()`: the scope chain the
+    // spec gives a handler is element → *its* document → global, so an
+    // `<img onload="document.title = …">` inside a frame must reach the frame's
+    // document. Naming the top-level one made the handler quietly write to the
+    // embedder's tree (ADR-0035 D1).
+    let document_js = cx.node_to_js(cx.state.frame.document()).ok()?;
     let factory_source = format!(
         "(function (element, document) {{ \
            with (document) with (element) {{ \

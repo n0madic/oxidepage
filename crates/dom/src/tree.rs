@@ -1059,9 +1059,15 @@ impl DomTree {
     /// This is the question `node_document(x) == document()` used to ask back
     /// when there was one rendered document (ADR-0028 D3), and the one every
     /// resource hook wants.
+    ///
+    /// [`Self::containing_document`], **not** `node_document`: a node inside a
+    /// shadow tree is owned by its shadow root, so `node_document` answers with
+    /// a `DocumentFragment` and this would say "no" for every element in every
+    /// shadow tree of the page.
     #[must_use]
     pub fn in_rendered_document(&self, id: NodeId) -> bool {
-        self.is_rendered_root(self.node_document(id))
+        self.containing_document(id)
+            .is_some_and(|doc| self.is_rendered_root(doc))
     }
 
     /// Number of live nodes in the arena (connected or detached).
@@ -3449,16 +3455,22 @@ impl DomTree {
         // `loading` alongside `src`: writing `img.loading = "eager"` must undefer
         // an image the lazy loader is holding back (oxidepage-page, ADR-0014).
         //
-        // Note the gate is the *node document*, not `is_connected()`: HTML runs
-        // "update the image data" on any `src` change, and `new Image().src = …`
-        // — the standard preload idiom, and how feature detection probes a
-        // codec — is detached by construction. The two things `IS_CONNECTED`
-        // was standing in for are asked for by name instead: a document with no
-        // browsing context (`DOMParser`, ADR-0017) loads nothing, and neither
-        // does a `<template>`'s contents.
+        // Note the gate is the *owning document*, not `is_connected()`: HTML
+        // runs "update the image data" on any `src` change, and
+        // `new Image().src = …` — the standard preload idiom, and how feature
+        // detection probes a codec — is detached by construction. The two
+        // things `IS_CONNECTED` was standing in for are asked for by name
+        // instead: a document with no browsing context (`DOMParser`, ADR-0017)
+        // loads nothing, and neither does a `<template>`'s contents.
+        //
+        // [`Self::in_rendered_document`], not `node_document(el) == document`:
+        // *a* browsing context, not the top-level one (ADR-0035 D1), and it
+        // crosses shadow hosts, where `node_document` answers with the shadow
+        // root. Both spellings of the old form dropped the update outright, so
+        // the `<img>` never reached the loader and never fired `load`.
         if (*attr_local == local_name!("src") || &**attr_local == "loading")
             && self.node(element).is_image_element()
-            && self.node_document(element) == self.document
+            && self.in_rendered_document(element)
             && !self.in_template_contents(element)
         {
             self.push_image_update(element);

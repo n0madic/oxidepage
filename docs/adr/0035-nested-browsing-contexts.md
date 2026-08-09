@@ -462,7 +462,11 @@ covers the window family, `postMessage` in both directions and its
 `DataCloneError` refusals, a child's globals staying unreachable, and the
 `sandbox` slice. `crates/page/tests/frame_input.rs` (4) covers a click landing
 inside a frame, the crossing accounting for the frame's position, and the
-embedder's capturing listener seeing nothing. `crates/cdp/tests/{page,dom}.rs`
+embedder's capturing listener seeing nothing.
+`crates/page/tests/frame_subresources.rs` (3) covers a frame's relative `<img>`,
+`<link>` and `<script>` reaching the **server** at the frame-relative path and
+never the embedder-relative one, plus an `<img>` firing `load` inside a frame
+and inside a shadow tree. `crates/cdp/tests/{page,dom}.rs`
 covers the frame tree and the `DOM` additions — including that each frame's
 execution context has an id of its own, and that a `worldName` init script
 reaches every frame. Both driver runners grew iframe fixtures and checks, and
@@ -472,11 +476,10 @@ diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
 **Not implemented, and tracked rather than hidden:** cross-frame `:hover` and
-per-document `activeElement`; frame session history; named frame targets and
-`window.name`; a per-frame `loaderId`; `Runtime.executionContextDestroyed` on
-detach; `Network.*` events carrying the initiating frame; and a dedicated
-display-list golden and Ahem reftest pair for a frame, the splice being covered
-structurally instead.
+per-document `activeElement`; keyboard input is not frame-routed; frame session
+history; named frame targets and `window.name`; `Network.*` events carrying the
+initiating frame; and a dedicated display-list golden and Ahem reftest pair for
+a frame, the splice being covered structurally instead.
 
 ## Deliberate limits (P6 — absent beats fake)
 

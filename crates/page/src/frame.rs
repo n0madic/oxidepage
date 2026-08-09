@@ -276,6 +276,31 @@ impl FrameTree {
         doomed
     }
 
+    /// Retires **every** nested context, deepest first, leaving the top-level
+    /// frame alone.
+    ///
+    /// What a top-level navigation does: the outgoing document's `<iframe>`
+    /// elements are gone with it, so every context they owned is gone too. The
+    /// arena is *replaced* rather than mutated at a commit, so no disconnection
+    /// is ever queued for them — without this they would stay in the table with
+    /// a document id naming a freed slot, and the next whole-page walk would
+    /// panic on it.
+    pub(crate) fn detach_nested(&self) -> Vec<Rc<Frame>> {
+        let children: Vec<FrameId> = self
+            .pre_order()
+            .into_iter()
+            .filter(|frame| frame.id() != self.main.get())
+            .map(|frame| frame.id())
+            .collect();
+        let mut doomed = Vec::new();
+        for id in children {
+            // Each call takes the subtree beneath it too, so a frame already
+            // retired by an earlier one answers with nothing.
+            doomed.extend(self.detach(id));
+        }
+        doomed
+    }
+
     /// The frame `node` belongs to, via its node document.
     ///
     /// This is how a queue entry — a style update, an image update — finds the

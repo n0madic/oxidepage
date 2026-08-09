@@ -91,7 +91,13 @@ pub(crate) fn flush_inline_styles(cx: &BindCx<'_>) {
         match update {
             StyleUpdate::StyleElement(node) => apply_inline_sheet(cx, node),
             StyleUpdate::StyleElementRemoved(node) | StyleUpdate::LinkElementRemoved(node) => {
-                cx.state.style.borrow_mut().remove_sheet_for_node(node);
+                // The engine of the frame that renders this node's document,
+                // not the accessing realm's: a `<style>` in an iframe belongs
+                // to the iframe (ADR-0035 D1).
+                cx.frame_for(node)
+                    .style
+                    .borrow_mut()
+                    .remove_sheet_for_node(node);
             }
             link @ StyleUpdate::LinkElement(_) => {
                 cx.state.dom.borrow_mut().push_style_update(link);
@@ -113,18 +119,19 @@ fn apply_inline_sheet(cx: &BindCx<'_>, node: NodeId) {
             .as_element()
             .and_then(|el| el.attr(&attr_name(LocalName::from("media"))))
             .map(|v| v.to_string());
-        (dom.text_content(node), media, dom.url_extra_data().clone())
+        (
+            dom.text_content(node),
+            media,
+            dom.url_extra_data_of_node(node).clone(),
+        )
     };
-    let sheet =
-        cx.state
-            .style
-            .borrow()
-            .make_stylesheet_with_loader(&css, &url, media.as_deref(), None);
+    // The node's own frame's engine — see `flush_inline_styles`.
+    let style = &cx.frame_for(node).style;
+    let sheet = style
+        .borrow()
+        .make_stylesheet_with_loader(&css, &url, media.as_deref(), None);
     let dom = cx.state.dom.borrow();
-    cx.state
-        .style
-        .borrow_mut()
-        .add_sheet_for_node(&dom, node, sheet);
+    style.borrow_mut().add_sheet_for_node(&dom, node, sheet);
 }
 
 /// Serializes a used length as CSS px (browsers report fractional px for
@@ -208,7 +215,14 @@ fn computed_value(
     {
         return resolved;
     }
-    let engine_version = cx.state.style.borrow().version();
+    // The element's *own* frame's author styles. Reading the accessing realm's
+    // made `getComputedStyle(iframe.contentDocument.querySelector(…))` resolve
+    // the cascade against the embedder's stylist, which has none of the frame's
+    // sheets — it happened to agree whenever the frame's own reflow had already
+    // cached the answer on the node, and disagreed the moment a sheet arrived
+    // after that (ADR-0035 D1).
+    let style = &cx.frame_for(element).style;
+    let engine_version = style.borrow().version();
     let dom_version = cx.state.dom.borrow().style_version();
     if let Some((ev, dv, cv)) = &*cache.borrow()
         && *ev == engine_version
@@ -217,7 +231,7 @@ fn computed_value(
         return serialize_property(cv, name);
     }
     let resolved = {
-        let mut engine = cx.state.style.borrow_mut();
+        let mut engine = style.borrow_mut();
         let mut dom = cx.state.dom.borrow_mut();
         computed_style_for(&mut engine, &mut dom, element, pseudo)
     };
