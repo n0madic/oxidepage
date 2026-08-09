@@ -1259,7 +1259,11 @@ impl DomTree {
     /// the hover and active setters, which change a state that ancestors carry.
     fn restyle_state_chains(&mut self, old: Option<NodeId>, new: Option<NodeId>) {
         for root in [old, new].into_iter().flatten() {
-            for a in self.inclusive_ancestors(root).collect::<Vec<_>>() {
+            // Across frames, exactly as `derive_element_state` reads it: a
+            // chain re-derived only up to the frame's document would leave the
+            // embedding `<iframe>` matching `iframe:hover` after the pointer
+            // had left it.
+            for a in self.inclusive_ancestors_across_frames(root) {
                 self.update_element_state(a);
             }
         }
@@ -1369,13 +1373,19 @@ impl DomTree {
         // hovering a `<span>` inside a `<li>` inside a `<nav>` puts all three in
         // `:hover`. That is the same ancestor walk `:focus-within` does above,
         // and the same reason `set_hovered`/`set_active` re-derive whole chains.
+        //
+        // The walk **crosses a frame boundary** (ADR-0035 D8): an `<iframe>`
+        // element is an ancestor of everything its context renders, so pointing
+        // at a link inside a frame puts the element in `:hover` as well. The
+        // setters cross the same edge, which is what keeps derivation and
+        // invalidation from disagreeing.
         if let Some(hovered) = self.hovered()
-            && self.inclusive_ancestors(hovered).any(|a| a == id)
+            && self.is_inclusive_ancestor_across_frames(id, hovered)
         {
             state |= ElementState::HOVER;
         }
         if let Some(active) = self.active()
-            && self.inclusive_ancestors(active).any(|a| a == id)
+            && self.is_inclusive_ancestor_across_frames(id, active)
         {
             state |= ElementState::ACTIVE;
         }

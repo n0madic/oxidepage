@@ -460,9 +460,11 @@ viewport, and the display-list splice — structurally, walking
 asserted to gain no splice at all. `crates/page/tests/frame_scripting.rs` (13)
 covers the window family, `postMessage` in both directions and its
 `DataCloneError` refusals, a child's globals staying unreachable, and the
-`sandbox` slice. `crates/page/tests/frame_input.rs` (4) covers a click landing
-inside a frame, the crossing accounting for the frame's position, and the
-embedder's capturing listener seeing nothing.
+`sandbox` slice. `crates/page/tests/frame_input.rs` (7) covers a click landing
+inside a frame, the crossing accounting for the frame's position, the
+embedder's capturing listener seeing nothing, an `<iframe>` matching `:hover`
+while the pointer is inside it **and stopping when it leaves**,
+`activeElement` answered per document, and typing reaching the focused frame.
 `crates/page/tests/frame_subresources.rs` (3) covers a frame's relative `<img>`,
 `<link>` and `<script>` reaching the **server** at the frame-relative path and
 never the embedder-relative one, plus an `<img>` firing `load` inside a frame
@@ -475,9 +477,8 @@ both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`
 diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
-**Not implemented, and tracked rather than hidden:** cross-frame `:hover` and
-per-document `activeElement`; keyboard input is not frame-routed; frame session
-history; named frame targets and `window.name`; `Network.*` events carrying the
+**Not implemented, and tracked rather than hidden:** frame session history;
+named frame targets and `window.name`; `Network.*` events carrying the
 initiating frame; and a dedicated display-list golden and Ahem reftest pair for
 a frame, the splice being covered structurally instead.
 

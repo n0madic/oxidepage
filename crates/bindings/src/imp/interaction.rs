@@ -615,15 +615,30 @@ pub(crate) fn set_focus_from_input(cx: &BindCx<'_>, to: Option<NodeId>) -> Resul
 /// `document.activeElement`: the focused element, or `<body>` when nothing has
 /// focus — the fallback every browser reports, and what jQuery's
 /// `safeActiveElement()` expects.
+/// Focus is one page-wide slot, but the answer is **per document** (ADR-0035
+/// D8): a document whose descendant frame holds the focus reports the
+/// `<iframe>` element embedding it, which is what a browser does and what lets
+/// a page tell "focus is somewhere inside that frame" from "focus is nowhere".
 pub(crate) fn active_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<NodeId>, JsThrow> {
-    // Only the rendered document has a focus ring; an inert `DOMParser` /
+    // Only a *rendered* document has a focus ring; an inert `DOMParser` /
     // `createHTMLDocument` document reports null (ADR-0017).
     let focused = {
         let dom = cx.state.dom.borrow();
-        if this != dom.document() {
+        if !dom.is_rendered_root(this) {
             return Ok(None);
         }
-        dom.focused()
+        dom.focused().and_then(|focused| {
+            // Walk out of the focused node's document until one of them is
+            // `this`; the element to report is whatever we were standing on.
+            let mut node = focused;
+            loop {
+                match dom.containing_document(node) {
+                    Some(doc) if doc == this => return Some(node),
+                    Some(doc) => node = dom.owner_of_content_document(doc)?,
+                    None => return None,
+                }
+            }
+        })
     };
     // The borrow must be released: `html_child_of_root` takes its own.
     Ok(focused.or_else(|| super::document::html_child_of_root(cx, this, &["body", "frameset"])))

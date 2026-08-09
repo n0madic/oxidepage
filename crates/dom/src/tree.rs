@@ -207,6 +207,13 @@ type SlotMap = (u64, HashMap<String, NodeId>);
 /// answers `None` instead of hanging the page thread.
 const MAX_SHADOW_HOST_HOPS: usize = 256;
 
+/// Deepest chain of `<iframe>` boundaries an element-state walk will cross.
+///
+/// Comfortably above the page's own frame-depth cap, which is enforced where
+/// contexts are created; this is the local bound that keeps a walk finite
+/// whatever the table says.
+const MAX_FRAME_HOPS: usize = 32;
+
 /// The single source of truth for document state.
 pub struct DomTree {
     pub(crate) arena: Arena,
@@ -222,6 +229,13 @@ pub struct DomTree {
     /// could never be that one. It is still inert, for the same reason stated
     /// differently: nothing ever adds it here.
     rendered_roots: HashSet<NodeId>,
+    /// The reverse of `Element::content_document`: which `<iframe>` embeds each
+    /// nested context's document.
+    ///
+    /// An index rather than a scan, because the `:hover` chain crosses this
+    /// edge once per element per state derivation — and that derivation runs
+    /// for every element on every insertion.
+    content_document_owners: HashMap<NodeId, NodeId>,
     pub(crate) listeners: ListenerRegistry,
     pub(crate) observers: MutationObserverRegistry,
     /// JS-wrapper pin counts (design doc §5.3): a live wrapper pins its
@@ -354,6 +368,7 @@ impl DomTree {
             arena,
             document,
             rendered_roots: HashSet::from([document]),
+            content_document_owners: HashMap::new(),
             listeners: ListenerRegistry::default(),
             observers: MutationObserverRegistry::default(),
             pins: HashMap::new(),
@@ -1681,10 +1696,7 @@ impl DomTree {
     /// and a second map is a second thing to keep in step.
     #[must_use]
     pub fn owner_of_content_document(&self, document: NodeId) -> Option<NodeId> {
-        self.rendered_roots
-            .iter()
-            .flat_map(|&root| self.inclusive_descendants(root))
-            .find(|&id| self.content_document(id) == Some(document))
+        self.content_document_owners.get(&document).copied()
     }
 
     /// Points `owner` at the document of the browsing context it embeds, or
@@ -1694,9 +1706,74 @@ impl DomTree {
     /// here with no context behind it would make `contentDocument` name a
     /// document nothing renders.
     pub fn set_content_document(&mut self, owner: NodeId, document: Option<NodeId>) {
+        let previous = self.content_document(owner);
         if let Some(el) = self.arena.node_mut(owner).as_element_mut() {
             el.content_document = document;
         }
+        // The index follows in both directions, or a frame that navigated
+        // would leave its outgoing document pointing at a live `<iframe>`.
+        if let Some(previous) = previous {
+            self.content_document_owners.remove(&previous);
+        }
+        if let Some(document) = document {
+            self.content_document_owners.insert(document, owner);
+        }
+    }
+
+    /// Whether `ancestor` is `of`, or one of its ancestors — **crossing out of
+    /// a frame** to the `<iframe>` element that embeds it.
+    ///
+    /// `:hover` and `:active` are carried by ancestors, and an `<iframe>`
+    /// element is an ancestor of everything its context renders: pointing at a
+    /// link inside a frame puts the frame's element in `:hover` too. The plain
+    /// `inclusive_ancestors` walk stops at the frame's document, which has no
+    /// parent (ADR-0035 D8).
+    ///
+    /// Bounded like every other crossing here — an owner chain cannot cycle
+    /// structurally, but nothing in this file relies on that.
+    #[must_use]
+    pub fn is_inclusive_ancestor_across_frames(&self, ancestor: NodeId, of: NodeId) -> bool {
+        let mut current = Some(of);
+        let mut hops = 0usize;
+        while let Some(node) = current {
+            if node == ancestor {
+                return true;
+            }
+            current = match self.get(node).and_then(|n| n.parent) {
+                Some(parent) => Some(parent),
+                None => {
+                    hops += 1;
+                    if hops > MAX_FRAME_HOPS {
+                        return false;
+                    }
+                    self.owner_of_content_document(node)
+                }
+            };
+        }
+        false
+    }
+
+    /// The same chain, collected — for the setters that must re-derive the
+    /// state of every element on it.
+    #[must_use]
+    pub fn inclusive_ancestors_across_frames(&self, id: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut current = Some(id);
+        let mut hops = 0usize;
+        while let Some(node) = current {
+            out.push(node);
+            current = match self.get(node).and_then(|n| n.parent) {
+                Some(parent) => Some(parent),
+                None => {
+                    hops += 1;
+                    if hops > MAX_FRAME_HOPS {
+                        break;
+                    }
+                    self.owner_of_content_document(node)
+                }
+            };
+        }
+        out
     }
 
     /// The host element of `fragment`, if it is a shadow root.

@@ -161,3 +161,129 @@ fn a_click_outside_a_frame_is_unaffected() {
     page.settle(Duration::from_millis(300));
     assert_eq!(s(&page, "window.hits"), "1");
 }
+
+/// Moves the pointer to one point — the half of a click that sets `:hover`.
+fn move_to(page: &Page, x: f32, y: f32) {
+    page.dispatch_mouse(MouseInput {
+        kind: MouseEventKind::Move,
+        x,
+        y,
+        button: 0,
+        buttons: 0,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    });
+}
+
+/// An `<iframe>` element matches `:hover` while the pointer is over what its
+/// frame is showing, and **stops** matching once the pointer leaves.
+///
+/// The second half is the one that catches a missing invalidation: deriving the
+/// state correctly while re-deriving a chain that stops at the frame's document
+/// leaves the rule applied forever.
+#[test]
+fn an_iframe_hovers_while_the_pointer_is_inside_it() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <style>#f { border: 0; opacity: 0.25 } #f:hover { opacity: 0.75 }</style>\
+         <button id='b' style='width:100px;height:30px'>out</button>\
+         <iframe id='f' width='200' height='100' \
+          srcdoc='<body style=\"margin:0\"><p id=p style=\"width:120px;height:40px\">x</p></body>'>\
+         </iframe></body>",
+    );
+    let opacity = |page: &Page| {
+        s(
+            page,
+            "getComputedStyle(document.getElementById('f')).opacity",
+        )
+    };
+    assert_eq!(opacity(&page), "0.25", "nothing hovered yet");
+
+    let (fx, fy) = centre_of(&page, "#f");
+    move_to(&page, fx - 40.0, fy - 30.0);
+    page.settle(Duration::from_millis(300));
+    assert_eq!(
+        opacity(&page),
+        "0.75",
+        "the <iframe> is an ancestor of what its frame renders"
+    );
+
+    // Away again — onto a sibling that is not the frame.
+    let (bx, by) = centre_of(&page, "#b");
+    move_to(&page, bx, by);
+    page.settle(Duration::from_millis(300));
+    assert_eq!(
+        opacity(&page),
+        "0.25",
+        "the chain must be re-derived across the boundary on the way out too"
+    );
+}
+
+/// `document.activeElement` is per document: the frame's own document reports
+/// the focused control, and the **embedder's** reports the `<iframe>`.
+#[test]
+fn active_element_is_answered_per_document() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' width='200' height='100' style='border:0' \
+          srcdoc='<body style=\"margin:0\"><input id=i style=\"width:150px;height:30px\"></body>'>\
+         </iframe></body>",
+    );
+    // Nothing focused: both documents fall back to their own body.
+    assert_eq!(
+        s(&page, "document.activeElement.tagName"),
+        "BODY",
+        "the page falls back to its own body"
+    );
+
+    let (fx, fy) = centre_of(&page, "#f");
+    click_at(&page, fx - 20.0, fy - 30.0);
+    page.settle(Duration::from_millis(300));
+
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument.activeElement.tagName"
+        ),
+        "INPUT",
+        "the frame's document reports the control itself"
+    );
+    assert_eq!(
+        s(&page, "document.activeElement.id"),
+        "f",
+        "the embedder reports the element embedding the frame"
+    );
+}
+
+/// Typing goes to the frame that holds the focus, and its `input` listener —
+/// registered in the frame's own realm — sees it.
+#[test]
+fn typing_reaches_the_focused_frame() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' width='200' height='100' style='border:0' \
+          srcdoc='<body style=\"margin:0\"><input id=i style=\"width:150px;height:30px\">\
+          <script>document.getElementById(\"i\").addEventListener(\"input\", (e) => {{ \
+            document.title = e.target.value; }});</script></body>'>\
+         </iframe></body>",
+    );
+    let (fx, fy) = centre_of(&page, "#f");
+    click_at(&page, fx - 20.0, fy - 30.0);
+    page.settle(Duration::from_millis(300));
+
+    page.insert_text("hi");
+    page.settle(Duration::from_millis(300));
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument.getElementById('i').value"
+        ),
+        "hi",
+        "the text landed in the frame's control"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.title"),
+        "hi",
+        "and the frame's own listener saw the event"
+    );
+}

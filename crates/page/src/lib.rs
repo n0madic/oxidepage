@@ -2472,9 +2472,22 @@ impl Page {
     /// when focus arrived.
     ///
     /// `Enter` submits the form, `Escape` blurs, `Tab` moves sequential focus.
+    ///
+    /// Delivered into the world of the frame that holds the focus, not the
+    /// page's own: focus is one page-wide slot but a listener lives in the
+    /// realm that registered it, so typing into an `<input>` inside an iframe
+    /// has to arrive there (ADR-0035 D8).
     pub fn dispatch_key(&self, input: oxidepage_bindings::KeyInput<'_>) {
         self.flush_layout();
-        let result = self.with_cx(|cx| oxidepage_bindings::imp_dispatch_key(cx, input));
+        let world = self
+            .state
+            .dom
+            .borrow()
+            .focused()
+            .map_or(self.state.id, |focused| self.world_of_node(focused));
+        let result = self
+            .with_cx_in(world, |cx| oxidepage_bindings::imp_dispatch_key(cx, input))
+            .unwrap_or(Ok(()));
         if let Err(throw) = result {
             report_throw(&self.hooks, throw);
         }
@@ -2485,7 +2498,15 @@ impl Page {
     /// or an IME commit, which is what CDP's `Input.insertText` means.
     pub fn insert_text(&self, text: &str) {
         self.flush_layout();
-        let result = self.with_cx(|cx| oxidepage_bindings::imp_insert_text(cx, text));
+        let world = self
+            .state
+            .dom
+            .borrow()
+            .focused()
+            .map_or(self.state.id, |focused| self.world_of_node(focused));
+        let result = self
+            .with_cx_in(world, |cx| oxidepage_bindings::imp_insert_text(cx, text))
+            .unwrap_or(Ok(()));
         if let Err(throw) = result {
             report_throw(&self.hooks, throw);
         }
