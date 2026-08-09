@@ -4626,6 +4626,12 @@ impl Page {
             // style update or an image in the child document needs that
             // frame's engines to already exist.
             let mut progressed = self.drain_frame_updates();
+            // A nested context navigating *itself* — its own script, a link
+            // with no `target`, a form submission. Immediately after the frame
+            // updates, and for the same reason the page's own navigation drain
+            // comes first: it replaces a document, and everything below is
+            // keyed on nodes of the one it replaces.
+            progressed |= self.drain_frame_navigations();
             // Tasks (timers, event handlers) may have inserted/removed
             // `<style>`/`<link>` elements; apply those to the style engine.
             self.drain_style_updates();
@@ -4882,7 +4888,21 @@ impl Page {
             return true;
         }
 
-        let request = NetRequest::subresource(&url, &parent_url).of_type(ResourceType::Document);
+        self.load_frame_url(&frame, owner, &url, &parent_url);
+        true
+    }
+
+    /// Fetches `url` and commits it as the frame's document.
+    ///
+    /// Shared by the `src` attribute path and by a navigation the frame's own
+    /// script asked for, so both produce the same milestones.
+    fn load_frame_url(&self, frame: &Rc<frame::Frame>, owner: NodeId, url: &str, referrer: &str) {
+        // `about:blank` has no bytes to fetch, but it is still a navigation.
+        if url == "about:blank" {
+            self.load_frame_document(frame, owner, "", url);
+            return;
+        }
+        let request = NetRequest::subresource(url, referrer).of_type(ResourceType::Document);
         match self.net.fetch_blocking(request) {
             Ok(outcome) => {
                 let final_url = outcome.head.final_url.clone();
@@ -4892,7 +4912,7 @@ impl Page {
                     .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()));
                 let decoded =
                     oxidepage_dom::decode::decode_document_bytes(&outcome.body, transport);
-                self.load_frame_document(&frame, owner, &decoded.text, &final_url);
+                self.load_frame_document(frame, owner, &decoded.text, &final_url);
             }
             Err(error) => {
                 self.hooks
@@ -4900,7 +4920,63 @@ impl Page {
                 self.fire_frame_event(owner, "error");
             }
         }
-        true
+    }
+
+    /// Runs the navigations nested contexts have queued for themselves.
+    ///
+    /// A frame's own script navigating it — `location.href = ...`, a link with
+    /// no `target`, a form submission — queues on **that frame's**
+    /// `FrameShared`, and nothing drained it: the page reads the top-level
+    /// frame's queue alone, so every such navigation was silently dropped
+    /// (ADR-0035 D5).
+    fn drain_frame_navigations(&self) -> bool {
+        let mut progressed = false;
+        for frame in self.frames.pre_order() {
+            let Some(owner) = frame.owner() else {
+                continue; // the top-level frame has its own drain
+            };
+            let Some(navigation) = frame.shared().take_pending_navigation() else {
+                continue;
+            };
+            progressed = true;
+            let referrer = self
+                .state
+                .dom
+                .borrow()
+                .document_url_of(frame.document())
+                .to_owned();
+            match navigation {
+                oxidepage_bindings::PendingNavigation::Load { url, download, .. } => {
+                    if download.is_some() {
+                        // A download is the operator's decision and the page's
+                        // machinery, neither of which is per frame yet.
+                        self.hooks.report_resource_error(String::from(
+                            "a download initiated inside a frame is not implemented",
+                        ));
+                        continue;
+                    }
+                    self.load_frame_url(&frame, owner, &url, &referrer);
+                }
+                oxidepage_bindings::PendingNavigation::ReplaceDocument { html, .. } => {
+                    self.load_frame_document(&frame, owner, &html, &referrer);
+                }
+                oxidepage_bindings::PendingNavigation::JavaScriptUrl { source } => {
+                    let world = frame.shared().default_world();
+                    self.eval_classic_in(frame.shared(), world, &source, &referrer, None);
+                }
+                oxidepage_bindings::PendingNavigation::Traverse { delta } => {
+                    // A frame's history is replace-only (ADR-0035 D10), so
+                    // there is nothing to traverse. Reported rather than
+                    // silently ignored: a page whose `history.back()` does
+                    // nothing deserves to be told why.
+                    self.hooks.report_resource_error(format!(
+                        "history.go({delta}) inside a frame: a nested context has a \
+                         replace-only history, so there is no entry to traverse to"
+                    ));
+                }
+            }
+        }
+        progressed
     }
 
     /// Replaces a frame's document with one parsed from `html`.
@@ -5146,6 +5222,7 @@ impl Page {
                     attached && self.navigate_frame(owner)
                 }
                 oxidepage_dom::FrameUpdate::SourceChanged(owner) => self.navigate_frame(owner),
+                oxidepage_dom::FrameUpdate::Renamed(owner) => self.rename_frame(owner),
                 oxidepage_dom::FrameUpdate::Disconnected(owner) => self.detach_child_frame(owner),
             };
             // The queue's pin (`push_frame_update`), released only after the
@@ -5216,6 +5293,9 @@ impl Page {
                 .report_resource_error(format!("nested browsing context: {error}"));
             return false;
         }
+        // HTML seeds a fresh context's name from the attribute; `window.name`
+        // may then change it from inside.
+        frame.shared().set_name(&self.frame_name_attr(owner));
         self.ensure_init_script_worlds(frame.id());
         self.run_init_scripts_in(frame.id());
         // Reported only once every world exists: the event carries them, and a
@@ -5224,6 +5304,33 @@ impl Page {
         // rolled back above was never announced at all.
         self.record_frame(FrameEventKind::Attached, &frame);
         true
+    }
+
+    /// Points a context's name at its `<iframe name>` attribute.
+    ///
+    /// HTML makes the attribute authoritative on change, and the name is what a
+    /// `target="..."` link resolves against — so a rename has to reach the
+    /// context, not just the element (ADR-0035 D10).
+    fn rename_frame(&self, owner: NodeId) -> bool {
+        let Some(frame) = self.frames.of_owner(owner) else {
+            return false;
+        };
+        let name = self.frame_name_attr(owner);
+        if frame.shared().name() == name {
+            return false;
+        }
+        frame.shared().set_name(&name);
+        true
+    }
+
+    /// The `<iframe name>` attribute value, or the empty string.
+    fn frame_name_attr(&self, owner: NodeId) -> String {
+        self.state
+            .dom
+            .borrow()
+            .get(owner)
+            .and_then(|node| attr_value(node, "name"))
+            .unwrap_or_default()
     }
 
     /// Builds the default world of a freshly attached frame.

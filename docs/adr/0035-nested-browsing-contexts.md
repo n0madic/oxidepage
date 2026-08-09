@@ -457,10 +457,12 @@ discard, `src`/`srcdoc` loading, scripts running in the frame's own realm,
 `contentDocument`, replaced-element sizing, the frame laying out in its own
 viewport, and the display-list splice — structurally, walking
 `PushClip → PushLayer → the frame's own fill → PopLayer`, with a frameless page
-asserted to gain no splice at all. `crates/page/tests/frame_scripting.rs` (13)
+asserted to gain no splice at all. `crates/page/tests/frame_scripting.rs` (18)
 covers the window family, `postMessage` in both directions and its
-`DataCloneError` refusals, a child's globals staying unreachable, and the
-`sandbox` slice. `crates/page/tests/frame_input.rs` (7) covers a click landing
+`DataCloneError` refusals, a child's globals staying unreachable, the
+`sandbox` slice, a frame navigating itself, a context being named and renamed,
+a `target="<name>"` link driving the frame that answers to it, and `_top`
+reaching out of a frame. `crates/page/tests/frame_input.rs` (7) covers a click landing
 inside a frame, the crossing accounting for the frame's position, the
 embedder's capturing listener seeing nothing, an `<iframe>` matching `:hover`
 while the pointer is inside it **and stopping when it leaves**,
@@ -477,10 +479,10 @@ both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`
 diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
-**Not implemented, and tracked rather than hidden:** frame session history;
-named frame targets and `window.name`; `Network.*` events carrying the
-initiating frame; and a dedicated display-list golden and Ahem reftest pair for
-a frame, the splice being covered structurally instead.
+**Not implemented, and tracked rather than hidden:** `Network.*` events
+carrying the initiating frame; `<form target>`, which has never been read at
+all; a download started inside a frame; and a dedicated display-list golden and
+Ahem reftest pair for a frame, the splice being covered structurally instead.
 
 ## Deliberate limits (P6 — absent beats fake)
 

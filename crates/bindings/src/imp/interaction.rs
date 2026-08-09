@@ -452,45 +452,45 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
             });
         return;
     }
-    // An absent or empty `target` navigates the current context, and so do
-    // `_self`/`_parent`/`_top` — there is only one context here. All of them
-    // fall through to the in-place navigation below.
-    if let Some(target) =
-        target.filter(|t| !t.is_empty() && !crate::window_open::target_is_current(t))
-    {
-        // `_blank` opens a new browsing context — same hook, same plain-data
-        // contract as `window.open` (ADR-0027 D12). A *named* target does not:
-        // naming a target is how a page says "reuse one context for all these
-        // links", and with no named-target registry, opening a fresh page per
-        // click is a worse approximation than the single context this engine
-        // has. It would also change behavior once the popup cap was reached, so
-        // one link would act differently depending on how often it had already
-        // been clicked. Without a hook at all (a bare `Page`, the CLI) even
-        // `_blank` falls through to the warning below.
-        if target.eq_ignore_ascii_case("_blank") {
-            let opener_url = cx.state.dom.borrow().document_url().to_owned();
-            let opened = cx.state.hooks.open_window(OpenWindowRequest {
-                url: Some(resolved.clone()),
-                target: target.clone(),
-                features: String::new(),
-                opener_url,
-            });
-            if opened.is_some() {
-                return;
-            }
-        }
-        cx.warn(&format!(
-            "link activation: target=`{target}` is not implemented (one browsing context); \
-             navigating in place"
-        ));
-    }
-    cx.state.request_navigation(PendingNavigation::Load {
-        url: resolved,
+    // `_self`, `_parent`, `_top` and a name all resolve to a real browsing
+    // context now (ADR-0035 D10) — the navigation is queued on *that* context,
+    // which is what makes a `target="side"` link drive the frame called `side`.
+    let navigate = PendingNavigation::Load {
+        url: resolved.clone(),
         replace: false,
         body: None,
         reload: false,
         download,
+    };
+    let target = target.unwrap_or_default();
+    if let Some(context) = crate::window_open::resolve_target(&cx.state.frame, &target) {
+        context.request_navigation(navigate);
+        return;
+    }
+    // No such context: `_blank`, or a name nothing answers to. Both open a new
+    // one — same hook, same plain-data contract as `window.open`
+    // (ADR-0027 D12). Without a hook at all (a bare `Page`, the CLI) this warns
+    // and navigates in place, which is the older behaviour and still the least
+    // surprising one for a headless run.
+    let opener_url = cx
+        .state
+        .dom
+        .borrow()
+        .document_url_of(cx.state.frame.document())
+        .to_owned();
+    let opened = cx.state.hooks.open_window(OpenWindowRequest {
+        url: Some(resolved),
+        target: target.clone(),
+        features: String::new(),
+        opener_url,
     });
+    if opened.is_none() {
+        cx.warn(&format!(
+            "link activation: target=`{target}` names no browsing context and none could be \
+             opened; navigating in place"
+        ));
+        cx.state.request_navigation(navigate);
+    }
 }
 
 /// `HTMLElement.focus()`. Fires `blur`/`focusout` at the old element and

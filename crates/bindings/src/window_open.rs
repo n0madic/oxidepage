@@ -60,11 +60,11 @@ pub fn resolve_against(base: &str, url: &str) -> String {
         .map_or_else(|_| url.to_owned(), |resolved| resolved.to_string())
 }
 
-/// Whether a `target` **keyword** names the *current* browsing context.
+/// Whether a `target` **keyword** names the calling browsing context outright.
 ///
-/// There is exactly one context per page here and it has no parent or opener,
-/// so HTML's `_self`, `_parent` and `_top` all resolve to it — they navigate in
-/// place and must never open anything. Only `_blank` and a name open a page.
+/// Only `_self` now: with real nested contexts `_parent` and `_top` name a
+/// *different* one whenever there is one, so they go through
+/// [`resolve_target`] instead of being assumed to mean "here" (ADR-0035 D10).
 ///
 /// The empty string is deliberately **not** included, because the two callers
 /// disagree about it and HTML says they should: an `<a>` with an absent or
@@ -74,8 +74,51 @@ pub fn resolve_against(base: &str, url: &str) -> String {
 #[must_use]
 pub fn target_is_current(target: &str) -> bool {
     target.eq_ignore_ascii_case("_self")
-        || target.eq_ignore_ascii_case("_parent")
-        || target.eq_ignore_ascii_case("_top")
+}
+
+/// The browsing context a `target` names, resolved against the realm doing the
+/// navigating (ADR-0035 D10).
+///
+/// `_self` and an absent target are this context; `_parent` and `_top` walk the
+/// frame tree, each falling back to this context when there is nowhere to go,
+/// exactly as HTML says. A name is looked up over the page's contexts. `None`
+/// means "not a context that exists" — `_blank`, or a name nothing answers to —
+/// and the caller decides what to open.
+#[must_use]
+pub fn resolve_target(
+    state: &std::rc::Rc<crate::state::FrameShared>,
+    target: &str,
+) -> Option<std::rc::Rc<crate::state::FrameShared>> {
+    if target.is_empty() || target.eq_ignore_ascii_case("_self") {
+        return Some(std::rc::Rc::clone(state));
+    }
+    if target.eq_ignore_ascii_case("_parent") {
+        return Some(
+            state
+                .parent_frame()
+                .and_then(|parent| state.global.frame_state(parent))
+                .unwrap_or_else(|| std::rc::Rc::clone(state)),
+        );
+    }
+    if target.eq_ignore_ascii_case("_top") {
+        let mut top = std::rc::Rc::clone(state);
+        // Bounded by the frame-depth cap the page enforces; an owner chain
+        // cannot cycle, but nothing here relies on that.
+        for _ in 0..crate::state::MAX_FRAME_DESCENT {
+            let Some(parent) = top
+                .parent_frame()
+                .and_then(|parent| top.global.frame_state(parent))
+            else {
+                break;
+            };
+            top = parent;
+        }
+        return Some(top);
+    }
+    if target.eq_ignore_ascii_case("_blank") {
+        return None;
+    }
+    state.global.frame_by_name(state.frame(), target)
 }
 
 /// Something the opener asks of the window it opened.

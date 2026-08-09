@@ -8,6 +8,20 @@ use crate::events::EventTargetKey;
 use crate::state::PendingNavigation;
 use crate::window_open::OpenWindowRequest;
 
+/// `window.name`: this browsing context's name (ADR-0035 D10).
+pub(crate) fn name(cx: &BindCx<'_>, _this: EventTargetKey) -> Result<String, JsThrow> {
+    Ok(cx.state.frame.name())
+}
+
+pub(crate) fn set_name(
+    cx: &BindCx<'_>,
+    _this: EventTargetKey,
+    value: String,
+) -> Result<(), JsThrow> {
+    cx.state.frame.set_name(&value);
+    Ok(())
+}
+
 /// A window that is running its own script is, definitionally, open.
 pub(crate) fn closed(_cx: &BindCx<'_>, _this: EventTargetKey) -> Result<bool, JsThrow> {
     Ok(false)
@@ -69,11 +83,12 @@ pub(crate) fn open(
     } else {
         target
     };
-    // `_self`/`_parent`/`_top` name the current browsing context: HTML says
-    // navigate it and return it, not open a sibling. `window.open(url, '_self')`
-    // is a common "navigate me" idiom, and opening a page for it would leave
-    // the caller sitting where it was.
-    if crate::window_open::target_is_current(&target) {
+    // `_self`/`_parent`/`_top` and a *named* context that exists all name a
+    // browsing context of this page: HTML says navigate it and return it, not
+    // open a sibling. `window.open(url, '_self')` is a common "navigate me"
+    // idiom, and opening a page for it would leave the caller sitting where it
+    // was (ADR-0035 D10).
+    if let Some(context) = crate::window_open::resolve_target(&cx.state.frame, &target) {
         // HTML §7.2.2: "If url is not the empty string, then ... navigate".
         // An empty URL leaves the existing document alone — which matters,
         // because `window.open('', '_self'); window.close();` is a widespread
@@ -82,7 +97,7 @@ pub(crate) fn open(
         // `about:blank` applies to a browsing context being *created*, not to
         // one that already has a document.
         if let Some(url) = resolved {
-            cx.state.request_navigation(PendingNavigation::Load {
+            context.request_navigation(PendingNavigation::Load {
                 url,
                 replace: false,
                 body: None,
@@ -90,9 +105,13 @@ pub(crate) fn open(
                 download: None,
             });
         }
-        // The current window *is* its own `WindowProxy`, which is what a
-        // browser returns here.
-        return Ok(JsValue::Object(cx.with_js(|js| js.global.clone())?));
+        // The calling window *is* its own `WindowProxy`, which is what a
+        // browser returns for `_self`; for another context of this page the
+        // proxy of that context is the honest answer.
+        if context.frame() == cx.state.frame.frame() {
+            return Ok(JsValue::Object(cx.with_js(|js| js.global.clone())?));
+        }
+        return cx.new_frame_proxy(context.frame());
     }
 
     let request = OpenWindowRequest {

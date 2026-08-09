@@ -11,6 +11,11 @@
 // support, so the optional-argument form stands in — see ADR-0025 for the one
 // expression that diverges (`alert(undefined)`).
 interface Window : EventTarget {
+  // The browsing context's name, and the key a `target="..."` link resolves
+  // against. Seeded from `<iframe name>` when the context is created; writable,
+  // because naming a context from inside it is how a frame makes itself a
+  // link target (ADR-0035 D10).
+  attribute DOMString name;
   // A live window is never closed. Here rather than only on `WindowProxy`
   // because `window.open(url, "_self")` returns *this* window, and the
   // near-universal `const w = window.open(..); if (w && !w.closed)` idiom

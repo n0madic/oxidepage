@@ -2166,6 +2166,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.finish_interface("DOMRectList", &proto_dom_rect_list, CtorSpec::Illegal)?;
 
     let proto_window = cx.begin_interface("Window", Some("EventTarget"))?;
+    cx.define_accessor(
+        &proto_window,
+        "name",
+        gen_window_get_name,
+        gen_window_set_name,
+    )?;
     cx.define_getter(&proto_window, "closed", gen_window_get_closed)?;
     cx.define_method(&proto_window, "close", 0, gen_window_close)?;
     cx.define_method(&proto_window, "matchMedia", 1, gen_window_match_media)?;
@@ -9637,6 +9643,18 @@ fn gen_dom_rect_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
     let this = cx.this_dom_rect_list(&call.this)?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::dom_rect_list::item(cx, this, a0)
+}
+
+fn gen_window_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    Ok(JsValue::String(imp::window::name(cx, this)?))
+}
+
+fn gen_window_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::window::set_name(cx, this, a0)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_window_get_closed(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

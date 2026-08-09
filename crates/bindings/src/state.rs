@@ -1126,6 +1126,30 @@ impl PageGlobal {
         self.frames_by_id.borrow().get(&frame)?.upgrade()
     }
 
+    /// The browsing context called `name`, searched over the whole page.
+    ///
+    /// HTML searches a *family* — self, ancestors, descendants, then anything
+    /// the opener chain reaches. This page is one tree in one process, so the
+    /// family is every context there is; `from` only decides the tie, since a
+    /// context that names itself must win over a sibling that shares the name.
+    #[must_use]
+    pub fn frame_by_name(&self, from: FrameId, name: &str) -> Option<Rc<FrameShared>> {
+        if name.is_empty() {
+            return None;
+        }
+        let states: Vec<Rc<FrameShared>> = self
+            .frames_by_id
+            .borrow()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        states
+            .iter()
+            .find(|state| state.frame() == from && state.name() == name)
+            .or_else(|| states.iter().find(|state| state.name() == name))
+            .map(Rc::clone)
+    }
+
     /// Queues a `postMessage` for delivery at the next task boundary.
     pub(crate) fn queue_message(&self, message: PendingMessage) {
         self.messages.borrow_mut().push_back(message);
@@ -1360,6 +1384,9 @@ pub struct FrameShared {
     /// history.back()` must move two entries — and a `javascript:` URL is a
     /// script to run, so neither may be swallowed by whatever was queued next.
     pub(crate) pending_navigation: RefCell<VecDeque<PendingNavigation>>,
+    /// HTML's browsing-context name (`window.name`), and the key a named
+    /// `target` resolves against.
+    pub(crate) name: RefCell<String>,
     /// The session history of this browsing context, shared by
     /// `history.pushState`/`go()` and the page's navigation driver.
     pub(crate) history: RefCell<SessionHistory>,
@@ -1694,6 +1721,7 @@ impl FrameShared {
             storage_subscriber: crate::storage::StorageSubscriber::next(),
             pending_scroll_targets: RefCell::new(Vec::new()),
             pending_navigation: RefCell::new(VecDeque::new()),
+            name: RefCell::new(String::new()),
             history: RefCell::new(SessionHistory::new(initial_url)),
             referrer: RefCell::new(String::new()),
             firing_submission_events: Cell::new(false),
@@ -1786,6 +1814,59 @@ impl FrameShared {
     #[must_use]
     pub fn document(&self) -> NodeId {
         self.document.get()
+    }
+
+    /// This browsing context's name — HTML's `window.name`, seeded from the
+    /// `<iframe name>` attribute when the context is created.
+    ///
+    /// A name is how a page says "reuse one context for all these links": a
+    /// `target="side"` link navigates the frame called `side` rather than
+    /// opening anything (ADR-0035 D10).
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.borrow().clone()
+    }
+
+    pub fn set_name(&self, name: &str) {
+        *self.name.borrow_mut() = name.to_owned();
+    }
+
+    /// Queues a navigation for this browsing context.
+    ///
+    /// On `FrameShared` rather than `WorldState` because a *named* target
+    /// navigates a context the calling realm is not in (ADR-0035 D10) — the
+    /// realm still decides, but the queue is the target's.
+    pub fn request_navigation(&self, navigation: PendingNavigation) {
+        let mut queue = self.pending_navigation.borrow_mut();
+        // A load supersedes a load that has not started yet.
+        if matches!(navigation, PendingNavigation::Load { .. })
+            && matches!(queue.back(), Some(PendingNavigation::Load { .. }))
+        {
+            queue.pop_back();
+        }
+        // A runaway loop of traversals or `javascript:` activations cannot grow
+        // this without bound. The page performs at most
+        // `MAX_CHAINED_NAVIGATIONS` per chain anyway, so a queue this deep is
+        // already a script that has lost control.
+        if queue.len() >= MAX_PENDING_NAVIGATIONS {
+            return;
+        }
+        queue.push_back(navigation);
+    }
+
+    /// Takes the next navigation this browsing context has queued for itself.
+    ///
+    /// The page drains a nested context's queue directly; `WorldState`'s
+    /// same-named method reaches this through the realm's own frame.
+    #[must_use]
+    pub fn take_pending_navigation(&self) -> Option<PendingNavigation> {
+        self.pending_navigation.borrow_mut().pop_front()
+    }
+
+    /// Whether this context has a navigation queued.
+    #[must_use]
+    pub fn has_pending_navigation(&self) -> bool {
+        !self.pending_navigation.borrow().is_empty()
     }
 
     /// Points this browsing context at the document a commit produced.
@@ -2423,21 +2504,7 @@ impl WorldState {
     /// Queues a navigation for the page's event loop (see
     /// [`WorldState::pending_navigation`] for what does and does not collapse).
     pub fn request_navigation(&self, navigation: PendingNavigation) {
-        let mut queue = self.frame.pending_navigation.borrow_mut();
-        // A load supersedes a load that has not started yet.
-        if matches!(navigation, PendingNavigation::Load { .. })
-            && matches!(queue.back(), Some(PendingNavigation::Load { .. }))
-        {
-            queue.pop_back();
-        }
-        // A runaway loop of traversals or `javascript:` activations cannot grow
-        // this without bound. The page performs at most
-        // `MAX_CHAINED_NAVIGATIONS` per chain anyway, so a queue this deep is
-        // already a script that has lost control.
-        if queue.len() >= MAX_PENDING_NAVIGATIONS {
-            return;
-        }
-        queue.push_back(navigation);
+        self.frame.request_navigation(navigation);
     }
 
     /// Takes the next queued navigation, if any.

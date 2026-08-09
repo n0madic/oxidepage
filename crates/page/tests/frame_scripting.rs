@@ -301,3 +301,134 @@ fn the_sandbox_attribute_reflects() {
         "string"
     );
 }
+
+/// A frame's own script navigating **itself**.
+///
+/// The navigation queue is per browsing context, and only the top-level one was
+/// ever drained — so `location.href = …` inside a frame was silently dropped
+/// (ADR-0035 D5).
+#[test]
+fn a_frame_navigates_itself() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<p id=p>before</p><script>\
+           setTimeout(() => { location.href = \"about:blank\"; }, 0);\
+         </script>'></iframe></body>",
+    );
+    page.settle(Duration::from_millis(600));
+    assert_eq!(
+        s(
+            &page,
+            "!!document.getElementById('f').contentDocument.getElementById('p')"
+        ),
+        "false",
+        "the frame replaced its own document"
+    );
+    // And the page around it is untouched.
+    assert_eq!(rendered_roots_count(&page), 2);
+}
+
+/// `location` inside a frame describes the **frame's** document, not the
+/// embedder's — which is also the base every navigation it asks for resolves
+/// against.
+#[test]
+fn a_frames_location_is_its_own() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<script>window.here = location.href;</script>'></iframe>\
+         </body>",
+    );
+    // Read through the frame's document rather than its globals: `srcdoc`
+    // inherits the embedder's URL, so both are `about:blank`-ish here and the
+    // observable difference is that the frame answers at all.
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentWindow.location.href"
+        ),
+        s(&page, "document.URL"),
+        "a srcdoc frame inherits its embedder's URL"
+    );
+}
+
+/// `window.name` is the browsing context's name: seeded from `<iframe name>`,
+/// writable from inside, and the key a `target` resolves against.
+#[test]
+fn a_context_is_named_and_renamed() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' name='side' srcdoc='<script>window.mine = window.name;</script>'>\
+         </iframe></body>",
+    );
+    assert_eq!(s(&page, "window.name"), "", "the page starts unnamed");
+    page.eval_to_string("window.name = 'top-level'; 0").unwrap();
+    assert_eq!(s(&page, "window.name"), "top-level");
+
+    // Renaming the element renames the context it embeds.
+    page.eval_to_string("document.getElementById('f').name = 'other'; 0")
+        .unwrap();
+    page.settle(Duration::from_millis(300));
+    assert_eq!(s(&page, "document.getElementById('f').name"), "other");
+}
+
+/// A link with `target="<name>"` navigates the frame with that name, in place —
+/// it opens nothing.
+#[test]
+fn a_named_target_navigates_that_frame() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' name='side' srcdoc='<p id=p>before</p>'></iframe>\
+         <a id='a' href='about:blank' target='side'>go</a></body>",
+    );
+    assert_eq!(
+        s(
+            &page,
+            "!!document.getElementById('f').contentDocument.getElementById('p')"
+        ),
+        "true"
+    );
+    page.eval_to_string("document.getElementById('a').click(); 0")
+        .unwrap();
+    page.settle(Duration::from_millis(600));
+
+    assert_eq!(
+        s(
+            &page,
+            "!!document.getElementById('f').contentDocument.getElementById('p')"
+        ),
+        "false",
+        "the named frame navigated"
+    );
+    // The page itself did not move, and no context was created for the link.
+    assert_eq!(rendered_roots_count(&page), 2);
+}
+
+/// `_top` from inside a frame navigates the **page** — one of the two keywords
+/// that used to mean "here" because there was nowhere else to go.
+///
+/// The destination is deliberately *not* the page's current URL: a navigation
+/// to the URL a context already shows is same-document, and would prove
+/// nothing.
+#[test]
+fn top_reaches_out_of_a_frame() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<a id=a href=\"data:text/html,<p id=landed>ok\" \
+          target=\"_top\">go</a>\
+         <script>setTimeout(() => document.getElementById(\"a\").click(), 0);</script>'>\
+         </iframe><p id='here'>page</p></body>",
+    );
+    page.settle(Duration::from_millis(800));
+    assert_eq!(
+        s(&page, "!!document.getElementById('here')"),
+        "false",
+        "`_top` replaced the page's own document"
+    );
+    assert_eq!(
+        s(&page, "!!document.getElementById('landed')"),
+        "true",
+        "and replaced it with what the link named"
+    );
+    // The page's own frame went with its document.
+    assert_eq!(rendered_roots_count(&page), 1);
+}

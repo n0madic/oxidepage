@@ -77,6 +77,9 @@ pub enum FrameUpdate {
     Connected(NodeId),
     /// The element's `src` or `srcdoc` changed: navigate its context.
     SourceChanged(NodeId),
+    /// The element's `name` changed: rename its context, which is the key a
+    /// `target="..."` link resolves against.
+    Renamed(NodeId),
     /// The element has left: discard its context.
     Disconnected(NodeId),
 }
@@ -86,7 +89,10 @@ impl FrameUpdate {
     #[must_use]
     pub fn node(self) -> NodeId {
         match self {
-            Self::Connected(node) | Self::SourceChanged(node) | Self::Disconnected(node) => node,
+            Self::Connected(node)
+            | Self::SourceChanged(node)
+            | Self::Renamed(node)
+            | Self::Disconnected(node) => node,
         }
     }
 }
@@ -666,7 +672,11 @@ impl DomTree {
     /// nothing to navigate, and it will pick the attribute up from
     /// [`FrameUpdate::Connected`] when it gains one.
     fn note_frame_attr(&mut self, element: NodeId, local: &html5ever::LocalName) {
-        if *local != local_name!("src") && *local != local_name!("srcdoc") {
+        // `name` alongside the two source attributes: it names the *browsing
+        // context*, which is what a `target="..."` link resolves against, so a
+        // change has to reach the context and not only the element.
+        let renames = *local == local_name!("name");
+        if !renames && *local != local_name!("src") && *local != local_name!("srcdoc") {
             return;
         }
         let is_connected_iframe = self.node(element).is_connected()
@@ -675,7 +685,11 @@ impl DomTree {
                 .as_element()
                 .is_some_and(|el| el.is_html_element() && el.name.local == local_name!("iframe"));
         if is_connected_iframe {
-            self.push_frame_update(FrameUpdate::SourceChanged(element));
+            self.push_frame_update(if renames {
+                FrameUpdate::Renamed(element)
+            } else {
+                FrameUpdate::SourceChanged(element)
+            });
         }
     }
 

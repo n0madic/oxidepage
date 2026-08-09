@@ -25,8 +25,17 @@ use crate::imp::url_parts as parts;
 use crate::state::PendingNavigation;
 
 /// The document URL as a string. Also `toString`, via the IDL stringifier.
+///
+/// **This realm's** document, not the page's: a `Location` belongs to one
+/// browsing context, and reading `dom.document_url()` gave a script inside a
+/// frame its embedder's URL — and, through `resolve`, resolved every
+/// navigation it asked for against the wrong base (ADR-0035 D1).
 fn current_href(cx: &BindCx<'_>) -> String {
-    cx.state.dom.borrow().document_url().to_owned()
+    cx.state
+        .dom
+        .borrow()
+        .document_url_of(cx.state.frame.document())
+        .to_owned()
 }
 
 /// The document URL, parsed. `None` for an opaque or unparseable document URL
