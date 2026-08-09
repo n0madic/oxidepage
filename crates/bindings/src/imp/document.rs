@@ -9,13 +9,18 @@ use crate::cx::BindCx;
 use crate::events::{EventData, UiKind, UiPayload};
 use crate::imp::names::{NameKind, validate, validate_and_extract, validate_xml_name};
 
-/// Whether `this` is the one *rendered* document.
+/// Whether `this` is **this realm's** rendered document.
 ///
 /// Members that reflect the browsing context — `defaultView`, `currentScript`,
-/// `styleSheets`, `readyState`, layout geometry — are the page document's
-/// alone; a second document has no browsing context, and the spec says so.
+/// `styleSheets`, `readyState`, layout geometry — belong to a document that has
+/// one; an inert `DOMParser` or `createHTMLDocument` document does not, and the
+/// spec says so.
+///
+/// Compared against the *frame's* document rather than `dom.document()`: with
+/// nested browsing contexts there are several rendered documents (ADR-0035 D1),
+/// and a script in an iframe asking `document.readyState` means its own.
 fn is_page_document(cx: &BindCx<'_>, this: NodeId) -> bool {
-    this == cx.state.dom.borrow().document()
+    this == cx.state.frame.document()
 }
 
 /// `new Document()`: an XML document with no browsing context. It exposes

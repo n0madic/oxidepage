@@ -215,10 +215,7 @@ fn content_document_is_null_without_a_context() {
     assert_eq!(rendered_roots(&page).len(), 1);
 }
 
-/// The frame element reflects the attributes that describe it. `src` and
-/// `srcdoc` are deliberately **not installed** until they navigate: a setter
-/// that reflects and loads nothing is the silent no-op P6 forbids, and this
-/// pins that so the absence stays deliberate.
+/// The frame element reflects the attributes that describe it.
 #[test]
 fn iframe_reflects_its_attributes() {
     let page = page("<!DOCTYPE html><body><iframe id='f' name='side' width='300'></iframe></body>");
@@ -227,9 +224,90 @@ fn iframe_reflects_its_attributes() {
     assert_eq!(s(&page, "document.getElementById('f').height"), "");
 
     assert_eq!(s(&page, "'name' in document.getElementById('f')"), "true");
-    assert_eq!(s(&page, "'src' in document.getElementById('f')"), "false");
-    assert_eq!(
-        s(&page, "'srcdoc' in document.getElementById('f')"),
-        "false"
+    assert_eq!(s(&page, "'src' in document.getElementById('f')"), "true");
+    assert_eq!(s(&page, "'srcdoc' in document.getElementById('f')"), "true");
+}
+
+/// `srcdoc` loads its markup into the frame's own document, and that document
+/// really is separate: its elements are not in the parent's id index and the
+/// parent's are not in its.
+#[test]
+fn srcdoc_loads_into_the_frame() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<p id=inner>hello</p>'></iframe>\
+         <p id='outer'>x</p></body>",
     );
+    let dom = page.dom();
+    let child = rendered_roots(&page)[1];
+
+    assert!(
+        dom.document_element_of(child).is_some(),
+        "the frame document was parsed into"
+    );
+    assert!(dom.element_by_id(child, "inner").is_some());
+    assert!(dom.element_by_id(child, "outer").is_none());
+    assert!(dom.element_by_id(dom.document(), "inner").is_none());
+    assert!(dom.element_by_id(dom.document(), "outer").is_some());
+}
+
+/// A script inside a `srcdoc` frame runs in **that frame's** realm: its
+/// `document` is the frame's, not the page's.
+#[test]
+fn a_frame_script_runs_in_the_frames_realm() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<p id=inner>hi</p><script>\
+           document.getElementById(\"inner\").textContent = \"touched\";\
+         </script>'></iframe></body>",
+    );
+    let dom = page.dom();
+    let child = rendered_roots(&page)[1];
+    let inner = dom
+        .element_by_id(child, "inner")
+        .expect("the frame parsed its markup");
+    assert_eq!(dom.text_content(inner), "touched");
+}
+
+/// Writing `src`/`srcdoc` from script navigates the frame — the setter queues
+/// it and the event loop performs the load, so it lands by the next settle.
+#[test]
+fn setting_srcdoc_navigates_the_frame() {
+    let page = page("<!DOCTYPE html><body><iframe id='f'></iframe></body>");
+    assert_eq!(
+        page.dom().document_element_of(rendered_roots(&page)[1]),
+        None
+    );
+
+    page.eval_to_string("document.getElementById('f').srcdoc = '<p id=late>after</p>'; 0")
+        .unwrap();
+    page.settle(std::time::Duration::from_millis(500));
+
+    let dom = page.dom();
+    let child = rendered_roots(&page)[1];
+    assert!(
+        dom.element_by_id(child, "late").is_some(),
+        "the frame navigated to the new srcdoc"
+    );
+    // Still exactly two rendered documents: the navigation replaced the
+    // frame's document rather than adding one.
+    assert_eq!(dom.rendered_roots().count(), 2);
+}
+
+/// `load` fires on the element, in the embedding document — the element lives
+/// there, not in the frame.
+#[test]
+fn load_fires_on_the_iframe_element() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <script>\
+           window.loaded = 0;\
+           const f = document.createElement('iframe');\
+           f.addEventListener('load', () => { window.loaded += 1; });\
+           f.srcdoc = '<p>x</p>';\
+           document.body.appendChild(f);\
+         </script></body>",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+    assert_eq!(s(&page, "window.loaded"), "1");
 }

@@ -612,8 +612,14 @@ fn install_window(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     *cx.state.performance_js.borrow_mut() = Some(performance);
     cx.define_getter(&global, "performance", window_performance)?;
 
+    // **This frame's** document, not the top-level one (ADR-0035 D1). The
+    // property is a non-configurable data value, so it cannot be re-pointed
+    // later: a frame's realm is therefore rebuilt at each of its navigations,
+    // which is also what re-runs the driver's init scripts against the fresh
+    // global. The top-level document survives navigation without that because
+    // it is always arena slot `(0, gen 1)`.
     let document = {
-        let id = cx.state.dom.borrow().document();
+        let id = cx.state.frame.document();
         cx.node_to_js(id)?
     };
     cx.scope

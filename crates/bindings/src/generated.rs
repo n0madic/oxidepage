@@ -3460,6 +3460,18 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     let proto_htmli_frame_element = cx.begin_interface("HTMLIFrameElement", Some("HTMLElement"))?;
     cx.define_accessor_ce(
         &proto_htmli_frame_element,
+        "src",
+        gen_htmli_frame_element_get_src,
+        gen_htmli_frame_element_set_src,
+    )?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
+        "srcdoc",
+        gen_htmli_frame_element_get_srcdoc,
+        gen_htmli_frame_element_set_srcdoc,
+    )?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
         "name",
         gen_htmli_frame_element_get_name,
         gen_htmli_frame_element_set_name,
@@ -11980,6 +11992,36 @@ fn gen_html_template_element_get_content(
     let this = cx.this_element(&call.this)?;
     let ret = imp::html_template_element::content(cx, this)?;
     cx.node_to_js(ret)
+}
+
+fn gen_htmli_frame_element_get_src(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::src(cx, this)?))
+}
+
+fn gen_htmli_frame_element_set_src(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_src(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_htmli_frame_element_get_srcdoc(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::srcdoc(cx, this)?))
+}
+
+fn gen_htmli_frame_element_set_srcdoc(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_srcdoc(cx, this, a0)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_htmli_frame_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

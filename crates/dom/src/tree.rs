@@ -75,6 +75,8 @@ pub enum StyleUpdate {
 pub enum FrameUpdate {
     /// The element is now in a rendered document: give it a context.
     Connected(NodeId),
+    /// The element's `src` or `srcdoc` changed: navigate its context.
+    SourceChanged(NodeId),
     /// The element has left: discard its context.
     Disconnected(NodeId),
 }
@@ -84,7 +86,7 @@ impl FrameUpdate {
     #[must_use]
     pub fn node(self) -> NodeId {
         match self {
-            Self::Connected(node) | Self::Disconnected(node) => node,
+            Self::Connected(node) | Self::SourceChanged(node) | Self::Disconnected(node) => node,
         }
     }
 }
@@ -641,6 +643,25 @@ impl DomTree {
     fn push_frame_update(&mut self, update: FrameUpdate) {
         self.pin(update.node());
         self.frame_updates.push(update);
+    }
+
+    /// Queues a navigation for an `<iframe>` whose `src` or `srcdoc` moved.
+    ///
+    /// Only for a connected element: an `<iframe>` with no browsing context has
+    /// nothing to navigate, and it will pick the attribute up from
+    /// [`FrameUpdate::Connected`] when it gains one.
+    fn note_frame_attr(&mut self, element: NodeId, local: &html5ever::LocalName) {
+        if *local != local_name!("src") && *local != local_name!("srcdoc") {
+            return;
+        }
+        let is_connected_iframe = self.node(element).is_connected()
+            && self
+                .node(element)
+                .as_element()
+                .is_some_and(|el| el.is_html_element() && el.name.local == local_name!("iframe"));
+        if is_connected_iframe {
+            self.push_frame_update(FrameUpdate::SourceChanged(element));
+        }
     }
 
     /// Queues a context transition for every `<iframe>` in the subtree rooted
@@ -3310,6 +3331,7 @@ impl DomTree {
         self.note_subtree_mutation(element);
         self.note_style_owner_attr(element, &attr_local);
         self.note_script_owner_attr(element, &attr_local);
+        self.note_frame_attr(element, &attr_local);
         self.note_slot_attr(element, &attr_local);
         self.note_form_attr(element, &attr_local);
         self.push_attribute_changed_if_custom(
@@ -3368,6 +3390,7 @@ impl DomTree {
         self.note_subtree_mutation(element);
         self.note_style_owner_attr(element, &name.local);
         self.note_script_owner_attr(element, &name.local);
+        self.note_frame_attr(element, &name.local);
         self.note_slot_attr(element, &name.local);
         self.note_form_attr(element, &name.local);
         self.push_attribute_changed_if_custom(

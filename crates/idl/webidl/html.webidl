@@ -195,10 +195,9 @@ interface HTMLTableRowElement : HTMLElement {};
 interface HTMLTableCellElement : HTMLElement {};
 interface HTMLTableColElement : HTMLElement {};
 interface HTMLTableCaptionElement : HTMLElement {};
-// `src` and `srcdoc` are deliberately absent until they navigate the frame
-// (ADR-0035 D5). A reflecting setter that loads nothing is the silent no-op
-// P6 forbids, and feature detection is how a page finds that out.
 interface HTMLIFrameElement : HTMLElement {
+  [CEReactions] attribute USVString src;
+  [CEReactions] attribute DOMString srcdoc;
   [CEReactions] attribute DOMString name;
   [CEReactions] attribute DOMString width;
   [CEReactions] attribute DOMString height;

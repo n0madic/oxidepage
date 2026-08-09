@@ -1,18 +1,20 @@
 //! `HTMLIFrameElement`: attribute reflection plus the one member that reaches
 //! into the nested browsing context, `contentDocument` (ADR-0035 D4).
 //!
-//! `src` and `srcdoc` are **not installed yet**: they navigate the frame, and
-//! that goes through the ordinary attribute path — the DOM queues the change
-//! and the page's event loop performs the load — never synchronously from a
-//! setter, which is called with `dom` borrowed. Until that path exists they
-//! would reflect and load nothing, which is the silent no-op P6 forbids.
+//! Writing `src` or `srcdoc` navigates the frame, and does so through the
+//! ordinary attribute path: the DOM queues the change and the page's event
+//! loop performs the load. Never synchronously from the setter — a load
+//! re-enters the event loop, and the setter is called with `dom` borrowed
+//! (ADR-0035 D5).
 
 use oxidepage_base::NodeId;
 use oxidepage_js::JsThrow;
 
 use crate::cx::BindCx;
-use crate::imp::reflect::string_reflector;
+use crate::imp::reflect::{string_reflector, url_reflector};
 
+url_reflector!(src, set_src, "src");
+string_reflector!(srcdoc, set_srcdoc, "srcdoc");
 string_reflector!(name, set_name, "name");
 string_reflector!(width, set_width, "width");
 string_reflector!(height, set_height, "height");

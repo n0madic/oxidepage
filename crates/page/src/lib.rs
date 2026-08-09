@@ -3582,8 +3582,25 @@ impl Page {
     }
 
     fn eval_classic(&self, source: &str, url: &str, node: Option<NodeId>) -> bool {
-        let previous = self.state.frame.current_script.replace(node);
-        self.with_cx(|cx| {
+        self.eval_classic_in(&self.shared, self.state.id, source, url, node)
+    }
+
+    /// Evaluates a classic script in one browsing context's world.
+    ///
+    /// `frame` and `world` travel together: `current_script` is that frame's
+    /// document member, and the source must run in that frame's realm — a
+    /// script in an iframe that evaluated in the page's world would see the
+    /// wrong `document` and the wrong globals.
+    fn eval_classic_in(
+        &self,
+        frame: &Rc<oxidepage_bindings::FrameShared>,
+        world: oxidepage_bindings::WorldId,
+        source: &str,
+        url: &str,
+        node: Option<NodeId>,
+    ) -> bool {
+        let previous = frame.current_script.replace(node);
+        self.with_cx_in(world, |cx| {
             let result = cx.scope.eval(source, url);
             // `document.currentScript` is null in promise reactions and other
             // microtasks queued by the script, so restore before the checkpoint.
@@ -3598,6 +3615,7 @@ impl Page {
             oxidepage_bindings::microtask_checkpoint(cx);
             succeeded
         })
+        .unwrap_or(false)
     }
 
     fn eval_module(&self, source: &str, url: &str) {
@@ -4516,6 +4534,236 @@ impl Page {
     /// Starts loads for every `<img>` queued by the DOM (connect / `src`
     /// change). Loads are deduplicated by absolute URL and their `in_flight`
     /// count makes `load`/`settle` wait for them.
+    /// Navigates the context an `<iframe>` owns to its `src` or `srcdoc`.
+    ///
+    /// A task source, never a step of the attribute setter (ADR-0035 D5): a
+    /// load re-enters the event loop, and the setter holds a `dom` borrow.
+    ///
+    /// Returns whether anything happened, so the loop counts it as progress.
+    fn navigate_frame(&self, owner: NodeId) -> bool {
+        let Some(frame) = self.frames.of_owner(owner) else {
+            return false;
+        };
+        let (srcdoc, src, parent_url) = {
+            let dom = self.state.dom.borrow();
+            let Some(el) = dom.get(owner).and_then(|n| n.as_element()) else {
+                return false;
+            };
+            let attr = |name: &str| {
+                el.attrs()
+                    .iter()
+                    .find(|a| a.name.ns.is_empty() && &*a.name.local == name)
+                    .map(|a| a.value.to_string())
+            };
+            let parent = dom
+                .get(owner)
+                .and_then(|n| n.owner())
+                .unwrap_or_else(|| dom.document());
+            (
+                attr("srcdoc"),
+                attr("src"),
+                dom.document_url_of(parent).to_owned(),
+            )
+        };
+
+        // `srcdoc` wins over `src`, and inherits the embedder's origin rather
+        // than deriving one from a URL it does not have (ADR-0035 D4).
+        if let Some(html) = srcdoc {
+            self.load_frame_document(&frame, owner, &html, &parent_url);
+            return true;
+        }
+
+        let Some(src) = src.filter(|s| !s.trim().is_empty()) else {
+            // No source: the context keeps the `about:blank` it was born with,
+            // and HTML fires `load` on the element for it.
+            return false;
+        };
+        let Ok(url) = url::Url::parse(&parent_url).and_then(|base| base.join(src.trim())) else {
+            self.fire_frame_event(owner, "error");
+            return true;
+        };
+        let url = url.to_string();
+        // `about:blank` is what the context already shows.
+        if url == "about:blank" {
+            return false;
+        }
+
+        let request = NetRequest::subresource(&url, &parent_url).of_type(ResourceType::Document);
+        match self.net.fetch_blocking(request) {
+            Ok(outcome) => {
+                let final_url = outcome.head.final_url.clone();
+                let transport = header_content_type(&outcome.head.headers)
+                    .as_deref()
+                    .and_then(content_type_charset)
+                    .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()));
+                let decoded =
+                    oxidepage_dom::decode::decode_document_bytes(&outcome.body, transport);
+                self.load_frame_document(&frame, owner, &decoded.text, &final_url);
+            }
+            Err(error) => {
+                self.hooks
+                    .report_resource_error(format!("iframe `{url}`: {error}"));
+                self.fire_frame_event(owner, "error");
+            }
+        }
+        true
+    }
+
+    /// Replaces a frame's document with one parsed from `html`.
+    ///
+    /// Always a *fresh* document node rather than a reparse into the existing
+    /// one, so there is a single code path for the initial `about:blank`
+    /// replacement and for every later navigation, and so every id the old
+    /// document handed out dies by the ordinary generation bump when its slots
+    /// are freed.
+    fn load_frame_document(&self, frame: &Rc<frame::Frame>, owner: NodeId, html: &str, url: &str) {
+        let previous = frame.document();
+        let document = {
+            let mut dom = self.state.dom.borrow_mut();
+            let document =
+                dom.create_document(oxidepage_dom::node::DocumentData::html(url.to_owned()));
+            dom.add_rendered_root(document);
+            dom.set_content_document(owner, Some(document));
+            dom.remove_rendered_root(previous);
+            document
+        };
+        frame.shared().set_document(document);
+        // Layout first: `font_metrics_factory` captures the font collection of
+        // the engine it is called on, so a style engine built from the outgoing
+        // one would resolve `ex`/`ch`/`ic` against the previous document's
+        // fonts (the same ordering `reset_document_state` documents).
+        let viewport = self.viewport.get();
+        let layout = LayoutEngine::new(viewport);
+        let mut style = StyleEngine::for_document(&self.state.dom.borrow(), document, viewport);
+        style.set_font_metrics_provider(layout.font_metrics_factory());
+        *frame.shared().style.borrow_mut() = style;
+        *frame.shared().layout.borrow_mut() = layout;
+
+        // `window.document` is a non-configurable data property, so it cannot
+        // be re-pointed at the replacement — the frame's realm is rebuilt
+        // instead. Two passes, as always: every doomed world's values are
+        // released while its runtime is alive, and only then is the realm
+        // dropped.
+        let realms = self.worlds.release_frame(frame.id());
+        drop(realms);
+        if let Err(error) = self.install_frame_main_world(frame) {
+            self.hooks
+                .report_resource_error(format!("iframe realm: {error}"));
+            return;
+        }
+
+        let mut parser = Parser::new_document_shared_at(
+            Rc::clone(&self.state.dom),
+            document,
+            ParseOptions::default(),
+        );
+        parser.push_input(html.into());
+        loop {
+            let signal = parser.run();
+            self.drain_style_updates();
+            match signal {
+                ParseSignal::InputExhausted => break,
+                ParseSignal::Script(node) => self.execute_frame_script(frame, node, url),
+            }
+        }
+        let _parse_errors = parser.finish_shared();
+        self.drain_style_updates();
+
+        // The outgoing document may still be wrapped by the embedder, and a
+        // pinned node pins its node document (ADR-0017 D3) — so this is a
+        // request, not an order.
+        if !self.state.parsing() {
+            let mut dom = self.state.dom.borrow_mut();
+            if !dom.observers().has_pending_records() {
+                dom.free_detached_tree_if_unpinned(previous);
+            }
+        }
+        self.fire_frame_event(owner, "load");
+    }
+
+    /// Runs one parser-encountered `<script>` of a frame's document, in **that
+    /// frame's** world.
+    ///
+    /// Deliberately simpler than the top-level document's pipeline: scripts run
+    /// in document order at the position the parser found them, so `async` and
+    /// `defer` inside a frame execute where they appear rather than being
+    /// reordered. That is a timing difference, not a missing feature, and it is
+    /// recorded as a limit.
+    fn execute_frame_script(&self, frame: &Rc<frame::Frame>, node: NodeId, doc_url: &str) {
+        let world = frame.shared().default_world();
+        let (src, script_type, source) = {
+            let mut dom = self.state.dom.borrow_mut();
+            if !dom.mark_script_already_started(node) {
+                return;
+            }
+            let Some(el) = dom.get(node).and_then(|n| n.as_element()) else {
+                return;
+            };
+            let attr = |name: &str| {
+                el.attrs()
+                    .iter()
+                    .find(|a| a.name.ns.is_empty() && &*a.name.local == name)
+                    .map(|a| a.value.to_string())
+            };
+            let (src, ty) = (
+                attr("src"),
+                attr("type").map(|t| t.trim().to_ascii_lowercase()),
+            );
+            (src, ty, dom.text_content(node))
+        };
+        if !is_classic_script_type(script_type.as_deref()) {
+            // Modules in a frame are not run: the loader is per realm and would
+            // need this frame's, and a half-wired module graph is worse than an
+            // absent one. Reported, never silent.
+            if script_type.as_deref() == Some("module") {
+                self.hooks.report_resource_error(
+                    "module scripts inside an iframe are not executed".to_owned(),
+                );
+            }
+            return;
+        }
+        match src {
+            None => {
+                self.eval_classic_in(frame.shared(), world, &source, doc_url, Some(node));
+            }
+            Some(src) => {
+                let Ok(url) = url::Url::parse(doc_url).and_then(|base| base.join(src.trim()))
+                else {
+                    return;
+                };
+                let url = url.to_string();
+                match self.net.fetch_blocking(
+                    NetRequest::subresource(&url, doc_url).of_type(ResourceType::Script),
+                ) {
+                    Ok(outcome) => {
+                        let text = String::from_utf8_lossy(&outcome.body).into_owned();
+                        self.eval_classic_in(frame.shared(), world, &text, &url, Some(node));
+                    }
+                    Err(error) => {
+                        self.hooks
+                            .report_resource_error(format!("iframe script `{url}`: {error}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fires `load` or `error` on an `<iframe>` element, in the **embedding**
+    /// document's world — the element lives there, not in the frame.
+    fn fire_frame_event(&self, owner: NodeId, kind: &str) {
+        self.with_cx(|cx| {
+            if let Err(e) = oxidepage_bindings::fire_simple_event(
+                cx,
+                EventTargetKey::Node(owner),
+                kind,
+                /* bubbles */ false,
+            ) {
+                report_throw(&self.hooks, e);
+            }
+            oxidepage_bindings::microtask_checkpoint(cx);
+        });
+    }
+
     /// Creates and discards nested browsing contexts for the `<iframe>`
     /// elements the DOM reported entering or leaving a rendered document.
     ///
@@ -4527,7 +4775,14 @@ impl Page {
         let mut progressed = false;
         for update in updates {
             progressed |= match update {
-                oxidepage_dom::FrameUpdate::Connected(owner) => self.attach_child_frame(owner),
+                oxidepage_dom::FrameUpdate::Connected(owner) => {
+                    // A context first, then its initial navigation: an
+                    // `<iframe src>` in the parsed markup gains both in one
+                    // turn, in that order.
+                    let attached = self.attach_child_frame(owner);
+                    attached && self.navigate_frame(owner)
+                }
+                oxidepage_dom::FrameUpdate::SourceChanged(owner) => self.navigate_frame(owner),
                 oxidepage_dom::FrameUpdate::Disconnected(owner) => self.detach_child_frame(owner),
             };
             // The queue's pin (`push_frame_update`), released only after the
