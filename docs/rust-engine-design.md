@@ -892,7 +892,14 @@ this list alone as it ages:
   paints over the float rather than beside it. That last piece is the top post-v1 layout item.
 - **Tables**: fixed-layout approximation via grid mapping in v1; full CSS table layout
   post-v1.
-- **Iframes**: not loaded (element exists, no nested browsing context).
+- ~~Iframes: not loaded (element exists, no nested browsing context)~~ — **partly landed**
+  (ADR-0035); struck through rather than deleted so this section stays a legible record of
+  what the original plan punted on. An `<iframe>` now owns a real nested browsing context:
+  its own document in the shared arena, its own style and layout engines, its own realm.
+  `src`/`srcdoc` load, scripts inside a frame run in that frame's realm, the element is a
+  replaced box, and the frame's content is spliced into screenshots and PDFs. Still out:
+  `window.parent`/`top`/`frames`, `postMessage`, event and input routing across the
+  boundary, per-frame CDP ids, and `sandbox`.
 - **Workers, service workers, WASM** (under QuickJS): absent. WASM arrives with the V8
   configuration if ever needed.
 - ~~Shadow DOM: absent in v1~~ — **landed** (ADR-0010); struck through rather than

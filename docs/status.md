@@ -675,6 +675,25 @@ Conformance work landing outside the phase plan:
   (id, URL, committed loader, in-flight loader) moved into `crates/cdp/src/frame.rs`
   so real iframes become a change of ownership rather than a rewrite.
   Decisions and v1 limits: ADR-0034.
+- **Nested browsing contexts**: the load-bearing half of the automation
+  roadmap's stage-11 milestone. An `<iframe>` now owns a real one — its own
+  document, its own style and layout engines, its own realm — and the arena
+  holds **N rendered documents** rather than one, which is a change to a design
+  principle rather than a feature: `IS_CONNECTED` stopped meaning "in *the*
+  rendered document" and became membership in `DomTree::rendered_roots`, so
+  every consumer of that flag turned from a boolean into a routing question.
+  The context is created when the element is inserted and discarded when it
+  leaves, independently of `src` — which is what HTML says and what let the
+  whole model land before any network path existed. `src`/`srcdoc` navigate
+  through the DOM queue and the event loop, never from the setter; a script
+  inside a frame runs in that frame's realm with that frame's `document`;
+  `contentDocument` is genuine and same-origin gated; the element is a replaced
+  box sized 300×150 by default and never by its content, so one reflow pass
+  suffices; and the frame's painted content is spliced into its embedder's
+  display list, so screenshots and PDFs contain it. One arena rather than one
+  per frame, because `enter_active_tree` refuses to nest a different tree and
+  separate arenas would re-issue the same `NodeId` generations. Decisions and
+  v1 limits: ADR-0035.
 
 ## Deliberate limits at the Puppeteer milestone
 
@@ -709,6 +728,22 @@ pre-existing gap in stylo's media-feature support. `page.fill` on a
 `contenteditable` fails and drag-and-drop is unavailable: there is no `Range`
 /`Selection` over arbitrary DOM and no `DataTransfer`.
 
+**Nested browsing contexts.** Cross-frame scripting is not there yet:
+`window.parent`, `top`, `frames`, `length`, `frameElement` and `postMessage` are
+**not installed**, so a frame cannot talk to its embedder or the reverse. Events
+do not cross a document boundary (as the spec says) and neither does input:
+clicking through an `<iframe>` reaches the element, not the content inside it,
+and `:hover` stops at the frame. `sandbox`, `allow` (Permissions Policy) and
+`loading="lazy"` are not implemented on `<iframe>`. Frame history is not
+implemented at all, so `history` inside a frame addresses nothing. Inside a
+frame, `async`/`defer` scripts run where they appear rather than being
+reordered, and a module script is **refused with a diagnostic** rather than run:
+the loader is per realm, and a half-wired module graph is worse than an absent
+one. There are no `<frameset>`, `<frame>`, `<object>`, `<embed>`, `<portal>` or
+`<fencedframe>` embedders — `<iframe>` is the only one. Cross-frame objects
+carry the *accessing* realm's prototypes and a child's globals are unreachable,
+both deliberate (ADR-0035 D4).
+
 **Interception and network.** Response-stage interception is absent:
 `Fetch.continueResponse`, `Fetch.getResponseBody` and
 `takeResponseBodyAsStream` are refused, and `Fetch.enable` with
@@ -739,11 +774,12 @@ directory is refused and recorded rather than parsed as HTML.
 **Protocol surface.** No user-agent override, no DOM mutation events over the protocol, no
 touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing
 domain (`Debugger`, `Profiler`, `HeapProfiler`, `CSS`, `Overlay`,
-`Accessibility`). There are no nested browsing contexts, so every frame API
-answers for the one frame a page has — and `Page.frameAttached`/`frameDetached`
-are therefore **not** implemented at all: Chrome sends neither for the main
-frame and Playwright takes it from `Page.getFrameTree`, so both would be dead
-code (ADR-0034 D5). `Emulation.setTimezoneOverride` and
+`Accessibility`). **The protocol does not yet know about nested browsing
+contexts**: the engine has them, but every frame API still answers for the main
+frame, `Page.getFrameTree` reports no `childFrames`, and
+`Page.frameAttached`/`frameDetached` are not implemented — so `page.frames()`
+and `frameLocator()` see one frame. `DOM.getFrameOwner` is refused and a node
+carries no `frameId`. `Emulation.setTimezoneOverride` and
 `setGeolocationOverride` are refused because there is no `Intl` and no
 Geolocation API to override; `setLocaleOverride` **is** implemented, and moves
 `navigator.languages` and `Accept-Language` together or not at all.
