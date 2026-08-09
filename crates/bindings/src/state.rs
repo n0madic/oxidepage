@@ -1014,6 +1014,13 @@ pub struct PageGlobal {
     messages: RefCell<VecDeque<PendingMessage>>,
 }
 
+/// Deepest chain of nested browsing contexts an input hit test will follow.
+///
+/// Mirrors the page's own frame-depth cap. Kept here because `bindings` cannot
+/// see `page`, and a hit test that walked without a bound would hang the page
+/// thread rather than answer.
+pub(crate) const MAX_FRAME_DESCENT: usize = 10;
+
 /// One `postMessage` in flight, already serialized in the sender's realm.
 #[derive(Clone, Debug)]
 pub struct PendingMessage {

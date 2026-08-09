@@ -2377,7 +2377,30 @@ impl Page {
     /// This is the shape CDP's `Input.dispatchMouseEvent` maps onto one-to-one.
     pub fn dispatch_mouse(&self, input: oxidepage_bindings::MouseInput) {
         self.flush_layout();
-        let result = self.with_cx(|cx| oxidepage_bindings::imp_dispatch_mouse(cx, input));
+        // Which browsing context the point lands in, and where inside it
+        // (ADR-0035 D8). Resolved first, in the page's own world, because the
+        // dispatch has to happen in **that frame's** world: finding the right
+        // node and firing into the embedder's realm reaches listeners the page
+        // never registered, so the event silently does not arrive.
+        let (frame, input) = self
+            .with_cx(|cx| oxidepage_bindings::resolve_input_frame(cx, input.x, input.y))
+            .map_or((None, input), |(frame, x, y)| {
+                (
+                    Some(frame),
+                    oxidepage_bindings::MouseInput { x, y, ..input },
+                )
+            });
+        let world = frame
+            .and_then(|frame| self.frames.get(frame))
+            .map(|frame| frame.shared().default_world());
+        let result = match world {
+            Some(world) if world != self.state.id => self
+                .with_cx_in(world, |cx| {
+                    oxidepage_bindings::imp_dispatch_mouse(cx, input)
+                })
+                .unwrap_or(Ok(())),
+            _ => self.with_cx(|cx| oxidepage_bindings::imp_dispatch_mouse(cx, input)),
+        };
         if let Err(throw) = result {
             report_throw(&self.hooks, throw);
         }

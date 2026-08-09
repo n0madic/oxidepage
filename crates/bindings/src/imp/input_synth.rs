@@ -17,6 +17,8 @@
 //!   rebuild the tree — and a stale `NodeId` panics in `Arena::node`. Nothing
 //!   here holds an id across a dispatch without checking it is still connected.
 
+use std::rc::Rc;
+
 use oxidepage_base::NodeId;
 use oxidepage_js::JsThrow;
 
@@ -52,10 +54,86 @@ pub struct MouseInput {
 }
 
 /// The element a point resolves to, honouring `pointer-events`.
+/// The element under `(x, y)`, **descending into nested browsing contexts**
+/// (ADR-0035 D8).
+///
+/// Input is the one hit test that crosses a frame boundary. `elementFromPoint`
+/// deliberately does not — CSSOM-View says a point over an `<iframe>` is the
+/// `<iframe>` — but a *click* there lands on whatever the frame is showing, and
+/// a driver clicking a button inside an iframe would otherwise press the frame.
+///
+/// The crossing lives here rather than in `layout` because a `LayoutEngine`
+/// cannot reach a sibling engine, and threading a host trait through
+/// `geometry.rs` would make `layout` frame-aware for nothing.
 fn hit_test(cx: &BindCx<'_>, x: f32, y: f32) -> Option<NodeId> {
     let dom = cx.state.dom.borrow();
     let layout = cx.state.layout.borrow();
     layout.elements_from_point(&dom, x, y).first().copied()
+}
+
+/// Which browsing context a viewport point actually lands in, and where inside
+/// it (ADR-0035 D8).
+///
+/// Input is the one hit test that crosses a frame boundary.
+/// `elementFromPoint` deliberately does not — CSSOM-View says a point over an
+/// `<iframe>` *is* the `<iframe>` — but a click there presses whatever the
+/// frame is showing, and a driver clicking a button inside one would otherwise
+/// press the frame.
+///
+/// Returns the deepest frame under the point together with the point in **its**
+/// coordinates, so the caller can enter that frame's world and dispatch there.
+/// Dispatching in the embedder's world instead finds the right node and fires
+/// into a realm whose listeners are not the ones the page registered — the
+/// event simply never arrives.
+///
+/// The crossing lives here rather than in `layout` because a `LayoutEngine`
+/// cannot reach a sibling engine, and threading a host trait through
+/// `geometry.rs` would make `layout` frame-aware for nothing.
+#[must_use]
+pub fn resolve_input_frame(
+    cx: &BindCx<'_>,
+    x: f32,
+    y: f32,
+) -> Option<(oxidepage_base::FrameId, f32, f32)> {
+    let mut frame = Rc::clone(&cx.state.frame);
+    let (mut x, mut y) = (x, y);
+    // Bounded by the frame-depth cap; a cycle cannot occur, but the walk is
+    // finite either way.
+    for _ in 0..=crate::state::MAX_FRAME_DESCENT {
+        let hit = {
+            let dom = cx.state.dom.borrow();
+            let layout = frame.layout.borrow();
+            layout.elements_from_point(&dom, x, y).first().copied()
+        };
+        // Nothing under the point in this frame: the frame itself is the
+        // answer, so a click on its background still lands somewhere.
+        let Some(hit) = hit else {
+            return Some((frame.frame(), x, y));
+        };
+        // Only an `<iframe>` with a live context continues the walk.
+        let child = {
+            let dom = cx.state.dom.borrow();
+            dom.content_document(hit)
+                .and_then(|document| cx.state.frame.global.frame_of_document(document))
+        };
+        let Some(child) = child else {
+            return Some((frame.frame(), x, y));
+        };
+        // Into the frame's own coordinates. Its engine applies its own scroll
+        // to the point it is handed, exactly as the top document's does, so
+        // only the content-box origin is subtracted here.
+        let origin = {
+            let layout = frame.layout.borrow();
+            layout.absolute_content_origin(hit)
+        };
+        let Some(origin) = origin else {
+            return Some((frame.frame(), x, y));
+        };
+        x -= origin.x;
+        y -= origin.y;
+        frame = child;
+    }
+    None
 }
 
 /// `offsetX`/`offsetY`: the point relative to the target's padding-box origin,

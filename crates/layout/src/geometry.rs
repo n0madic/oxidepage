@@ -780,6 +780,25 @@ impl LayoutEngine {
     /// coordinates: origin = `(paddingLeft, paddingTop)`, size shrunk by border
     /// and padding (clamped to ≥ 0). This matches `ResizeObserverEntry.contentRect`,
     /// whose `x`/`y` are the padding offsets (not viewport coordinates).
+    /// The **viewport-space** origin of `node`'s content box, with document
+    /// scroll applied — the point a nested browsing context's own `(0, 0)`
+    /// sits at (ADR-0035 D8).
+    ///
+    /// Composed through `absolute_frame`, so a transformed or scrolled
+    /// ancestor is accounted for: an input hit test crossing into a frame must
+    /// land where the frame is actually painted, not where its untransformed
+    /// box would be.
+    #[must_use]
+    pub fn absolute_content_origin(&self, node: NodeId) -> Option<Point> {
+        let box_id = self.tree().box_for_node(node)?;
+        let (origin, _) = self.absolute_frame(box_id, /* include_scroll */ true);
+        let layout = &self.tree().box_(box_id).final_layout;
+        Some(Point::new(
+            origin.x + layout.border.left + layout.padding.left,
+            origin.y + layout.border.top + layout.padding.top,
+        ))
+    }
+
     #[must_use]
     pub fn content_box(&self, node: NodeId) -> Option<Rect> {
         let box_id = self.tree().box_for_node(node)?;

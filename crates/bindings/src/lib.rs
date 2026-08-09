@@ -46,7 +46,7 @@ pub use filedata::FileInput;
 pub use imp::input_synth::{
     KeyEventKind, KeyInput, MouseEventKind, MouseInput, WheelInput,
     dispatch_key as imp_dispatch_key, dispatch_mouse as imp_dispatch_mouse,
-    dispatch_wheel as imp_dispatch_wheel, insert_text as imp_insert_text,
+    dispatch_wheel as imp_dispatch_wheel, insert_text as imp_insert_text, resolve_input_frame,
 };
 pub use imp::interaction::fire_trusted_event;
 pub use imp::keys::key_for_code;
