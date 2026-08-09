@@ -874,8 +874,8 @@ not, a frame navigates itself, `window.name` and named targets resolve, and the
 protocol reports the tree with per-frame loaders and contexts. **Both driver
 suites are green** — `cargo xtask puppeteer` 50/50, `cargo xtask playwright`
 23/23 — so `page.frames()`, `frame.evaluate()` and `frameLocator()` all work.
-Deliberate limits (joint session history, indexed `window[0]`, OOPIFs, the rest
-of `sandbox`) are in ADR-0035.
+Deliberate limits (joint session history, OOPIFs, the rest of `sandbox`, and a
+blank frame reporting its embedder's URL) are in ADR-0035.
 
 ### What the plan did not predict
 

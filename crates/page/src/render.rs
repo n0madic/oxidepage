@@ -359,18 +359,23 @@ impl Page {
     /// Returns the cached display list, rebuilding it if the paint stamp
     /// changed. Assumes layout is already flushed.
     fn build_cached_display_list(&self) -> Arc<DisplayList> {
+        // The cache check comes **first**, and `subframe_key` is built from the
+        // frames' stamps and scrolls alone — it needs none of their lists. The
+        // other order repainted every nested context on every rendering
+        // opportunity and every screenshot, which is exactly the work the key
+        // was introduced to skip.
         let subframe_key = self.subframe_key();
-        let subframes = self.build_subframe_lists(&PaintOptions::default());
-        let dom = self.state.dom.borrow();
-        let engine = self.state.layout.borrow();
-        let stamp = engine.paint_stamp();
-
+        let stamp = self.state.layout.borrow().paint_stamp();
         if self.render.stamp.get() == Some(stamp)
             && self.render.subframe_key.get() == Some(subframe_key)
             && let Some(cached) = self.render.cache.borrow().clone()
         {
             return cached;
         }
+
+        let subframes = self.build_subframe_lists(&PaintOptions::default());
+        let dom = self.state.dom.borrow();
+        let engine = self.state.layout.borrow();
 
         let options = PaintOptions {
             subframes,

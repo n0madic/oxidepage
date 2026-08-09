@@ -198,30 +198,43 @@ pub(crate) fn post_message(
     // else is parsed (a `SyntaxError` if it will not) and compared at delivery.
     // A mismatch **drops the message silently** — telling the sender would leak
     // the target's origin to a page not entitled to it.
-    let target_origin = cx.scope.coerce_string(&target_origin)?;
-    let sender_origin = crate::imp::htmli_frame_element::origin_of(
-        cx.state
-            .dom
-            .borrow()
-            .document_url_of(cx.state.frame.document()),
-    );
-    if target_origin != "*" {
-        let wanted = if target_origin == "/" {
-            sender_origin.clone()
-        } else {
-            match url::Url::parse(&target_origin) {
-                Ok(url) => crate::imp::htmli_frame_element::origin_of(url.as_str()),
-                Err(_) => {
-                    return Err(cx.dom_throw(
-                        DomExceptionKind::SyntaxError,
-                        "postMessage: targetOrigin is not a valid origin",
-                    ));
-                }
+    // The argument is optional in the IDL, and an absent one is **not** the
+    // string `"undefined"`: HTML's one-argument form is the
+    // `postMessage(message, options)` overload, whose `targetOrigin` defaults
+    // to `"/"`. Coercing `undefined` made `frame.contentWindow.postMessage(d)`
+    // throw a `SyntaxError` here where it works everywhere else.
+    let target_origin = if target_origin.is_undefined() {
+        String::from("/")
+    } else {
+        cx.scope.coerce_string(&target_origin)?
+    };
+    let (sender_url, target_url) = {
+        let dom = cx.state.dom.borrow();
+        (
+            dom.document_url_of(cx.state.frame.document()).to_owned(),
+            dom.document_url_of(state.document()).to_owned(),
+        )
+    };
+    let sender_origin = crate::imp::htmli_frame_element::origin_of(&sender_url);
+    if target_origin == "/" {
+        // "The sender's own origin" — asked of the engine's own same-origin
+        // test rather than of the printed origin, so two documents that share
+        // an opaque origin because they share a URL (an `about:blank` frame and
+        // its embedder) still match, while two unrelated opaque origins do not.
+        if !cx.same_origin_frame(&state) {
+            return Ok(());
+        }
+    } else if target_origin != "*" {
+        let wanted = match url::Url::parse(&target_origin) {
+            Ok(url) => crate::imp::htmli_frame_element::origin_of(url.as_str()),
+            Err(_) => {
+                return Err(cx.dom_throw(
+                    DomExceptionKind::SyntaxError,
+                    "postMessage: targetOrigin is not a valid origin",
+                ));
             }
         };
-        let actual = crate::imp::htmli_frame_element::origin_of(
-            cx.state.dom.borrow().document_url_of(state.document()),
-        );
+        let actual = crate::imp::htmli_frame_element::origin_of(&target_url);
         // An opaque origin (`origin_of` spells it `"null"`) matches nothing but
         // `*` — it is not equal to itself, which is what makes a sandboxed
         // frame unaddressable by name.

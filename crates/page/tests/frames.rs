@@ -139,20 +139,28 @@ fn a_frame_document_is_scoped_for_id_lookups() {
     );
 }
 
-/// A fresh context's document is genuinely empty — the `<iframe>`'s own DOM
-/// children are *not* its content, and nothing has been parsed into it yet.
+/// A fresh context's document is an *empty HTML document*, not an empty node:
+/// HTML gives an initial `about:blank` an `<html><head></head><body></body>`,
+/// which is what makes `contentDocument.body` writable before any navigation —
+/// the `createElement('iframe')` + `appendChild` + write idiom.
 ///
-/// HTML would give an initial `about:blank` document an
-/// `<html><head></head><body></body></html>`; that arrives with navigation,
-/// and this test is what will notice when it does.
+/// The `<iframe>`'s own DOM children are still not its content.
 #[test]
-fn a_fresh_context_starts_empty() {
+fn a_fresh_context_starts_as_an_empty_html_document() {
     let page = page("<!DOCTYPE html><body><iframe><p id='inside'>x</p></iframe></body>");
     let dom = page.dom();
     let child = rendered_roots(&page)[1];
 
-    assert_eq!(dom.document_element_of(child), None);
-    assert_eq!(dom.children(child).count(), 0);
+    let root = dom.document_element_of(child).expect("a document element");
+    let name = |id| {
+        dom.get(id)
+            .and_then(|node| node.as_element())
+            .map(|el| el.name.local.to_string())
+    };
+    assert_eq!(name(root).as_deref(), Some("html"));
+    let mut kids = dom.children(root).filter_map(name);
+    assert_eq!(kids.next().as_deref(), Some("head"));
+    assert_eq!(kids.next().as_deref(), Some("body"));
     // And the markup written inside the element is not content either: HTML
     // parses `<iframe>` as raw text, so that `<p>` is a text node in the
     // *parent* document, never an element and never the frame's.
@@ -186,13 +194,14 @@ fn content_document_is_the_frames_own_document() {
         s(&page, "document.getElementById('f').contentDocument.URL"),
         "about:blank"
     );
-    // The wrapper names the very node the frame renders.
+    // The wrapper names the very node the frame renders, and that node is a
+    // real (if empty) HTML document.
     assert_eq!(
         s(
             &page,
-            "document.getElementById('f').contentDocument.documentElement"
+            "document.getElementById('f').contentDocument.documentElement.tagName"
         ),
-        "null"
+        "HTML"
     );
     assert!(page.dom().is_rendered_root(child));
 }
@@ -274,9 +283,12 @@ fn a_frame_script_runs_in_the_frames_realm() {
 #[test]
 fn setting_srcdoc_navigates_the_frame() {
     let page = page("<!DOCTYPE html><body><iframe id='f'></iframe></body>");
-    assert_eq!(
-        page.dom().document_element_of(rendered_roots(&page)[1]),
-        None
+    // Nothing of the new markup is there yet — the initial document is the
+    // empty `about:blank` one.
+    assert!(
+        page.dom()
+            .element_by_id(rendered_roots(&page)[1], "late")
+            .is_none()
     );
 
     page.eval_to_string("document.getElementById('f').srcdoc = '<p id=late>after</p>'; 0")
@@ -455,4 +467,87 @@ fn a_frameless_page_gains_no_splice() {
         !json.contains("\"PushClip\""),
         "nothing to splice, so nothing is clipped:\n{json}"
     );
+}
+
+/// A scroll inside a frame fires `scroll` **in that frame**, on that frame's
+/// document.
+///
+/// The queue lives on the context, one per frame, and the page used to drain
+/// only the top-level one — so no `scroll` event ever fired in any frame and
+/// the entries piled up for the life of the document.
+#[test]
+fn a_scroll_inside_a_frame_fires_its_own_event() {
+    let page = page(
+        "<!DOCTYPE html><body><iframe id='f' srcdoc='\
+         <script>window.hits = 0; window.docHits = 0;\
+           window.addEventListener(\"scroll\", () => { window.hits++; });\
+           document.addEventListener(\"scroll\", () => { window.docHits++; });\
+         </script><div style=\"height:3000px\"></div>'></iframe>\
+         <script>window.outerHits = 0;\
+           window.addEventListener(\"scroll\", () => { window.outerHits++; });\
+         </script></body>",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+
+    let tree = page.frame_tree();
+    let ctx = tree[1].context_id.expect("the frame has a realm");
+    let read = |expr: &str| {
+        page.evaluate_in(Some(ctx), expr, &oxidepage_page::EvaluateOptions::default())
+            .expect("the context exists")
+            .expect_done()
+            .result
+            .value_json
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_owned()
+    };
+    read("window.scrollTo(0, 500)");
+    page.settle(std::time::Duration::from_millis(300));
+
+    assert_eq!(read("window.scrollY"), "500");
+    assert_eq!(read("window.hits"), "1", "the frame's window heard it");
+    // The viewport target is *this* frame's document, not the page's — so a
+    // document listener in the frame hears it and bubbles on to its window.
+    assert_eq!(read("window.docHits"), "1");
+    // And the embedder heard nothing: events do not cross the boundary.
+    assert_eq!(s(&page, "window.outerHits"), "0");
+}
+
+/// A link whose `target` names nothing navigates **in place**.
+///
+/// HTML would create a context under that name and reuse it for every later
+/// link naming it. There is no registry of page names here, so opening one per
+/// click would be unbounded — and would change behaviour once the popup cap was
+/// reached, making the same link act differently depending on how often it had
+/// been clicked. `form_submit.rs` already handles the identical case this way.
+#[test]
+fn a_link_naming_no_context_does_not_open_a_page() {
+    let opened = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    // A fragment `href`, so navigating in place is same-document and the link
+    // is still there for the next click — which is the point being made.
+    let page = page("<!DOCTYPE html><body><a id='a' href='#x' target='report'>go</a></body>");
+    {
+        let opened = std::rc::Rc::clone(&opened);
+        page.set_open_window_handler(Some(std::rc::Rc::new(move |_request: &_| {
+            opened.set(opened.get() + 1);
+            Some(oxidepage_bindings::OpenedWindow {
+                closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ops: std::sync::Arc::new(|_op| {}),
+            })
+        })));
+    }
+    for _ in 0..3 {
+        s(&page, "document.getElementById('a').click(); 0");
+        page.settle(std::time::Duration::from_millis(200));
+    }
+    assert_eq!(opened.get(), 0, "a named target opened a page per click");
+
+    // `_blank` still does, which is the case the hook exists for.
+    s(
+        &page,
+        "document.getElementById('a').target = '_blank'; \
+         document.getElementById('a').click(); 0",
+    );
+    page.settle(std::time::Duration::from_millis(200));
+    assert_eq!(opened.get(), 1);
 }

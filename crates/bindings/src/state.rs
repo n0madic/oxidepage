@@ -1126,28 +1126,97 @@ impl PageGlobal {
         self.frames_by_id.borrow().get(&frame)?.upgrade()
     }
 
-    /// The browsing context called `name`, searched over the whole page.
+    /// Every browsing context of the page, **parents before their children**.
     ///
-    /// HTML searches a *family* — self, ancestors, descendants, then anything
-    /// the opener chain reaches. This page is one tree in one process, so the
-    /// family is every context there is; `from` only decides the tie, since a
-    /// context that names itself must win over a sibling that shares the name.
-    #[must_use]
-    pub fn frame_by_name(&self, from: FrameId, name: &str) -> Option<Rc<FrameShared>> {
-        if name.is_empty() {
-            return None;
-        }
-        let states: Vec<Rc<FrameShared>> = self
+    /// `frames_by_id` is a `HashMap`, whose iteration order Rust randomizes per
+    /// process — so any search that walked it would answer differently between
+    /// two runs of the same page the moment two contexts shared a name. This
+    /// reconstructs the tree from the parent links and orders siblings by slot,
+    /// which is their creation order.
+    fn frames_in_tree_order(&self) -> Vec<Rc<FrameShared>> {
+        let mut all: Vec<Rc<FrameShared>> = self
             .frames_by_id
             .borrow()
             .values()
             .filter_map(Weak::upgrade)
             .collect();
-        states
+        all.sort_by_key(|state| (state.frame().index(), state.frame().generation()));
+        let mut out: Vec<Rc<FrameShared>> = Vec::with_capacity(all.len());
+        let mut frontier: Vec<Option<FrameId>> = vec![None];
+        // Bounded by the frame count: each pass appends at least one context or
+        // the frontier empties, and a context is appended exactly once.
+        while let Some(parent) = frontier.pop() {
+            for state in &all {
+                if state.parent_frame() == parent {
+                    out.push(Rc::clone(state));
+                    frontier.push(Some(state.frame()));
+                }
+            }
+        }
+        // A context whose parent link names a frame already gone would be
+        // unreachable from the root; keep it rather than lose it silently.
+        for state in all {
+            if !out.iter().any(|seen| seen.frame() == state.frame()) {
+                out.push(state);
+            }
+        }
+        out
+    }
+
+    /// The browsing context called `name`, searched over the whole page.
+    ///
+    /// HTML searches a *family* in a defined order — self, then descendants in
+    /// tree order, then ancestors, then the wider family — and the order is
+    /// what decides which of two contexts sharing a name wins. This page is one
+    /// tree in one process, so the family is every context there is.
+    #[must_use]
+    pub fn frame_by_name(&self, from: FrameId, name: &str) -> Option<Rc<FrameShared>> {
+        if name.is_empty() {
+            return None;
+        }
+        let ordered = self.frames_in_tree_order();
+        let rank = |state: &Rc<FrameShared>| -> u8 {
+            if state.frame() == from {
+                return 0;
+            }
+            if self.is_ancestor_frame(from, state.frame()) {
+                return 1; // a descendant of `from`
+            }
+            if self.is_ancestor_frame(state.frame(), from) {
+                return 2; // an ancestor of `from`
+            }
+            3
+        };
+        ordered
             .iter()
-            .find(|state| state.frame() == from && state.name() == name)
-            .or_else(|| states.iter().find(|state| state.name() == name))
+            .filter(|state| state.name() == name)
+            .min_by_key(|state| {
+                // Ties inside one rank fall back to tree order, which the
+                // `position` keeps stable.
+                (
+                    rank(state),
+                    ordered
+                        .iter()
+                        .position(|seen| seen.frame() == state.frame())
+                        .unwrap_or(usize::MAX),
+                )
+            })
             .map(Rc::clone)
+    }
+
+    /// Whether `ancestor` embeds `of`, however deeply. Bounded by the same
+    /// descent cap `_top` walks under: a parent chain cannot cycle, but nothing
+    /// here relies on that.
+    fn is_ancestor_frame(&self, ancestor: FrameId, of: FrameId) -> bool {
+        let mut current = self.frame_state(of).and_then(|state| state.parent_frame());
+        for _ in 0..MAX_FRAME_DESCENT {
+            let Some(id) = current else { return false };
+            if id == ancestor {
+                return true;
+            }
+            current = self.frame_state(id).and_then(|state| state.parent_frame());
+        }
+        false
     }
 
     /// Queues a `postMessage` for delivery at the next task boundary.
@@ -1164,13 +1233,20 @@ impl PageGlobal {
     /// The contexts nested directly in `frame`, in unspecified order.
     #[must_use]
     pub fn child_frames(&self, frame: FrameId) -> Vec<FrameId> {
-        self.frames_by_id
+        let mut children: Vec<FrameId> = self
+            .frames_by_id
             .borrow()
             .values()
             .filter_map(Weak::upgrade)
             .filter(|state| state.parent_frame() == Some(frame))
             .map(|state| state.frame())
-            .collect()
+            .collect();
+        // Slot order, which for siblings is creation order — and, crucially,
+        // an order at all: this backs `window[0]`, and a `HashMap` walk would
+        // give a different index to each context between two runs of the same
+        // page, because Rust randomizes that iteration per process.
+        children.sort_by_key(|id| (id.index(), id.generation()));
+        children
     }
 
     /// Forgets a browsing context, or a document it no longer renders.
@@ -1579,6 +1655,18 @@ pub struct WorldState {
     /// The `DomTree::id_version` those accessors were built from; `None` before
     /// the first sync.
     pub(crate) named_props_version: Cell<Option<u64>>,
+    /// The child browsing contexts currently materialized on this window, in
+    /// order, with the name each answered to.
+    ///
+    /// The indices are own accessors on the global (HTML's *indexed* window
+    /// properties, `window[0]` / `window.frames[0]`); the names are accessors
+    /// on `named_props`, where they take precedence over an element id, as HTML
+    /// orders them. Doubles as the change signature: syncing costs one `Vec`
+    /// comparison for a window whose frames did not move.
+    pub(crate) frame_props: RefCell<Vec<(FrameId, String)>>,
+    /// This realm's `WindowProxy` per browsing context, so the object has the
+    /// identity HTML gives it. See `BindCx::new_frame_proxy`.
+    pub(crate) frame_proxies: RefCell<HashMap<FrameId, JsObject>>,
     /// The realm's custom-element registry (`window.customElements`).
     /// Definitions and `whenDefined` promises live here; the DOM mirrors only
     /// the set of defined names and a reaction-intent queue.
@@ -1890,6 +1978,17 @@ impl FrameShared {
         self.worlds.borrow().clone()
     }
 
+    /// Drains this context's scroll targets (`None` = its own viewport).
+    ///
+    /// Per browsing context, and the page drains every one of them: a scroll
+    /// performed inside an `<iframe>` queues here, so reading only the
+    /// top-level context's queue fires no `scroll` event in any frame and lets
+    /// the entries pile up for the life of the document.
+    #[must_use]
+    pub fn take_scroll_targets(&self) -> Vec<Option<oxidepage_base::NodeId>> {
+        std::mem::take(&mut self.pending_scroll_targets.borrow_mut())
+    }
+
     /// Drops every isolated world from the registry.
     ///
     /// The page calls this at a commit, *before* rebuilding them: the rebuild
@@ -1901,6 +2000,17 @@ impl FrameShared {
         // the world it is trying to keep (ADR-0035 D3).
         let default = self.default_world.get();
         self.worlds.borrow_mut().retain(|id| *id == default);
+    }
+
+    /// Drops **every** world from the registry, the default one included.
+    ///
+    /// What a *nested* frame's commit needs, where
+    /// [`Self::forget_isolated_worlds`] is not enough: the frame's realm is
+    /// rebuilt whole, so its default world gets a fresh id too, and retaining
+    /// the outgoing default would keep a torn-down world in `world_ids`'
+    /// no-table fallback for the life of the page.
+    pub fn forget_worlds(&self) {
+        self.worlds.borrow_mut().clear();
     }
 }
 
@@ -1971,6 +2081,8 @@ impl WorldState {
             named_props: RefCell::new(None),
             named_prop_keys: RefCell::new(HashSet::new()),
             named_props_version: Cell::new(None),
+            frame_props: RefCell::new(Vec::new()),
+            frame_proxies: RefCell::new(HashMap::new()),
             custom_elements: RefCell::new(CustomElementRegistry::default()),
             custom_wrappers: RefCell::new(HashMap::new()),
             remote_objects: RefCell::new(crate::remote::ObjectStore::default()),
@@ -2065,6 +2177,7 @@ impl WorldState {
         self.same_object.borrow_mut().clear();
         self.storage_handles.borrow_mut().clear();
         self.pending_net.borrow_mut().clear();
+        self.frame_proxies.borrow_mut().clear();
         self.font_ready_resolvers.borrow_mut().clear();
         self.font_load_resolvers.borrow_mut().clear();
         self.media_queries.borrow_mut().clear();
@@ -2378,6 +2491,10 @@ impl WorldState {
         self.custom_elements.borrow_mut().clear();
         self.custom_wrappers.borrow_mut().clear();
         self.connected_wrappers.borrow_mut().clear();
+        // The contexts this document embedded are gone with it, and their
+        // proxies with them.
+        self.frame_proxies.borrow_mut().clear();
+        *self.frame_props.borrow_mut() = Vec::new();
         // Provisional retentions name the outgoing document too, and each holds
         // a *strong* wrapper — leaving them would pin one detached subtree per
         // entry for the life of the world.
@@ -2449,13 +2566,6 @@ impl WorldState {
         // document's unload-time script queued must survive into the next turn
         // of the loop rather than be dropped by the load it is chained off.
         aborted
-    }
-
-    /// Drains the scroll targets whose position changed since the last drain
-    /// (`None` = the viewport). The page dispatches `scroll` events for them.
-    #[must_use]
-    pub fn take_pending_scroll_targets(&self) -> Vec<Option<oxidepage_base::NodeId>> {
-        std::mem::take(&mut self.frame.pending_scroll_targets.borrow_mut())
     }
 
     /// Queues a `scroll` event for `target` (`None` = the viewport) on the

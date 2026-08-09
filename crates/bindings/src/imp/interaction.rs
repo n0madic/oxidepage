@@ -467,11 +467,24 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
         context.request_navigation(navigate);
         return;
     }
-    // No such context: `_blank`, or a name nothing answers to. Both open a new
-    // one — same hook, same plain-data contract as `window.open`
-    // (ADR-0027 D12). Without a hook at all (a bare `Page`, the CLI) this warns
-    // and navigates in place, which is the older behaviour and still the least
-    // surprising one for a headless run.
+    // A *name* that answers to nothing does **not** open a page. HTML would
+    // create a context under that name and reuse it for every later link
+    // naming it; there is no registry of page names here, so each click would
+    // open one more — unbounded until `max_pages_per_context`, after which the
+    // same link would silently start navigating in place instead. Warning and
+    // navigating in place is what `form_submit.rs` does for the identical case,
+    // and the two callers must not disagree.
+    if !target.eq_ignore_ascii_case("_blank") {
+        cx.warn(&format!(
+            "link activation: target=`{target}` names no browsing context; navigating in place"
+        ));
+        cx.state.request_navigation(navigate);
+        return;
+    }
+    // `_blank` genuinely asks for a fresh one — same hook, same plain-data
+    // contract as `window.open` (ADR-0027 D12). Without a hook at all (a bare
+    // `Page`, the CLI) this warns and navigates in place, which is the older
+    // behaviour and still the least surprising one for a headless run.
     let opener_url = cx
         .state
         .dom
@@ -485,10 +498,7 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
         opener_url,
     });
     if opened.is_none() {
-        cx.warn(&format!(
-            "link activation: target=`{target}` names no browsing context and none could be \
-             opened; navigating in place"
-        ));
+        cx.warn("link activation: target=`_blank` could not open a page; navigating in place");
         cx.state.request_navigation(navigate);
     }
 }

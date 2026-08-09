@@ -902,8 +902,9 @@ this list alone as it ages:
   tree — so `page.frames()`, `frame.evaluate()` and `frameLocator()` all work in both
   drivers. Input, hit testing, `:hover` and focus cross the boundary; *events* do not, as
   the spec says. Named targets, `window.name` and the `allow-scripts`/`allow-same-origin`
-  slice of `sandbox` are in. Still out: joint session history (a frame's is replace-only),
-  indexed `window[0]`, `<object>`/`<embed>`/`<frameset>`, and out-of-process frames.
+  slice of `sandbox` are in, as are indexed and named access to a child context
+  (`window[0]`, `window.frames['inner']`). Still out: joint session history (a frame's is
+  replace-only), `<object>`/`<embed>`/`<frameset>`, and out-of-process frames.
 - **Workers, service workers, WASM** (under QuickJS): absent. WASM arrives with the V8
   configuration if ever needed.
 - ~~Shadow DOM: absent in v1~~ — **landed** (ADR-0010); struck through rather than

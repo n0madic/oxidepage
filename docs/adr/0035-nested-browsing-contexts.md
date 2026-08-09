@@ -493,15 +493,27 @@ both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`
 diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
+Indexed and named access to a child context — `window[0]`, `window.frames[0]`,
+`window.frames['inner']` — **is** implemented, after being recorded here as a
+limit for one round. The limit was the wrong call under P6: `window.length`
+answering 1 while `window.frames[0]` was `undefined` breaks the universal
+`for (let i = 0; i < window.length; i++) window.frames[i]…` idiom *worse* than
+absence would, because it throws on the first iteration instead of running zero
+times. The indices are own accessors on the global (HTML's indexed window
+properties); the names go on the named-properties object, so an own member of
+`Window` still shadows a context sharing its name. Both are ordered by the
+frame tree, not by a `HashMap` walk, or the same page would index its frames
+differently between two runs. A `WindowProxy` is cached per (realm, context)
+for the same reason: `window.frames[i] === window[i]` and
+`event.source === iframe.contentWindow` are what the access is *for*.
+
 **Not implemented, and tracked rather than hidden:** a download started inside
-a frame, which is reported and refused rather than performed; indexed access to
-a frame from its embedder (`window[0]`), where `window.length` and `frames` are
-present but the index is not; and a nested frame's document request keeping its
-own protocol id rather than taking its `loaderId`. Chrome makes those two equal
-for a frame as it does for the page, and Puppeteer's `isNavigationRequest` is
-`requestId === loaderId` — so a frame's document load reads to it as an
-ordinary subresource. Nothing in either driver suite exercises it, which is
-exactly why it is written down.
+a frame, which is reported and refused rather than performed; and a nested
+frame's document request keeping its own protocol id rather than taking its
+`loaderId`. Chrome makes those two equal for a frame as it does for the page,
+and Puppeteer's `isNavigationRequest` is `requestId === loaderId` — so a
+frame's document load reads to it as an ordinary subresource. Nothing in either
+driver suite exercises it, which is exactly why it is written down.
 
 ## Deliberate limits (P6 — absent beats fake)
 
@@ -528,3 +540,18 @@ exactly why it is written down.
   scrolls through the same clamped offsets the document does.
 - **Events do not cross a document boundary** (D8), so a listener on the parent
   sees nothing a child dispatches. `postMessage` is the crossing that exists.
+- **An `about:blank` or `srcdoc` frame reports its embedder's URL** as its
+  `location.href` / `document.URL`, where a browser says `about:blank` and
+  `about:srcdoc`. Origin inheritance and base-URL inheritance are both spelled
+  as *the document's URL* here (D4), and one field cannot hold both answers.
+  The inheritance is what the common idioms need; the printed URL is what is
+  given up for it.
+- **A nested context is attached by the event loop, not by `appendChild`.**
+  `iframe.contentDocument` is null until the next turn, where a browser has it
+  synchronously — the same task-source rule D5 states for the load, one step
+  earlier. The document it then finds is a real empty HTML document
+  (`<html><head></head><body></body>`), so writing into it works.
+- **A named `target` that answers to nothing navigates in place** rather than
+  creating a context under that name. There is no registry of *page* names, so
+  opening one page per click would be unbounded and would change behaviour once
+  the popup cap was reached; `_blank` still opens.

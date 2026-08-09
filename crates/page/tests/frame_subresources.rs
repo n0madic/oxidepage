@@ -81,8 +81,31 @@ fn spawn_server() -> (u16, Arc<Mutex<Vec<String>>>) {
                         resp("image/png", &png_bytes())
                     } else if path.ends_with(".css") {
                         resp("text/css", b"#p { color: rgb(1, 2, 3); }")
+                    } else if path.ends_with("cp1251.js") {
+                        // `document.title = 'привет';` in **windows-1251**.
+                        // Read as UTF-8 every one of those bytes becomes
+                        // U+FFFD, so the title says so if the charset is lost.
+                        let mut src = b"document.title = '".to_vec();
+                        src.extend_from_slice(&[0xEF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2]);
+                        src.extend_from_slice(b"';");
+                        resp("text/javascript; charset=windows-1251", &src)
                     } else if path.ends_with(".js") {
                         resp("text/javascript", b"document.title = 'ran';")
+                    } else if path == "/charset.html" {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><iframe id=f src='nested/charset-frame.html'></iframe>",
+                        )
+                    } else if path.ends_with("charset-frame.html") {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><script src='cp1251.js'></script>",
+                        )
+                    } else if path == "/origin.html" {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><title>Origin</title><iframe id=b></iframe>",
+                        )
                     } else if path.ends_with("/frame.html") {
                         resp(
                             "text/html",
@@ -220,4 +243,79 @@ fn an_image_in_a_shadow_tree_fires_its_load_event() {
     .unwrap();
     page.settle(Duration::from_millis(500));
     assert_eq!(page.eval_to_string("window.loaded").unwrap(), "true");
+}
+
+/// A frame's `<script src>` is decoded with the charset its `Content-Type`
+/// declares, like every other script path in the engine.
+///
+/// `from_utf8_lossy` turned each non-ASCII byte of a legacy-encoded script into
+/// U+FFFD, corrupting its string literals — and, when a multi-byte sequence
+/// straddled a quote, its syntax.
+#[test]
+fn a_frames_external_script_honours_its_charset() {
+    let (port, _paths) = spawn_server();
+    let page = page();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/charset.html"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.settle(Duration::from_millis(1500));
+
+    assert_eq!(
+        page.eval_to_string("document.getElementById('f').contentDocument.title")
+            .unwrap(),
+        "привет"
+    );
+}
+
+/// A frame with no `src` inherits its embedder's origin, so the embedder can
+/// reach into it.
+///
+/// Every other test masks this: a page loaded from a string has the URL
+/// `about:blank` itself, so the same-origin check takes its `a == b` fast path.
+/// From a real address the frame's literal `about:blank` compared `about` to
+/// `http` and lost — leaving `contentDocument` null for the commonest idiom
+/// there is, `createElement('iframe')` + `appendChild` + write.
+#[test]
+fn a_src_less_frame_inherits_the_embedders_origin() {
+    let (port, _paths) = spawn_server();
+    let page = page();
+    let base = format!("http://127.0.0.1:{port}");
+    page.navigate(&format!("{base}/origin.html"), WaitUntil::Load)
+        .unwrap();
+    page.settle(Duration::from_millis(1000));
+
+    // The one the markup declared…
+    assert_eq!(
+        page.eval_to_string("document.getElementById('b').contentDocument !== null")
+            .unwrap(),
+        "true"
+    );
+    // …and one the page builds itself, which is the idiom that matters. The
+    // context is attached by the event loop rather than by `appendChild`
+    // (ADR-0035 D5), so the read comes after a turn.
+    page.eval_to_string(
+        "(() => { const f = document.createElement('iframe'); f.id = 'made'; \
+           document.body.appendChild(f); return 0; })()",
+    )
+    .unwrap();
+    page.settle(Duration::from_millis(500));
+    assert_eq!(
+        page.eval_to_string(
+            "(() => { const f = document.getElementById('made'); \
+               if (!f.contentDocument) return 'null'; \
+               f.contentDocument.body.innerHTML = '<p id=q>in</p>'; \
+               return f.contentDocument.getElementById('q').textContent; })()"
+        )
+        .unwrap(),
+        "in"
+    );
+    // A relative URL inside such a frame resolves against the embedder's base
+    // URL, which is the other half of what inheriting the URL buys.
+    assert_eq!(
+        page.eval_to_string("document.getElementById('b').contentDocument.URL")
+            .unwrap(),
+        format!("{base}/origin.html")
+    );
 }

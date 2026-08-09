@@ -2539,7 +2539,31 @@ impl Page {
     /// the page.
     pub fn dispatch_wheel(&self, input: oxidepage_bindings::WheelInput) {
         self.flush_layout();
-        let result = self.with_cx(|cx| oxidepage_bindings::imp_dispatch_wheel(cx, input));
+        // Routed to the browsing context under the point, exactly as
+        // `dispatch_mouse` is and for the same reason (ADR-0035 D8): a tick
+        // over an `<iframe>` must hit-test in *that* frame's layout engine and
+        // fire into *that* frame's realm, or it scrolls the embedder instead.
+        // `Input.dispatchMouseEvent { type: mouseWheel }` is how both drivers
+        // implement `mouse.wheel()`, so this is the whole of scrolling a frame.
+        let (frame, input) = self
+            .with_cx(|cx| oxidepage_bindings::resolve_input_frame(cx, input.x, input.y))
+            .map_or((None, input), |(frame, x, y)| {
+                (
+                    Some(frame),
+                    oxidepage_bindings::WheelInput { x, y, ..input },
+                )
+            });
+        let world = frame
+            .and_then(|frame| self.frames.get(frame))
+            .map(|frame| frame.shared().default_world());
+        let result = match world {
+            Some(world) if world != self.state.id => self
+                .with_cx_in(world, |cx| {
+                    oxidepage_bindings::imp_dispatch_wheel(cx, input)
+                })
+                .unwrap_or(Ok(())),
+            _ => self.with_cx(|cx| oxidepage_bindings::imp_dispatch_wheel(cx, input)),
+        };
         if let Err(throw) = result {
             report_throw(&self.hooks, throw);
         }
@@ -4932,12 +4956,50 @@ impl Page {
         // `contentWindow.location = "about:blank"` silently doing nothing, and
         // a page waiting on that `load` waits forever.
         if url == "about:blank" {
-            self.load_frame_document(&frame, owner, "", &url);
+            // …and it inherits the embedder's origin, exactly as the document
+            // the context was born with does.
+            self.load_frame_document(&frame, owner, "", &parent_url);
             return true;
         }
 
         self.load_frame_url(&frame, owner, &url, &parent_url, None);
         true
+    }
+
+    /// Gives a freshly created document the skeleton HTML says it has.
+    ///
+    /// The parser over an empty input, rather than three hand-built nodes:
+    /// that is the same code path `load_frame_document` takes, so the initial
+    /// `about:blank` and every later commit cannot disagree about what an empty
+    /// document contains.
+    fn seed_blank_document(&self, document: NodeId) {
+        let mut parser = Parser::new_document_shared_at(
+            Rc::clone(&self.state.dom),
+            document,
+            ParseOptions::default(),
+        );
+        parser.push_input("".into());
+        // No input means no `ParseSignal::Script`, so there is no loop to run.
+        let _ = parser.run();
+        let _parse_errors = parser.finish_shared();
+        self.drain_style_updates();
+    }
+
+    /// The URL an `about:blank` document embedded by `owner` inherits.
+    ///
+    /// HTML gives such a document its creator's origin **and** its creator's
+    /// base URL, and this engine spells both as the document's URL — the rule
+    /// ADR-0035 D4 states and `srcdoc` already follows. Deriving them from
+    /// `about:blank` instead is what made every src-less `<iframe>` read as
+    /// cross-origin from a page with a real address, so `contentDocument` was
+    /// null for `createElement('iframe')` + `appendChild` + write, the
+    /// commonest idiom there is.
+    fn inherited_blank_url(&self, owner: NodeId) -> String {
+        let dom = self.state.dom.borrow();
+        let embedder = dom
+            .containing_document(owner)
+            .unwrap_or_else(|| dom.document());
+        dom.document_url_of(embedder).to_owned()
     }
 
     /// Fetches `url` and commits it as the frame's document.
@@ -4952,9 +5014,12 @@ impl Page {
         referrer: &str,
         body: Option<oxidepage_bindings::NavigationBody>,
     ) {
-        // `about:blank` has no bytes to fetch, but it is still a navigation.
+        // `about:blank` has no bytes to fetch, but it is still a navigation —
+        // and the document it commits inherits the embedder's origin rather
+        // than deriving an opaque one from `about:`.
         if url == "about:blank" {
-            self.load_frame_document(frame, owner, "", url);
+            let inherited = self.inherited_blank_url(owner);
+            self.load_frame_document(frame, owner, "", &inherited);
             return;
         }
         // A form submission targeting this frame carries its entry list, and
@@ -5105,6 +5170,12 @@ impl Page {
             .collect();
         let realms = self.worlds.release_frame(frame.id());
         drop(realms);
+        // The registry the table falls back on when no `WorldEnter` is
+        // installed. Cleared *whole*, not merely of its isolated worlds: the
+        // frame's default world is re-minted below, so keeping the outgoing one
+        // would leave a dead id in `world_ids()` — and one more on every
+        // subsequent navigation of this frame.
+        frame.shared().forget_worlds();
         if let Err(error) = self.install_frame_main_world(frame) {
             self.hooks
                 .report_resource_error(format!("iframe realm: {error}"));
@@ -5229,10 +5300,22 @@ impl Page {
                 };
                 let url = url.to_string();
                 match self.net.fetch_blocking(
-                    NetRequest::subresource(&url, doc_url).of_type(ResourceType::Script),
+                    NetRequest::subresource(&url, doc_url)
+                        .of_type(ResourceType::Script)
+                        // Reported as *this* frame's request, like every other
+                        // subresource a nested context asks for; without it the
+                        // protocol names the target and a driver attributes the
+                        // frame's own script to the page.
+                        .in_frame(frame.id()),
                 ) {
                     Ok(outcome) => {
-                        let text = String::from_utf8_lossy(&outcome.body).into_owned();
+                        // The `Content-Type` charset, as every other script
+                        // path decodes it. `from_utf8_lossy` turns each
+                        // non-ASCII byte of a `windows-1251` script into
+                        // U+FFFD, corrupting its literals and sometimes its
+                        // syntax.
+                        let ct = header_content_type(&outcome.head.headers);
+                        let text = decode_charset(&outcome.body, ct.as_deref());
                         self.eval_classic_in(frame.shared(), world, &text, &url, Some(node));
                     }
                     Err(error) => {
@@ -5345,11 +5428,10 @@ impl Page {
         // A fresh document in the shared arena, rendered from the moment it
         // exists — that is what makes style, layout and resource loading reach
         // it (ADR-0035 D1).
+        let blank_url = self.inherited_blank_url(owner);
         let document = {
             let mut dom = self.state.dom.borrow_mut();
-            let document = dom.create_document(oxidepage_dom::node::DocumentData::html(
-                "about:blank".into(),
-            ));
+            let document = dom.create_document(oxidepage_dom::node::DocumentData::html(blank_url));
             dom.add_rendered_root(document);
             document
         };
@@ -5372,7 +5454,10 @@ impl Page {
         if let Err(error) = self.install_frame_main_world(&frame) {
             // Roll the half-built context back rather than leave a frame whose
             // document is rendered but which can never run a script.
-            self.discard_frames(self.frames.detach(frame.id()));
+            // **Unannounced**: nothing has reported this frame yet — the
+            // `Attached` event is emitted below, once the worlds exist — so a
+            // `Detached` here would name an id no driver has ever seen.
+            self.tear_down_frames(&self.frames.detach(frame.id()));
             self.hooks
                 .report_resource_error(format!("nested browsing context: {error}"));
             return false;
@@ -5387,6 +5472,12 @@ impl Page {
         // long enough for an embedder to append a `<script>` into a frame it
         // declared `sandbox` without `allow-scripts` (ADR-0035 D11).
         frame.shared().set_sandbox(self.sandbox_of(owner));
+        // A fresh `about:blank` is an *HTML* document: `<html><head><body>`,
+        // built by running the parser over no input at all. Without this the
+        // document node has no children, so `contentDocument.body` is null and
+        // the `createElement('iframe')` + `appendChild` + write idiom — the
+        // whole point of a reachable initial document — cannot start.
+        self.seed_blank_document(document);
         self.ensure_init_script_worlds(frame.id());
         self.run_init_scripts_in(frame.id());
         // Reported only once every world exists: the event carries them, and a
@@ -5448,9 +5539,15 @@ impl Page {
         // the table is flat, and id 0 is the *top-level* frame's default world
         // (ADR-0035 D3).
         let id = self.worlds.next_id();
+        // **Before** the install, not after. `install_late_globals` gates the
+        // main-world-only globals on `WorldState::is_main()`, which is
+        // `id == frame.default_world()` — and a fresh child frame still says
+        // `MAIN_WORLD` here. Installing first made every nested frame's own
+        // default world read as isolated, so `customElements` was never
+        // installed in any of them.
+        frame.shared().set_default_world(id);
         let state = oxidepage_bindings::install_world(&realm, frame.shared(), id, "")
             .map_err(|e| e.to_string())?;
-        frame.shared().set_default_world(id);
         self.worlds.push(id, frame.id(), "", realm, state);
         Ok(())
     }
@@ -5524,13 +5621,25 @@ impl Page {
         for frame in &doomed {
             self.record_frame(FrameEventKind::Detached, frame);
         }
+        self.tear_down_frames(&doomed);
+    }
+
+    /// The same teardown, **unannounced**.
+    ///
+    /// For the one frame that was never announced: `attach_child_frame`'s
+    /// rollback, where the realm failed to build. A `Page.frameDetached` for a
+    /// frame that got no `Page.frameAttached` is an id a driver has never seen
+    /// — Puppeteer and Playwright both look it up in their frame map and find
+    /// nothing — so the reporting has to be the caller's choice, not something
+    /// the teardown does unconditionally.
+    fn tear_down_frames(&self, doomed: &[Rc<frame::Frame>]) {
         let mut realms = Vec::new();
-        for frame in &doomed {
+        for frame in doomed {
             realms.extend(self.worlds.release_frame(frame.id()));
         }
         // Pass 2: the realms, once nothing holds a `Persistent` any more.
         drop(realms);
-        for frame in &doomed {
+        for frame in doomed {
             let document = frame.document();
             let mut dom = self.state.dom.borrow_mut();
             if let Some(owner) = frame.owner() {
@@ -6215,7 +6324,7 @@ impl Page {
             // known immediately and a failure falls straight through.
             if let Some(rest) = url.strip_prefix("data:") {
                 let decoded = oxidepage_net::data::decode(rest)
-                    .is_some_and(|body| self.finish_font(family, &body.bytes, attrs));
+                    .is_some_and(|body| self.finish_font(frame, family, &body.bytes, attrs));
                 if decoded {
                     return;
                 }
@@ -6271,12 +6380,18 @@ impl Page {
             NetEvent::Done { .. } => {
                 let pending = self.pending_fonts.borrow_mut().remove(&id);
                 if let Some(pending) = pending {
+                    // The frame whose sheet declared the rule. Gone means the
+                    // context was discarded while its font was in flight —
+                    // there is nothing left to register it into.
+                    let frame = self.frames.get(pending.frame);
                     let loaded = pending.status < 400
-                        && self.finish_font(&pending.family, &pending.buffer, pending.attrs);
+                        && frame.as_ref().is_some_and(|frame| {
+                            self.finish_font(frame, &pending.family, &pending.buffer, pending.attrs)
+                        });
                     if !loaded {
                         // Downloaded but unusable (error status, or bytes we
                         // cannot decode): fall through to the next `src:`.
-                        if let Some(frame) = self.frames.get(pending.frame) {
+                        if let Some(frame) = frame {
                             self.start_font_load(
                                 &frame,
                                 &pending.family,
@@ -6338,14 +6453,21 @@ impl Page {
     /// Decodes and registers font `bytes` under `family`, reporting whether the
     /// family now resolves to it. A decode failure is non-fatal: the caller
     /// either tries the next `src:` or leaves the text on its fallback font.
+    ///
+    /// Registered into **the frame whose sheet declared the rule**. Each
+    /// browsing context owns its own `FontSystem` (only the `ImageStore` is
+    /// shared), so registering into the page's would download an iframe's
+    /// `@font-face`, bump the *embedder's* font collection, and leave the text
+    /// it was declared for on its fallback family for ever.
     fn finish_font(
         &self,
+        frame: &Rc<frame::Frame>,
         family: &str,
         bytes: &[u8],
         attrs: oxidepage_layout::WebFontAttrs,
     ) -> bool {
-        let outcome = self
-            .state
+        let outcome = frame
+            .shared()
             .layout
             .borrow_mut()
             .register_web_font(family, bytes, attrs);
@@ -6353,7 +6475,7 @@ impl Page {
             // A new face changes what `ex`/`ch`/`ic` and `font-size-adjust`
             // resolve to; without this, stylo reuses the values cascaded before
             // it arrived.
-            self.state.style.borrow_mut().note_fonts_changed();
+            frame.shared().style.borrow_mut().note_fonts_changed();
         }
         outcome.is_usable()
     }
@@ -6579,21 +6701,35 @@ impl Page {
     /// from script (WP-G2): elements get a non-bubbling `scroll`; a viewport
     /// scroll fires on the document (bubbling on to the window).
     fn drain_scroll_events(&self) -> bool {
-        let targets = self.state.take_pending_scroll_targets();
-        if targets.is_empty() {
+        // Every browsing context, in its **own** world and against its **own**
+        // document: the queue lives on `FrameShared`, so a scroll inside an
+        // `<iframe>` is invisible to the top-level context's drain, and the
+        // viewport target of a frame is that frame's document — not the page's.
+        let mut fired = false;
+        for frame in self.frames.pre_order() {
+            let targets = frame.shared().take_scroll_targets();
+            if targets.is_empty() {
+                continue;
+            }
+            fired = true;
+            let document = frame.document();
+            self.with_cx_in(frame.shared().default_world(), |cx| {
+                for target in targets {
+                    let (key, bubbles) = match target {
+                        Some(node) => (EventTargetKey::Node(node), false),
+                        None => (EventTargetKey::Node(document), true),
+                    };
+                    if let Err(e) =
+                        oxidepage_bindings::fire_simple_event(cx, key, "scroll", bubbles)
+                    {
+                        report_throw(&self.hooks, e);
+                    }
+                }
+            });
+        }
+        if !fired {
             return false;
         }
-        self.with_cx(|cx| {
-            for target in targets {
-                let (key, bubbles) = match target {
-                    Some(node) => (EventTargetKey::Node(node), false),
-                    None => (EventTargetKey::Node(cx.state.dom.borrow().document()), true),
-                };
-                if let Err(e) = oxidepage_bindings::fire_simple_event(cx, key, "scroll", bubbles) {
-                    report_throw(&self.hooks, e);
-                }
-            }
-        });
         // One checkpoint across every world, because a scroll listener in one
         // world can queue a MutationObserver microtask in another.
         self.microtask_checkpoint_all();

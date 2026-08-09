@@ -1609,12 +1609,42 @@ impl BindCx<'_> {
     /// Minted in the **accessing** realm, so what comes back is this realm's
     /// object over another frame's context — never the child's global, which
     /// could not cross a runtime boundary at all (ADR-0035 D4).
+    ///
+    /// **One object per (realm, context)**, cached: HTML gives a `WindowProxy`
+    /// an identity, and every idiom that matters rests on it —
+    /// `event.source === iframe.contentWindow` is *the* `postMessage` check,
+    /// and `window.frames[i] === window[i]` has to hold for an index to be
+    /// worth anything. Minting a fresh slab object per access made each of
+    /// those false.
     pub(crate) fn new_frame_proxy(
         &self,
         frame: oxidepage_base::FrameId,
     ) -> Result<JsValue, JsThrow> {
+        if let Some(cached) = self.state.frame_proxies.borrow().get(&frame) {
+            return Ok(JsValue::Object(cached.clone()));
+        }
         let data = Rc::new(WindowProxyData::Frame(frame));
-        self.new_slab_object("WindowProxy", HostData::WindowProxy(data))
+        let value = self.new_slab_object("WindowProxy", HostData::WindowProxy(data))?;
+        if let JsValue::Object(object) = &value {
+            self.state
+                .frame_proxies
+                .borrow_mut()
+                .insert(frame, object.clone());
+        }
+        Ok(value)
+    }
+
+    /// Drops the cached proxies of contexts that are gone.
+    ///
+    /// A `FrameId` is generation-checked, so a dead entry can never be handed
+    /// out for a *different* context — it is only the object and its slab
+    /// entry that would linger, and a page that creates and destroys frames in
+    /// a loop would accumulate them for the life of the realm.
+    pub(crate) fn prune_frame_proxies(&self) {
+        self.state
+            .frame_proxies
+            .borrow_mut()
+            .retain(|&frame, _| self.frame_state(frame).is_some());
     }
 
     pub(crate) fn new_media_query_list(

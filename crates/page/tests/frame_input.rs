@@ -287,3 +287,51 @@ fn typing_reaches_the_focused_frame() {
         "and the frame's own listener saw the event"
     );
 }
+
+/// A wheel tick over an `<iframe>` scrolls **the frame**, and fires `wheel` in
+/// the frame's own realm.
+///
+/// This was the one input entry point left un-routed: it hit-tested and
+/// dispatched in the page's world, so a tick over a frame found the `<iframe>`
+/// element, told the embedder's listeners about it and scrolled the embedder.
+/// `Input.dispatchMouseEvent { type: mouseWheel }` is how both drivers spell
+/// `mouse.wheel()`, so it is the whole of scrolling inside a frame.
+#[test]
+fn a_wheel_tick_scrolls_the_frame_under_it() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' style='width:200px;height:120px;border:0' srcdoc='\
+           <body style=\"margin:0\">\
+           <script>window.ticks = 0;\
+             window.addEventListener(\"wheel\", () => { window.ticks++; });</script>\
+           <div style=\"height:2000px\"></div></body>\
+         '></iframe>\
+         <div style='height:3000px'></div></body>",
+    );
+    let (x, y) = centre_of(&page, "#f");
+    page.dispatch_wheel(oxidepage_bindings::WheelInput {
+        x,
+        y,
+        delta_x: 0.0,
+        delta_y: 240.0,
+        modifiers: Modifiers::default(),
+    });
+    page.settle(Duration::from_millis(300));
+
+    let tree = page.frame_tree();
+    let ctx = tree[1].context_id.expect("the frame has a realm");
+    let read = |expr: &str| {
+        page.evaluate_in(Some(ctx), expr, &oxidepage_page::EvaluateOptions::default())
+            .expect("the context exists")
+            .expect_done()
+            .result
+            .value_json
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_owned()
+    };
+    assert_eq!(read("window.ticks"), "1", "the frame's listener saw it");
+    assert_eq!(read("window.scrollY"), "240", "and the frame scrolled");
+    // …and the embedder did not.
+    assert_eq!(s(&page, "window.scrollY"), "0");
+}

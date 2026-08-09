@@ -732,6 +732,10 @@ fn install_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
 /// boundary and on every entry into JS from the page's event loop, which
 /// together cover both script-driven and parser-driven mutations.
 pub fn sync_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
+    // The child browsing contexts first: their names outrank element ids in
+    // HTML's named-property order, and the id pass below needs to know which
+    // names a frame has taken.
+    sync_frame_properties(cx)?;
     let version = cx.state.dom.borrow().id_version();
     if cx.state.named_props_version.get() == Some(version) {
         return Ok(());
@@ -743,6 +747,13 @@ pub fn sync_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     // Named properties are per browsing context, so the ids are this realm's
     // document's — not every rendered document's (ADR-0035 D1).
     let document = cx.state.frame.document();
+    let taken: std::collections::HashSet<String> = cx
+        .state
+        .frame_props
+        .borrow()
+        .iter()
+        .map(|(_, name)| name.clone())
+        .collect();
     let wanted: std::collections::HashSet<String> = cx
         .state
         .dom
@@ -751,6 +762,9 @@ pub fn sync_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         // `<div id="">` carries an id atom but names nothing.
         .filter(|name| !name.is_empty())
         .map(|name| name.to_owned())
+        // A child browsing context of the same name wins (HTML orders the
+        // contexts before the ids), and its accessor already sits there.
+        .filter(|name| !taken.contains(name))
         .collect();
     let (added, removed) = {
         let live = cx.state.named_prop_keys.borrow();
@@ -769,6 +783,131 @@ pub fn sync_named_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     *cx.state.named_prop_keys.borrow_mut() = wanted;
     cx.state.named_props_version.set(Some(version));
     Ok(())
+}
+
+/// Brings the window's *frame* properties in step with its child contexts:
+/// `window[0]` / `window.frames[0]` by index, and `window.inner` /
+/// `window.frames['inner']` by the context's name.
+///
+/// Without these `window.length` was a count of things nothing could reach —
+/// the fake P6 forbids, and worse than absence, because
+/// `for (let i = 0; i < window.length; i++) window.frames[i].postMessage(…)`
+/// then throws on the first iteration instead of running zero times.
+///
+/// Indices are own properties of the global, as HTML's indexed window
+/// properties are; names go on the *named properties object*, so an own
+/// property of `Window` still shadows a frame that happens to share its name.
+///
+/// Cheap to call: the child list plus each name is the change signature, so a
+/// window whose frames did not move costs one `Vec` comparison.
+fn sync_frame_properties(cx: &BindCx<'_>) -> Result<(), JsThrow> {
+    let children = cx
+        .state
+        .frame
+        .global
+        .child_frames(cx.state.frame.frame())
+        .into_iter()
+        .map(|frame| {
+            let name = cx
+                .frame_state(frame)
+                .map(|state| state.name())
+                .unwrap_or_default();
+            (frame, name)
+        })
+        .collect::<Vec<_>>();
+    if *cx.state.frame_props.borrow() == children {
+        return Ok(());
+    }
+    // The frame set moved, so this is the cheap moment to drop the cached
+    // proxies of contexts that are gone.
+    cx.prune_frame_proxies();
+
+    let global = cx.scope.global();
+    let previous = std::mem::replace(&mut *cx.state.frame_props.borrow_mut(), children.clone());
+
+    // Indices that no longer name a context. The rest are redefined below, so
+    // a frame that merely moved position needs no deletion.
+    for index in children.len()..previous.len() {
+        cx.delete_property(&global, &index.to_string())?;
+    }
+    for (index, (frame, _)) in children.iter().enumerate() {
+        define_frame_property(cx, &global, &index.to_string(), *frame)?;
+    }
+
+    let Some(named_props) = cx.state.named_props.borrow().clone() else {
+        return Ok(());
+    };
+    let mut ids_are_stale = false;
+    for (_, name) in &previous {
+        if !name.is_empty() && !children.iter().any(|(_, live)| live == name) {
+            cx.delete_property(&named_props, name)?;
+            // The name may belong to an element id that the frame was
+            // outranking; force the id pass to rebuild rather than trust its
+            // version cache, which never saw the name leave.
+            ids_are_stale = true;
+        }
+    }
+    let mut defined: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (frame, name) in &children {
+        // First in tree order wins, as HTML's family search does — so two
+        // siblings sharing a name resolve to the same one every run.
+        if name.is_empty() || !defined.insert(name.as_str()) {
+            continue;
+        }
+        define_frame_property(cx, &named_props, name, *frame)?;
+        // Likewise: an element id of this name is now shadowed and must be
+        // dropped from `named_prop_keys`, or removing the frame later would
+        // leave the id un-restorable.
+        ids_are_stale |= cx.state.named_prop_keys.borrow_mut().remove(name);
+    }
+    if ids_are_stale {
+        cx.state.named_props_version.set(None);
+    }
+    Ok(())
+}
+
+/// Defines one lazy accessor answering with `frame`'s `WindowProxy`.
+///
+/// A getter rather than a stored value: a `WindowProxy` is a slab object, and
+/// minting one per child on every sync would churn the slab for a window nobody
+/// indexes. Non-enumerable, like the named-property accessors.
+fn define_frame_property(
+    cx: &BindCx<'_>,
+    target: &JsObject,
+    key: &str,
+    frame: oxidepage_base::FrameId,
+) -> Result<(), JsThrow> {
+    let getter = cx
+        .scope
+        .new_function(
+            &format!("get {key}"),
+            0,
+            Rc::new(move |scope: &dyn JsScope, _call| {
+                let cx = BindCx {
+                    scope,
+                    state: cx::world_state(scope)?,
+                };
+                // Discarded between the sync and the read: `undefined`, which
+                // is what an index past the end answers with anyway.
+                match cx.frame_state(frame) {
+                    Some(_) => cx.new_frame_proxy(frame),
+                    None => Ok(JsValue::Undefined),
+                }
+            }),
+        )
+        .map_err(JsThrow::from)?;
+    cx.scope
+        .define_property(
+            target,
+            key,
+            PropertyDef::Accessor {
+                getter: Some(&JsValue::Object(getter)),
+                setter: None,
+                enumerable: false,
+                configurable: true,
+            },
+        )
+        .map_err(JsThrow::from)
 }
 
 /// Defines one named-access accessor for element id `name`.

@@ -68,9 +68,11 @@ fn a_network_event_names_the_frame_that_started_it() {
         ),
         (
             "/inner",
-            "<!doctype html><title>Inner</title><link rel=stylesheet href='/sheet.css'>",
+            "<!doctype html><title>Inner</title><link rel=stylesheet href='/sheet.css'>\
+             <script src='/inner.js'></script>",
         ),
         ("/sheet.css", "p { color: red }"),
+        ("/inner.js", "window.ran = true;"),
     ]);
     let harness = Harness::start();
     let (mut client, session, target) = harness.attached();
@@ -111,6 +113,14 @@ fn a_network_event_names_the_frame_that_started_it() {
         frame_of("/sheet.css"),
         inner,
         "and so is a stylesheet that document asked for"
+    );
+    // The parser-inserted `<script src>` too. It is fetched on a different path
+    // from every other subresource — synchronously, at the parser's suspension
+    // point — which is how it came to be the one request left untagged.
+    assert_eq!(
+        frame_of("/inner.js"),
+        inner,
+        "and so is a script that document asked for"
     );
 }
 

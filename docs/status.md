@@ -747,9 +747,19 @@ pre-existing gap in stylo's media-feature support. `page.fill` on a
 `ArrayBuffer`, typed arrays, cycles or transferables, and no `MessageChannel`.
 An object reached across a frame boundary carries the *accessing* realm's
 prototypes, and a child's globals (`contentWindow.myVar`) are unreachable —
-both deliberate (ADR-0035 D4). Indexed access (`window[0]`) is absent, though
-`window.name` and named targets are not: `_self`/`_parent`/`_top`/`<name>`
-resolve to a real context for links, `window.open` and `<form target>`.
+both deliberate (ADR-0035 D4). Indexed and named access to a child context
+(`window[0]`, `window.frames[0]`, `window.frames['inner']`) is present and
+tree-ordered, and a `WindowProxy` is one object per (realm, context) so
+`event.source === iframe.contentWindow` holds. `window.name` and named targets
+resolve too: `_self`/`_parent`/`_top`/`<name>` name a real context for links,
+`window.open` and `<form target>` — a name that matches nothing navigates in
+place rather than opening a page per click, `_blank` still opens one.
+An `about:blank` or `srcdoc` frame inherits its embedder's origin *and* base
+URL, which this engine spells as inheriting its URL — so such a frame reports
+the embedder's address as `location.href` where a browser says `about:blank`.
+Its initial document is a real empty HTML document, but the context is attached
+by the event loop rather than by `appendChild`, so `contentDocument` is null
+until the next turn.
 `sandbox` enforces **`allow-scripts` and `allow-same-origin` only** — the rest
 of HTML's tokens are not implemented and the attribute reflects as a string
 rather than a `DOMTokenList`, so nothing can appear to grant one of them. A

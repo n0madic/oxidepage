@@ -2651,7 +2651,12 @@ custom-elements/connected-callbacks.html	Inserting the shadow host of a custom e
 custom-elements/connected-callbacks.html	Inserting the shadow host of a custom element into the document of an iframe must enqueue and invoke connectedCallback	NOTRUN
 custom-elements/connected-callbacks.html	Inserting the shadow host of a custom element into the document of the template elements must enqueue and invoke connectedCallback	FAIL
 custom-elements/connected-callbacks.html	__harness__	TIMEOUT
-custom-elements/cross-realm-callback-report-exception.html	__harness__	TIMEOUT
+custom-elements/cross-realm-callback-report-exception.html	__harness__	OK
+custom-elements/cross-realm-callback-report-exception.html	adoptedCallback	FAIL
+custom-elements/cross-realm-callback-report-exception.html	attributeChangedCallback	FAIL
+custom-elements/cross-realm-callback-report-exception.html	connectedCallback	FAIL
+custom-elements/cross-realm-callback-report-exception.html	constructor	FAIL
+custom-elements/cross-realm-callback-report-exception.html	disconnectedCallback	FAIL
 custom-elements/custom-element-reaction-queue.html	Mutating a undefined custom element while upgrading a custom element must not enqueue or invoke reactions on the mutated element	FAIL
 custom-elements/custom-element-reaction-queue.html	Mutating another custom element inside adopted callback must invoke all pending callbacks on the mutated element	FAIL
 custom-elements/custom-element-reaction-queue.html	Upgrading a custom element must invoke attributeChangedCallback and connectedCallback before start upgrading another element	FAIL
@@ -2917,10 +2922,10 @@ dom/events/EventListener-handleEvent.html	__harness__	OK
 dom/events/EventListener-handleEvent.html	rethrows errors when getting `handleEvent`	FAIL
 dom/events/EventListener-handleEvent.html	throws if `handleEvent` is falsy and not callable	FAIL
 dom/events/EventListener-handleEvent.html	throws if `handleEvent` is thruthy and not callable	FAIL
-dom/events/EventListener-incumbent-global-1.sub.html	Check the incumbent global EventListeners  are called with	FAIL
-dom/events/EventListener-incumbent-global-1.sub.html	__harness__	OK
-dom/events/EventListener-incumbent-global-2.sub.html	Check the incumbent global EventListeners  are called with	FAIL
-dom/events/EventListener-incumbent-global-2.sub.html	__harness__	OK
+dom/events/EventListener-incumbent-global-1.sub.html	Check the incumbent global EventListeners  are called with	TIMEOUT
+dom/events/EventListener-incumbent-global-1.sub.html	__harness__	TIMEOUT
+dom/events/EventListener-incumbent-global-2.sub.html	Check the incumbent global EventListeners  are called with	TIMEOUT
+dom/events/EventListener-incumbent-global-2.sub.html	__harness__	TIMEOUT
 dom/events/EventListenerOptions-capture.html	Supports capture option	FAIL
 dom/events/EventListenerOptions-capture.html	__harness__	OK
 dom/events/EventTarget-add-listener-platform-object.html	__harness__	OK
@@ -5209,7 +5214,8 @@ dom/nodes/MutationObserver-childList.html	childList Range.extractContents: child
 dom/nodes/MutationObserver-childList.html	childList Range.insertNode: child insertion mutation	FAIL
 dom/nodes/MutationObserver-childList.html	childList Range.insertNode: children insertion mutation	FAIL
 dom/nodes/MutationObserver-childList.html	childList Range.surroundContents: children removal and addition mutation	FAIL
-dom/nodes/MutationObserver-cross-realm-callback-report-exception.html	__harness__	TIMEOUT
+dom/nodes/MutationObserver-cross-realm-callback-report-exception.html	MutationObserver reports the exception from its callback in the callback's global object	FAIL
+dom/nodes/MutationObserver-cross-realm-callback-report-exception.html	__harness__	OK
 dom/nodes/MutationObserver-disconnect.html	__harness__	OK
 dom/nodes/MutationObserver-document.html	__harness__	OK
 dom/nodes/MutationObserver-inner-outer.html	__harness__	OK

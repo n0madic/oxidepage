@@ -26,6 +26,41 @@ fn rendered_roots_count(page: &oxidepage_page::Page) -> usize {
     page.dom().rendered_roots().count()
 }
 
+/// The execution context of the page's first nested browsing context.
+fn child_context(page: &oxidepage_page::Page) -> u64 {
+    let tree = page.frame_tree();
+    assert!(
+        tree.len() >= 2,
+        "expected a child frame, got {}",
+        tree.len()
+    );
+    tree[1].context_id.expect("the child frame has a realm")
+}
+
+/// Evaluates in one of the page's contexts, which is the only way to read a
+/// frame's own globals — no `JsValue` crosses a frame boundary.
+fn eval_in(page: &oxidepage_page::Page, context_id: u64, source: &str) -> String {
+    let result = page
+        .evaluate_in(
+            Some(context_id),
+            source,
+            &oxidepage_page::EvaluateOptions::default(),
+        )
+        .expect("the context exists")
+        .expect_done();
+    assert!(
+        result.exception.is_none(),
+        "{source} threw: {:?}",
+        result.exception
+    );
+    result
+        .result
+        .value_json
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_owned()
+}
+
 #[test]
 fn the_top_level_context_is_its_own_parent_and_top() {
     let page = page("<!DOCTYPE html><body></body>");
@@ -651,4 +686,132 @@ fn navigating_a_frame_discards_its_own_frames() {
         2,
         "the grandchild went with the document that embedded it"
     );
+}
+
+/// A nested context is a **main** world, so it gets `customElements`.
+///
+/// `install_late_globals` gates the main-world-only globals on
+/// `WorldState::is_main()`, which compares the world's id against its frame's
+/// default one — so the default has to be recorded *before* the realm is
+/// installed. Installing first made every frame's own default world read as
+/// isolated and skipped the registry entirely.
+#[test]
+fn custom_elements_is_installed_in_a_frame() {
+    let page = page(
+        "<!DOCTYPE html><body><iframe id='f' srcdoc='<script>\
+           window.kind = typeof customElements;\
+           try { customElements.define(\"x-a\", class extends HTMLElement {}); \
+                 window.defined = !!customElements.get(\"x-a\"); } \
+           catch (e) { window.defined = e.name; }\
+         </script>'></iframe></body>",
+    );
+    let ctx = child_context(&page);
+    assert_eq!(eval_in(&page, ctx, "window.kind"), "object");
+    assert_eq!(eval_in(&page, ctx, "window.defined"), "true");
+
+    // And again after the frame navigates: the commit rebuilds the realm
+    // through the same path, so a regression there is invisible on attach.
+    page.eval_to_string("document.getElementById('f').srcdoc = '<p>next</p>'; 0")
+        .unwrap();
+    page.settle(Duration::from_millis(600));
+    let ctx = child_context(&page);
+    assert_eq!(eval_in(&page, ctx, "typeof customElements"), "object");
+}
+
+/// `window.length` counts contexts that can actually be reached: by index, and
+/// by the name each answers to.
+///
+/// A `length` without the index is worse than neither, because the universal
+/// `for (i = 0; i < window.length; i++) window.frames[i]` idiom then throws on
+/// the first iteration instead of running zero times (P6).
+#[test]
+fn a_window_indexes_and_names_its_child_contexts() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe name='alpha'></iframe><iframe name='beta'></iframe></body>",
+    );
+    assert_eq!(s(&page, "window.length"), "2");
+    assert_eq!(s(&page, "typeof window[0]"), "object");
+    assert_eq!(s(&page, "window.frames[0] === window[0]"), "true");
+    assert_eq!(s(&page, "window[1] === window[0]"), "false");
+    assert_eq!(s(&page, "window[2]"), "undefined");
+    // By name, from `window` and from `frames` alike.
+    assert_eq!(s(&page, "window.alpha === window[0]"), "true");
+    assert_eq!(s(&page, "window.frames['beta'] === window[1]"), "true");
+    // The index reaches the real context, not a look-alike.
+    assert_eq!(
+        s(
+            &page,
+            "window[0] === document.getElementsByTagName('iframe')[0].contentWindow"
+        ),
+        "true"
+    );
+
+    // Removing a frame retires its index rather than leaving a stale one.
+    page.eval_to_string("document.getElementsByTagName('iframe')[0].remove(); 0")
+        .unwrap();
+    page.settle(Duration::from_millis(300));
+    assert_eq!(s(&page, "window.length"), "1");
+    assert_eq!(s(&page, "window[1]"), "undefined");
+    assert_eq!(s(&page, "typeof window.beta"), "object");
+    assert_eq!(s(&page, "window.alpha"), "undefined");
+}
+
+/// An own property of `Window` still shadows a context that shares its name —
+/// the frame accessors go on the *named properties object*, below the window in
+/// the prototype chain, exactly as HTML puts them.
+#[test]
+fn a_frame_name_does_not_clobber_a_window_member() {
+    let page = page("<!DOCTYPE html><body><iframe name='length'></iframe></body>");
+    assert_eq!(s(&page, "window.length"), "1");
+    assert_eq!(s(&page, "typeof window[0]"), "object");
+}
+
+/// `postMessage(message)` — the one-argument form — is legal: HTML's
+/// `postMessage(message, options)` overload defaults `targetOrigin` to `"/"`.
+#[test]
+fn post_message_defaults_its_target_origin() {
+    let page = page(
+        "<!DOCTYPE html><body><iframe id='f' srcdoc='<script>\
+           window.got = null;\
+           window.addEventListener(\"message\", (e) => { window.got = String(e.data); });\
+         </script>'></iframe></body>",
+    );
+    assert_eq!(
+        s(
+            &page,
+            "(() => { try { document.getElementById('f').contentWindow\
+                 .postMessage('hi'); return 'ok'; } catch (e) { return String(e); } })()"
+        ),
+        "ok"
+    );
+    page.settle(Duration::from_millis(300));
+    // `/` means the sender's own origin, and a `srcdoc` frame inherits it — so
+    // the message arrives rather than being dropped.
+    let ctx = child_context(&page);
+    assert_eq!(eval_in(&page, ctx, "window.got"), "hi");
+}
+
+/// A name is searched in HTML's order — self, then descendants, then the rest —
+/// which is what makes the answer the same on every run. Walking the id map
+/// instead made two contexts sharing a name resolve arbitrarily, because Rust
+/// randomizes `HashMap` iteration per process.
+#[test]
+fn a_duplicate_context_name_resolves_in_tree_order() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe name='dup' id='first' srcdoc='<p>a'></iframe>\
+         <iframe name='dup' id='second' srcdoc='<p>b'></iframe></body>",
+    );
+    // The first in tree order wins, and does so every run.
+    for _ in 0..5 {
+        assert_eq!(
+            s(
+                &page,
+                "(() => { const w = window.open('', 'dup'); \
+                   return w === document.getElementById('first').contentWindow; })()"
+            ),
+            "true"
+        );
+    }
 }

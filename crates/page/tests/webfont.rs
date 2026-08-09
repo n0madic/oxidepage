@@ -502,3 +502,61 @@ fn document_fonts_status_and_ready_track_an_in_flight_http_font_load() {
         "a ready read after settling must resolve, not hang pending forever"
     );
 }
+
+/// An `@font-face` declared inside an `<iframe>` registers into **that frame's**
+/// font collection.
+///
+/// Each browsing context owns its own `FontSystem` — only the image store is
+/// shared — so registering the decoded face into the page's meant the font
+/// downloaded, bumped the *embedder's* collection, and left the text it was
+/// declared for on its fallback family for ever.
+#[test]
+fn a_font_face_inside_a_frame_registers_in_that_frame() {
+    // The frame is served as the page's `srcdoc`, so the rule and the text it
+    // styles are both inside the nested context; the URL is absolute because a
+    // `srcdoc` frame's own document has no address of its own to resolve from.
+    let port = spawn_server(String::new());
+    let html = format!(
+        "<!DOCTYPE html><body style='margin:0'>\
+           <iframe id='f' style='width:600px;height:200px;border:0' srcdoc='\
+             <body style=\"margin:0\">\
+             <style>@font-face {{ font-family: \"Web\"; \
+               src: url(http://127.0.0.1:{port}/real.woff2) format(\"woff2\"); }}</style>\
+             <span id=t style=\"font:100px Web; display:inline-block\">AAA</span>\
+             </body>'></iframe>\
+           <span id='outer' style='font:100px Web; display:inline-block'>AAA</span>\
+         </body>"
+    );
+    let page = Page::new(PageOptions {
+        policy: Some(ResourcePolicy::permissive_localhost()),
+        ..PageOptions::default()
+    })
+    .unwrap();
+    page.load_html(&html).unwrap();
+    page.settle(Duration::from_secs(5));
+
+    let inner: f64 = page
+        .eval_to_string(
+            "document.getElementById('f').contentDocument\
+             .querySelector('#t').offsetWidth",
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (inner - 180.0).abs() < 1.0,
+        "the frame's own text must shape against the face its sheet declared: \
+         got {inner}, expected 180"
+    );
+    // And the embedder, which declared no such rule, is untouched: its `Web` is
+    // an unknown family and falls back.
+    let outer: f64 = page
+        .eval_to_string("document.querySelector('#outer').offsetWidth")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (outer - 180.0).abs() > 1.0,
+        "a frame's @font-face leaked into its embedder's collection: got {outer}"
+    );
+}
