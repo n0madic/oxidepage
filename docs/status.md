@@ -692,8 +692,17 @@ Conformance work landing outside the phase plan:
   suffices; and the frame's painted content is spliced into its embedder's
   display list, so screenshots and PDFs contain it. One arena rather than one
   per frame, because `enter_active_tree` refuses to nest a different tree and
-  separate arenas would re-issue the same `NodeId` generations. Decisions and
-  v1 limits: ADR-0035.
+  separate arenas would re-issue the same `NodeId` generations.
+  `window.parent`/`top`/`length`/`frameElement`, `iframe.contentWindow` and
+  `postMessage` cross the boundary without a single `JsValue` doing so — the
+  proxy is an object of the *accessing* realm, and a message is serialized in
+  the sender's and deserialized in the receiver's, which is what lets each
+  (frame, world) keep its own `Runtime`. Over the protocol,
+  `Page.getFrameTree` reports the real tree, `Page.frameAttached`/`frameDetached`
+  and per-frame `Runtime.executionContextCreated` are emitted, and
+  `DOM.Node.frameId` names the context an `<iframe>` owns — so **`page.frames()`
+  and `frame.evaluate()` work in both drivers**: `cargo xtask puppeteer` is
+  50/50 and `cargo xtask playwright` 22/23. Decisions and v1 limits: ADR-0035.
 
 ## Deliberate limits at the Puppeteer milestone
 
@@ -728,10 +737,18 @@ pre-existing gap in stylo's media-feature support. `page.fill` on a
 `contenteditable` fails and drag-and-drop is unavailable: there is no `Range`
 /`Selection` over arbitrary DOM and no `DataTransfer`.
 
-**Nested browsing contexts.** Cross-frame scripting is not there yet:
-`window.parent`, `top`, `frames`, `length`, `frameElement` and `postMessage` are
-**not installed**, so a frame cannot talk to its embedder or the reverse. Events
-do not cross a document boundary (as the spec says) and neither does input:
+**Nested browsing contexts.** `Page.createIsolatedWorld` ignores `frameId`, so
+a driver's utility world is always the main frame's — which is why
+Playwright's `frameLocator()` times out and is a recorded expected failure,
+while `page.frames()` and `frame.evaluate()`, which need no utility world, pass.
+`postMessage` carries a JSON subset and **refuses** anything outside it with
+`DataCloneError`: no `Map`, `Set`, `Date`, `ArrayBuffer`, typed arrays, cycles
+or transferables, and no `MessageChannel`. An object reached across a frame
+boundary carries the *accessing* realm's prototypes, and a child's globals
+(`contentWindow.myVar`) are unreachable — both deliberate (ADR-0035 D4).
+`window.name` and named frame targets are absent, as is indexed access
+(`window[0]`). Events do not cross a document boundary (as the spec says) and
+neither does input:
 clicking through an `<iframe>` reaches the element, not the content inside it,
 and `:hover` stops at the frame. `sandbox`, `allow` (Permissions Policy) and
 `loading="lazy"` are not implemented on `<iframe>`. Frame history is not
@@ -778,12 +795,12 @@ directory is refused and recorded rather than parsed as HTML.
 **Protocol surface.** No user-agent override, no DOM mutation events over the protocol, no
 touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing
 domain (`Debugger`, `Profiler`, `HeapProfiler`, `CSS`, `Overlay`,
-`Accessibility`). **The protocol does not yet know about nested browsing
-contexts**: the engine has them, but every frame API still answers for the main
-frame, `Page.getFrameTree` reports no `childFrames`, and
-`Page.frameAttached`/`frameDetached` are not implemented — so `page.frames()`
-and `frameLocator()` see one frame. `DOM.getFrameOwner` is refused and a node
-carries no `frameId`. `Emulation.setTimezoneOverride` and
+`Accessibility`). The protocol reports nested browsing contexts —
+`Page.getFrameTree` with real `childFrames`, `Page.frameAttached`/`frameDetached`,
+per-frame `Runtime.executionContextCreated`, `DOM.Node.frameId` — but
+`DOM.getFrameOwner` is still refused, `Page.createIsolatedWorld` ignores
+`frameId`, and `Network.*` events carry the main frame's id whatever frame
+started the request. `Emulation.setTimezoneOverride` and
 `setGeolocationOverride` are refused because there is no `Intl` and no
 Geolocation API to override; `setLocaleOverride` **is** implemented, and moves
 `navigator.languages` and `Accept-Language` together or not at all.

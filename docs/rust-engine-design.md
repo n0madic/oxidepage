@@ -897,9 +897,11 @@ this list alone as it ages:
   what the original plan punted on. An `<iframe>` now owns a real nested browsing context:
   its own document in the shared arena, its own style and layout engines, its own realm.
   `src`/`srcdoc` load, scripts inside a frame run in that frame's realm, the element is a
-  replaced box, and the frame's content is spliced into screenshots and PDFs. Still out:
-  `window.parent`/`top`/`frames`, `postMessage`, event and input routing across the
-  boundary, per-frame CDP ids, and `sandbox`.
+  replaced box, the frame's content is spliced into screenshots and PDFs, the window
+  family and `postMessage` cross the boundary, and the protocol reports the real frame
+  tree — so `page.frames()` and `frame.evaluate()` work in both drivers. Still out:
+  event and input routing across the boundary, a per-frame utility world
+  (`Page.createIsolatedWorld { frameId }`), frame history, named targets, and `sandbox`.
 - **Workers, service workers, WASM** (under QuickJS): absent. WASM arrives with the V8
   configuration if ever needed.
 - ~~Shadow DOM: absent in v1~~ — **landed** (ADR-0010); struck through rather than
