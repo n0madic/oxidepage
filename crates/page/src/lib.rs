@@ -1882,6 +1882,7 @@ impl Page {
         );
         let state =
             oxidepage_bindings::install_world(&realm, &shared, oxidepage_bindings::MAIN_WORLD, "")?;
+        shared.global.register_frame(main_document, &shared);
         let frames = Rc::new(frame::FrameTree::new(Rc::clone(&shared)));
         let world_table = Rc::new(worlds::WorldTable::new());
         world_table.push(
@@ -4628,6 +4629,8 @@ impl Page {
             document
         };
         frame.shared().set_document(document);
+        self.shared.global.unregister_frame(previous);
+        self.shared.global.register_frame(document, frame.shared());
         // Layout first: `font_metrics_factory` captures the font collection of
         // the engine it is called on, so a style engine built from the outgoing
         // one would resolve `ex`/`ch`/`ic` against the previous document's
@@ -4842,6 +4845,9 @@ impl Page {
             .dom
             .borrow_mut()
             .set_content_document(owner, Some(document));
+        // So a member reaching a node of this frame from *another* realm finds
+        // the right engines (ADR-0035 D1).
+        self.shared.global.register_frame(document, frame.shared());
         if let Err(error) = self.install_frame_main_world(&frame) {
             // Roll the half-built context back rather than leave a frame whose
             // document is rendered but which can never run a script.
@@ -4920,6 +4926,7 @@ impl Page {
             if let Some(owner) = frame.owner() {
                 dom.set_content_document(owner, None);
             }
+            self.shared.global.unregister_frame(document);
             dom.remove_rendered_root(document);
             // Never an unconditional free: the embedding document may hold a
             // wrapper for this document, and a pinned node pins its node
@@ -6845,11 +6852,46 @@ impl Page {
     fn flush_layout(&self) {
         self.drain_style_updates();
         for frame in self.frames.pre_order() {
+            self.size_frame_to_its_owner(&frame);
             let shared = frame.shared();
             let mut dom = shared.dom.borrow_mut();
             let mut style = shared.style.borrow_mut();
             shared.layout.borrow_mut().reflow(&mut dom, &mut style);
         }
+    }
+
+    /// Points a nested context's viewport at the content box of the `<iframe>`
+    /// that embeds it.
+    ///
+    /// Safe to read here because the parent was reflowed earlier in the same
+    /// pre-order walk, and an `<iframe>` is sized as a replaced element — by
+    /// CSS and its attributes, never by what it contains — so the box is final
+    /// and the child cannot feed back (ADR-0035 D6).
+    fn size_frame_to_its_owner(&self, frame: &Rc<frame::Frame>) {
+        let Some(owner) = frame.owner() else {
+            return; // the top-level frame's viewport is the page's
+        };
+        let Some(parent) = self.frames.of_node(&self.state.dom.borrow(), owner) else {
+            return;
+        };
+        let Some(content) = parent.shared().layout.borrow().content_box(owner) else {
+            return;
+        };
+        let viewport = Viewport {
+            width: content.size.width,
+            height: content.size.height,
+            dpr: self.viewport.get().dpr,
+        };
+        let shared = frame.shared();
+        if shared.layout.borrow().viewport() == viewport {
+            return;
+        }
+        // Both engines or neither: the layout engine lays out to the viewport
+        // and the stylist's `Device` evaluates media queries against it, so a
+        // frame that moved only one answers `@media (max-width: …)` for the
+        // size it used to be.
+        shared.layout.borrow_mut().set_viewport(viewport);
+        shared.style.borrow_mut().set_viewport(viewport);
     }
 
     /// The current layout viewport, including its device pixel ratio.

@@ -350,7 +350,9 @@ impl LayoutTree {
 
         match kind {
             BoxKind::Replaced => match replaced.expect("Replaced box without replaced content") {
-                ReplacedContent::Image(context) => {
+                // An `<iframe>` sizes by exactly the replaced-element rules an
+                // `<img>` does; only the intrinsic size's origin differs.
+                ReplacedContent::Image(context) | ReplacedContent::Document(context) => {
                     // A block-level replaced element with `width: auto` uses its
                     // intrinsic width (CSS 2.2 §10.3.4), not the container width
                     // taffy's block algorithm stretches a block child to. Drop

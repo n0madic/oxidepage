@@ -899,12 +899,16 @@ fn window_device_pixel_ratio(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValu
 }
 
 fn window_scroll_x(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
-    let x = imp::geometry_support::flush_layout(cx, |_, layout| layout.viewport_scroll().x);
+    let x = imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |_, layout| {
+        layout.viewport_scroll().x
+    });
     Ok(JsValue::Number(f64::from(x)))
 }
 
 fn window_scroll_y(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
-    let y = imp::geometry_support::flush_layout(cx, |_, layout| layout.viewport_scroll().y);
+    let y = imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |_, layout| {
+        layout.viewport_scroll().y
+    });
     Ok(JsValue::Number(f64::from(y)))
 }
 
@@ -951,23 +955,32 @@ fn scroll_args(
 }
 
 fn window_scroll_to(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let current = imp::geometry_support::flush_layout(cx, |_, layout| layout.viewport_scroll());
+    let current =
+        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |_, layout| {
+            layout.viewport_scroll()
+        });
     let (x, y) = scroll_args(cx, call, (current.x, current.y))?;
     let changed =
-        imp::geometry_support::flush_layout_mut(cx, |_, layout| layout.set_viewport_scroll(x, y))
-            .changed;
+        imp::geometry_support::flush_layout_mut(cx, cx.state.frame.document(), |_, layout| {
+            layout.set_viewport_scroll(x, y)
+        })
+        .changed;
     imp::geometry_support::note_scroll(cx, None, changed);
     Ok(JsValue::Undefined)
 }
 
 fn window_scroll_by(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
-    let current = imp::geometry_support::flush_layout(cx, |_, layout| layout.viewport_scroll());
+    let current =
+        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |_, layout| {
+            layout.viewport_scroll()
+        });
     // For scrollBy, options members default to a **delta** of zero.
     let (dx, dy) = scroll_args(cx, call, (0.0, 0.0))?;
-    let changed = imp::geometry_support::flush_layout_mut(cx, |_, layout| {
-        layout.set_viewport_scroll(current.x + dx, current.y + dy)
-    })
-    .changed;
+    let changed =
+        imp::geometry_support::flush_layout_mut(cx, cx.state.frame.document(), |_, layout| {
+            layout.set_viewport_scroll(current.x + dx, current.y + dy)
+        })
+        .changed;
     imp::geometry_support::note_scroll(cx, None, changed);
     Ok(JsValue::Undefined)
 }
@@ -1016,13 +1029,15 @@ fn set_element_scroll_offset(
 /// scope, ADR-0006).
 fn element_scroll_to(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
-    let current = imp::geometry_support::flush_layout(cx, |dom, layout| {
-        element_scroll_offset(dom, layout, this)
-    });
+    let current =
+        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |dom, layout| {
+            element_scroll_offset(dom, layout, this)
+        });
     let (x, y) = scroll_args(cx, call, current)?;
-    let (target, changed) = imp::geometry_support::flush_layout_mut(cx, |dom, layout| {
-        set_element_scroll_offset(dom, layout, this, x, y)
-    });
+    let (target, changed) =
+        imp::geometry_support::flush_layout_mut(cx, cx.state.frame.document(), |dom, layout| {
+            set_element_scroll_offset(dom, layout, this, x, y)
+        });
     imp::geometry_support::note_scroll(cx, target, changed);
     Ok(JsValue::Undefined)
 }
@@ -1030,14 +1045,16 @@ fn element_scroll_to(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
 /// `Element.scrollBy()`: adds to the element's current scroll offsets.
 fn element_scroll_by(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
-    let current = imp::geometry_support::flush_layout(cx, |dom, layout| {
-        element_scroll_offset(dom, layout, this)
-    });
+    let current =
+        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |dom, layout| {
+            element_scroll_offset(dom, layout, this)
+        });
     // For scrollBy, options members default to a **delta** of zero.
     let (dx, dy) = scroll_args(cx, call, (0.0, 0.0))?;
-    let (target, changed) = imp::geometry_support::flush_layout_mut(cx, |dom, layout| {
-        set_element_scroll_offset(dom, layout, this, current.0 + dx, current.1 + dy)
-    });
+    let (target, changed) =
+        imp::geometry_support::flush_layout_mut(cx, cx.state.frame.document(), |dom, layout| {
+            set_element_scroll_offset(dom, layout, this, current.0 + dx, current.1 + dy)
+        });
     imp::geometry_support::note_scroll(cx, target, changed);
     Ok(JsValue::Undefined)
 }
@@ -2203,7 +2220,7 @@ pub fn deliver_observations(cx: &BindCx<'_>) -> bool {
     // (c) Geometry phase: reflow, then compute entry data with no JS.
     let mut work: Vec<(Rc<state::ResizeObserverData>, Vec<RoEntryData>)> = Vec::new();
     let mut io_work: Vec<(Rc<state::IntersectionObserverData>, Vec<IoEntryData>)> = Vec::new();
-    imp::geometry_support::flush_layout(cx, |dom, layout| {
+    imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |dom, layout| {
         let dpr = layout.viewport().dpr;
         for observer in &io_observers {
             let entries = io_compute_entries(&cx.state, observer, dom, layout, now);
@@ -2550,9 +2567,10 @@ pub(crate) fn io_take_records(
     observer: &state::IntersectionObserverData,
 ) -> Result<JsValue, JsThrow> {
     let now = cx.now_ms();
-    let entries = imp::geometry_support::flush_layout(cx, |dom, layout| {
-        io_compute_entries(&cx.state, observer, dom, layout, now)
-    });
+    let entries =
+        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |dom, layout| {
+            io_compute_entries(&cx.state, observer, dom, layout, now)
+        });
     let mut values = Vec::with_capacity(entries.len());
     for entry in &entries {
         values.push(build_io_entry(cx, entry)?);

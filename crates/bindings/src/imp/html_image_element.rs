@@ -65,7 +65,7 @@ pub(crate) fn current_src(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsThr
 /// This flushes styles and layout — the same cost `Element.clientWidth` pays —
 /// so a plain property read here can trigger a reflow.
 fn used_size(cx: &BindCx<'_>, this: NodeId) -> Option<(f32, f32)> {
-    flush_layout(cx, |_, layout| {
+    flush_layout(cx, this, |_, layout| {
         layout.client_box(this).map(|b| (b.width, b.height))
     })
 }

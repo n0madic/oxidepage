@@ -339,6 +339,20 @@ impl Builder<'_> {
                     data: decoded,
                 }))
             }
+            "iframe" => Some(ReplacedContent::Document(ReplacedContext {
+                // CSS 2.2 §10.3.2 / HTML rendering: an `<iframe>` with no
+                // specified size is 300×150. Never derived from the frame's
+                // content, so the child cannot resize its embedder.
+                inherent_size: taffy::Size {
+                    width: 300.0,
+                    height: 150.0,
+                },
+                attr_size: taffy::Size {
+                    width: parse_f32(local_name!("width")),
+                    height: parse_f32(local_name!("height")),
+                },
+                data: None,
+            })),
             "textarea" => Some(ReplacedContent::TextInput {
                 // Per HTML, rows/cols must be positive; invalid values fall
                 // back to the defaults (rows 2), never zero/negative sizes.

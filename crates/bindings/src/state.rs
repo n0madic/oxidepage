@@ -989,6 +989,17 @@ pub struct PageGlobal {
     /// edge would close the `Page -> WorldTable -> realm -> WorldState ->
     /// FrameShared -> PageGlobal` cycle and leak every runtime (D4).
     pub(crate) enter: RefCell<Weak<dyn WorldEnter>>,
+    /// Every browsing context of the page, by its rendered document.
+    ///
+    /// This is how a member reaches the *right* engine for a node that is not
+    /// in the caller's own frame — `iframe.contentDocument.body.offsetWidth`
+    /// must flush and measure in the frame's layout engine, not the caller's
+    /// (ADR-0035 D1). The page maintains it as contexts come and go.
+    ///
+    /// **`Weak`**, because a `FrameShared` holds this `PageGlobal`: a strong
+    /// edge here would close the cycle and leak every frame, and with it every
+    /// runtime.
+    frames: RefCell<HashMap<NodeId, Weak<FrameShared>>>,
 }
 
 impl PageGlobal {
@@ -1009,7 +1020,26 @@ impl PageGlobal {
             next_object_id: Cell::new(0),
             object_worlds: RefCell::new(HashMap::new()),
             enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
+            frames: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Records the browsing context rendering `document`.
+    pub fn register_frame(&self, document: NodeId, frame: &Rc<FrameShared>) {
+        self.frames
+            .borrow_mut()
+            .insert(document, Rc::downgrade(frame));
+    }
+
+    /// Forgets a browsing context, or a document it no longer renders.
+    pub fn unregister_frame(&self, document: NodeId) {
+        self.frames.borrow_mut().remove(&document);
+    }
+
+    /// The browsing context rendering `document`, if there is one.
+    #[must_use]
+    pub fn frame_of_document(&self, document: NodeId) -> Option<Rc<FrameShared>> {
+        self.frames.borrow().get(&document)?.upgrade()
     }
 
     /// Mints the next `Runtime.ExecutionContextId`.

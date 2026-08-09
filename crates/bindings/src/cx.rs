@@ -239,6 +239,22 @@ fn latin1_bytes(s: &str) -> Vec<u8> {
 }
 
 impl BindCx<'_> {
+    /// The browsing context `node` belongs to — **this** realm's frame unless
+    /// the node lives in another one.
+    ///
+    /// Reach for this rather than `self.state.frame` wherever a member touches
+    /// a node's *engines*: geometry, scrolling and computed style all have to
+    /// use the engine of the frame that renders the node, and
+    /// `iframe.contentDocument` hands the caller nodes of another frame
+    /// (ADR-0035 D1). Falls back to this realm's frame for a node in an inert
+    /// document, which has no engines of its own and never had.
+    pub(crate) fn frame_for(&self, node: NodeId) -> std::rc::Rc<crate::state::FrameShared> {
+        let document = self.state.dom.borrow().containing_document(node);
+        document
+            .and_then(|doc| self.state.frame.global.frame_of_document(doc))
+            .unwrap_or_else(|| std::rc::Rc::clone(&self.state.frame))
+    }
+
     // === JS-side helper access ===
 
     pub(crate) fn with_js<T>(&self, f: impl FnOnce(&JsRefs) -> T) -> Result<T, JsThrow> {

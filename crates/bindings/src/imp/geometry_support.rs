@@ -17,13 +17,22 @@ use crate::cx::BindCx;
 use crate::imp::css_style_declaration::flush_inline_styles;
 use crate::state::RectData;
 
-/// Flushes styles + layout, then runs `f` with read access to the DOM and
-/// the laid-out engine.
-pub(crate) fn flush_layout<R>(cx: &BindCx<'_>, f: impl FnOnce(&DomTree, &LayoutEngine) -> R) -> R {
+/// Flushes styles + layout **of `node`'s browsing context**, then runs `f`
+/// with read access to the DOM and that context's laid-out engine.
+///
+/// The node decides the engine, not the caller's realm: `contentDocument`
+/// hands a page's script real nodes of another frame, and measuring those in
+/// the caller's engine finds no box at all and answers 0 (ADR-0035 D1).
+pub(crate) fn flush_layout<R>(
+    cx: &BindCx<'_>,
+    node: NodeId,
+    f: impl FnOnce(&DomTree, &LayoutEngine) -> R,
+) -> R {
     flush_inline_styles(cx);
+    let frame = cx.frame_for(node);
     let mut dom = cx.state.dom.borrow_mut();
-    let mut style = cx.state.style.borrow_mut();
-    let mut layout = cx.state.layout.borrow_mut();
+    let mut style = frame.style.borrow_mut();
+    let mut layout = frame.layout.borrow_mut();
     layout.reflow(&mut dom, &mut style);
     f(&dom, &layout)
 }
@@ -32,12 +41,14 @@ pub(crate) fn flush_layout<R>(cx: &BindCx<'_>, f: impl FnOnce(&DomTree, &LayoutE
 /// offset writes).
 pub(crate) fn flush_layout_mut<R>(
     cx: &BindCx<'_>,
+    node: NodeId,
     f: impl FnOnce(&DomTree, &mut LayoutEngine) -> R,
 ) -> R {
     flush_inline_styles(cx);
+    let frame = cx.frame_for(node);
     let mut dom = cx.state.dom.borrow_mut();
-    let mut style = cx.state.style.borrow_mut();
-    let mut layout = cx.state.layout.borrow_mut();
+    let mut style = frame.style.borrow_mut();
+    let mut layout = frame.layout.borrow_mut();
     layout.reflow(&mut dom, &mut style);
     f(&dom, &mut layout)
 }
@@ -68,5 +79,9 @@ pub(crate) fn note_scroll(cx: &BindCx<'_>, target: Option<NodeId>, changed: bool
 /// True if `node` is the document element (whose scroll APIs address the
 /// viewport per CSSOM-View).
 pub(crate) fn is_document_element(dom: &DomTree, node: NodeId) -> bool {
-    dom.document_element() == Some(node)
+    // Its *own* document's root: a frame's `<html>` addresses the frame's
+    // viewport, exactly as the page's addresses the page's.
+    dom.containing_document(node)
+        .and_then(|doc| dom.document_element_of(doc))
+        == Some(node)
 }

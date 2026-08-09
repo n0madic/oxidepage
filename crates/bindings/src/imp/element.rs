@@ -677,7 +677,7 @@ use crate::imp::geometry_support::{
 use oxidepage_layout::Align;
 
 pub(crate) fn get_client_rects(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue, JsThrow> {
-    let rects = flush_layout(cx, |dom, layout| layout.client_rects(dom, this));
+    let rects = flush_layout(cx, this, |dom, layout| layout.client_rects(dom, this));
     let rects = rects
         .into_iter()
         .map(|r| std::rc::Rc::new(std::cell::RefCell::new(rect_data(r))))
@@ -686,7 +686,9 @@ pub(crate) fn get_client_rects(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue,
 }
 
 pub(crate) fn get_bounding_client_rect(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue, JsThrow> {
-    let rect = flush_layout(cx, |dom, layout| layout.bounding_client_rect(dom, this));
+    let rect = flush_layout(cx, this, |dom, layout| {
+        layout.bounding_client_rect(dom, this)
+    });
     // No boxes → a zero DOMRect, per CSSOM-View.
     let data = rect.map(rect_data).unwrap_or(crate::state::RectData {
         x: 0.0,
@@ -698,7 +700,7 @@ pub(crate) fn get_bounding_client_rect(cx: &BindCx<'_>, this: NodeId) -> Result<
 }
 
 pub(crate) fn scroll_top(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, |dom, layout| {
+    Ok(flush_layout(cx, this, |dom, layout| {
         if is_document_element(dom, this) {
             f64::from(layout.viewport_scroll().y)
         } else {
@@ -709,7 +711,7 @@ pub(crate) fn scroll_top(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> 
 
 pub(crate) fn set_scroll_top(cx: &BindCx<'_>, this: NodeId, value: f64) -> Result<(), JsThrow> {
     let value = if value.is_finite() { value as f32 } else { 0.0 };
-    let (target, changed) = flush_layout_mut(cx, |dom, layout| {
+    let (target, changed) = flush_layout_mut(cx, this, |dom, layout| {
         if is_document_element(dom, this) {
             let x = layout.viewport_scroll().x;
             (None, layout.set_viewport_scroll(x, value).changed)
@@ -723,7 +725,7 @@ pub(crate) fn set_scroll_top(cx: &BindCx<'_>, this: NodeId, value: f64) -> Resul
 }
 
 pub(crate) fn scroll_left(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, |dom, layout| {
+    Ok(flush_layout(cx, this, |dom, layout| {
         if is_document_element(dom, this) {
             f64::from(layout.viewport_scroll().x)
         } else {
@@ -734,7 +736,7 @@ pub(crate) fn scroll_left(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow>
 
 pub(crate) fn set_scroll_left(cx: &BindCx<'_>, this: NodeId, value: f64) -> Result<(), JsThrow> {
     let value = if value.is_finite() { value as f32 } else { 0.0 };
-    let (target, changed) = flush_layout_mut(cx, |dom, layout| {
+    let (target, changed) = flush_layout_mut(cx, this, |dom, layout| {
         if is_document_element(dom, this) {
             let y = layout.viewport_scroll().y;
             (None, layout.set_viewport_scroll(value, y).changed)
@@ -748,7 +750,7 @@ pub(crate) fn set_scroll_left(cx: &BindCx<'_>, this: NodeId, value: f64) -> Resu
 }
 
 pub(crate) fn scroll_width(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, |_, layout| {
+    Ok(flush_layout(cx, this, |_, layout| {
         layout
             .scroll_size(this)
             .map(|(w, _)| f64::from(w).round())
@@ -757,7 +759,7 @@ pub(crate) fn scroll_width(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow
 }
 
 pub(crate) fn scroll_height(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, |_, layout| {
+    Ok(flush_layout(cx, this, |_, layout| {
         layout
             .scroll_size(this)
             .map(|(_, h)| f64::from(h).round())
@@ -770,7 +772,7 @@ fn client_box_field(
     this: NodeId,
     f: impl Fn(oxidepage_layout::ClientBox) -> f32,
 ) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, |_, layout| {
+    Ok(flush_layout(cx, this, |_, layout| {
         layout
             .client_box(this)
             .map(|b| f64::from(f(b)).round())
@@ -823,7 +825,7 @@ pub(crate) fn check_visibility(
     let check_visibility_css = dict_bool("checkVisibilityCSS")? || dict_bool("visibilityProperty")?;
     let check_opacity = dict_bool("checkOpacity")? || dict_bool("opacityProperty")?;
 
-    Ok(flush_layout(cx, |dom, layout| {
+    Ok(flush_layout(cx, this, |dom, layout| {
         if layout.tree().box_for_node(this).is_none() {
             return false;
         }
@@ -870,7 +872,7 @@ pub(crate) fn scroll_parent(cx: &BindCx<'_>, this: NodeId) -> Result<Option<Node
     if scrolling_element == Some(this) {
         return Ok(None);
     }
-    let result = flush_layout(cx, |dom, layout| layout.scroll_parent(dom, this));
+    let result = flush_layout(cx, this, |dom, layout| layout.scroll_parent(dom, this));
     match result {
         oxidepage_layout::ScrollParent::None => Ok(None),
         oxidepage_layout::ScrollParent::Element(node) => Ok(Some(node)),
@@ -899,7 +901,7 @@ pub(crate) fn set_part(cx: &BindCx<'_>, this: NodeId, value: JsValue) -> Result<
 /// borrowed.
 pub(crate) fn scroll_into_view(cx: &BindCx<'_>, this: NodeId, arg: JsValue) -> Result<(), JsThrow> {
     let (block, inline) = scroll_alignment(cx, &arg);
-    let scrolled = flush_layout_mut(cx, |dom, layout| {
+    let scrolled = flush_layout_mut(cx, this, |dom, layout| {
         oxidepage_layout::scroll_into_view(layout, dom, this, None, block, inline)
     });
     for target in scrolled {

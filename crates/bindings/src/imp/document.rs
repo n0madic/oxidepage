@@ -624,6 +624,7 @@ pub(crate) fn element_from_point(
     }
     Ok(crate::imp::geometry_support::flush_layout(
         cx,
+        this,
         |dom, layout| layout.element_from_point(dom, x as f32, y as f32),
     ))
 }
@@ -641,7 +642,7 @@ pub(crate) fn elements_from_point(
             .map(JsValue::Object)
             .map_err(JsThrow::from);
     }
-    let hits = crate::imp::geometry_support::flush_layout(cx, |dom, layout| {
+    let hits = crate::imp::geometry_support::flush_layout(cx, this, |dom, layout| {
         layout.elements_from_point(dom, x as f32, y as f32)
     });
     let wrapped = hits
@@ -673,21 +674,22 @@ pub(crate) fn scrolling_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<
     let Some(body) = html_child_of_root(cx, this, &["body", "frameset"]) else {
         return Ok(None);
     };
-    let potentially_scrollable = crate::imp::geometry_support::flush_layout(cx, |dom, layout| {
-        let root_visible = dom
-            .document_element()
-            .and_then(|root| layout.overflow_is_visible(root))
-            .unwrap_or(true);
-        if root_visible {
-            // Propagation: the root's overflow governs the viewport, and the
-            // body's own box behaves as `overflow: visible`.
-            false
-        } else {
-            layout
-                .overflow_is_visible(body)
-                .is_some_and(|visible| !visible)
-        }
-    });
+    let potentially_scrollable =
+        crate::imp::geometry_support::flush_layout(cx, this, |dom, layout| {
+            let root_visible = dom
+                .document_element()
+                .and_then(|root| layout.overflow_is_visible(root))
+                .unwrap_or(true);
+            if root_visible {
+                // Propagation: the root's overflow governs the viewport, and the
+                // body's own box behaves as `overflow: visible`.
+                false
+            } else {
+                layout
+                    .overflow_is_visible(body)
+                    .is_some_and(|visible| !visible)
+            }
+        });
     Ok((!potentially_scrollable).then_some(body))
 }
 

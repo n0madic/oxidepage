@@ -311,3 +311,95 @@ fn load_fires_on_the_iframe_element() {
     page.settle(std::time::Duration::from_millis(500));
     assert_eq!(s(&page, "window.loaded"), "1");
 }
+
+/// An `<iframe>` is a replaced element: 300×150 by CSS default, and its size
+/// comes from CSS and its attributes, never from what it contains. That is
+/// what makes one reflow pass enough — the child cannot resize its embedder.
+#[test]
+fn an_iframe_is_a_replaced_box() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='default'></iframe>\
+         <iframe id='attrs' width='400' height='90'></iframe>\
+         <iframe id='styled' style='width:250px;height:60px'></iframe>\
+         </body>",
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('default').offsetWidth"),
+        "300"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('default').offsetHeight"),
+        "150"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('attrs').offsetWidth"),
+        "400"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('attrs').offsetHeight"),
+        "90"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('styled').offsetWidth"),
+        "250"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('styled').offsetHeight"),
+        "60"
+    );
+}
+
+/// Tall content inside a frame does not grow the frame's box.
+#[test]
+fn frame_content_does_not_resize_the_frame() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' srcdoc='<div style=\"height:5000px\"></div>'></iframe></body>",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+    assert_eq!(s(&page, "document.getElementById('f').offsetHeight"), "150");
+}
+
+/// The frame's own document lays out into the `<iframe>`'s content box, so a
+/// block inside it fills that width rather than the page's.
+#[test]
+fn a_frame_lays_out_in_its_own_viewport() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' width='200' height='100' \
+          srcdoc='<body style=\"margin:0\"><div id=inner style=\"height:10px\"></div></body>'>\
+         </iframe></body>",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+
+    // Measured from the *parent's* realm through `contentDocument`: geometry
+    // routes to the engine of the frame that renders the node, so this is the
+    // frame's layout, not the page's.
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument             .getElementById('inner').offsetWidth"
+        ),
+        "200"
+    );
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument             .getElementById('inner').offsetHeight"
+        ),
+        "10"
+    );
+}
+
+/// The `<iframe>`'s DOM children never render: HTML parses its contents as raw
+/// text (fallback for UAs without frames), and the box is a leaf.
+#[test]
+fn iframe_children_do_not_render() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' style='width:100px;height:40px'>fallback text</iframe></body>",
+    );
+    // The box keeps its specified size: the fallback text contributes nothing.
+    assert_eq!(s(&page, "document.getElementById('f').offsetHeight"), "40");
+}

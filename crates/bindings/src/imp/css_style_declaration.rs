@@ -158,7 +158,7 @@ fn resolved_layout_value(cx: &BindCx<'_>, element: NodeId, name: &str) -> Option
         return None;
     }
 
-    let used = crate::imp::geometry_support::flush_layout(cx, |_, layout| {
+    let used = crate::imp::geometry_support::flush_layout(cx, element, |_, layout| {
         layout.used_box_values(element)
     })?;
 

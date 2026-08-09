@@ -135,6 +135,14 @@ pub struct ReplacedContext {
 pub enum ReplacedContent {
     /// `<img>`/`<canvas>`/`<svg>`: sized by the replaced-element algorithm.
     Image(ReplacedContext),
+    /// `<iframe>`: a nested browsing context, sized by the same replaced-element
+    /// algorithm over CSS's 300×150 default (ADR-0035 D6).
+    ///
+    /// Its size never depends on what the frame contains — that is what makes
+    /// one reflow pass enough, with no feedback from child to parent — so the
+    /// context always carries the default as its inherent size and never any
+    /// decoded data.
+    Document(ReplacedContext),
     /// Single/multi-line text controls, sized by the simplified leaf rules
     /// (blitz-dom `layout/mod.rs`).
     TextInput {

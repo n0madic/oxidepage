@@ -59,7 +59,7 @@ pub(crate) fn constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 }
 
 pub(crate) fn offset_parent(cx: &BindCx<'_>, this: NodeId) -> Result<Option<NodeId>, JsThrow> {
-    Ok(flush_layout(cx, |dom, layout| {
+    Ok(flush_layout(cx, this, |dom, layout| {
         layout.offset_box(dom, this).and_then(|b| b.parent)
     }))
 }
@@ -69,7 +69,7 @@ fn offset_field(
     this: NodeId,
     f: impl Fn(oxidepage_layout::OffsetBox) -> f32,
 ) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, |dom, layout| {
+    Ok(flush_layout(cx, this, |dom, layout| {
         layout
             .offset_box(dom, this)
             .map(|b| f64::from(f(b)).round())
