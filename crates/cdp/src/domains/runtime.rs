@@ -74,7 +74,7 @@ pub fn execution_context_created(
     session: &Arc<SessionState>,
 ) -> crate::message::Event {
     let id = session.page.execution_context_id().unwrap_or(1);
-    execution_context_created_named(connection, session, "", true, id)
+    execution_context_created_named(connection, session, "", true, id, None)
 }
 
 /// Offset that gives a named "isolated" world an id of its own.
@@ -91,6 +91,9 @@ pub fn execution_context_created_named(
     name: &str,
     is_default: bool,
     id: u64,
+    // `frame_id`: the frame this context belongs to, or `None` for the main
+    // frame — whose CDP id *is* the target id.
+    frame_id: Option<&str>,
 ) -> crate::message::Event {
     let url = connection
         .registry
@@ -110,7 +113,7 @@ pub fn execution_context_created_named(
                 // context to a frame, and `isDefault` is how they tell the main
                 // world from an isolated one.
                 "auxData": {
-                    "frameId": session.target_id,
+                    "frameId": frame_id.unwrap_or(&session.target_id),
                     "isDefault": is_default,
                 },
             }

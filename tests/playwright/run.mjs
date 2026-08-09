@@ -288,11 +288,13 @@ try {
     );
   });
 
-  // Expected to fail until `Page.createIsolatedWorld` honours `frameId`:
-  // Playwright evaluates a locator in a **utility world of that frame**, and
-  // ours is still the main frame's, so the locator never gets a world to run
-  // in and the wait times out. `page.frames()` and `frame.evaluate()` above do
-  // not need one, which is why they pass.
+  // Expected to fail, **cause not yet identified**. `page.frames()` and
+  // `frame.evaluate()` above pass, so the frame, its realm and its execution
+  // context all reach the driver. Two candidates were implemented and ruled
+  // out: `Page.createIsolatedWorld` now honours `frameId` (so a locator does
+  // get a utility world of the right frame) and `DOM.getFrameOwner` answers.
+  // Whatever `frameLocator` is still waiting on is something else — recorded
+  // as an honest unknown rather than a wrong explanation.
   await check('frameLocator reaches into the frame', async () => {
     const target = requirePage();
     await target.goto(`${base}/frames.html`);

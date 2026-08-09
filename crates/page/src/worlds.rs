@@ -172,16 +172,23 @@ impl WorldTable {
     /// fresh global, and a rebuilt world's wrapper cache, slab, listeners and
     /// object store would otherwise all name the dead document. Returns the
     /// names to rebuild, in creation order.
-    pub(crate) fn take_isolated(&self) -> Vec<String> {
+    pub(crate) fn take_isolated(&self) -> Vec<(FrameId, String)> {
         let mut names = Vec::new();
         let drained: Vec<Rc<World>> = {
             let mut slots = self.slots.borrow_mut();
-            let (keep, go): (Vec<_>, Vec<_>) = slots.drain(..).partition(|w| w.id == MAIN_WORLD_ID);
+            // Every frame's *default* world is kept, not just `MAIN_WORLD`:
+            // that constant is only the top-level frame's (ADR-0035 D3), and
+            // dropping a nested frame's default world here would leave it with
+            // no `window` at all.
+            let (keep, go): (Vec<_>, Vec<_>) =
+                slots.drain(..).partition(|w| w.name.borrow().is_empty());
             *slots = keep;
             go
         };
         for world in &drained {
-            names.push(world.name.borrow().clone());
+            // The frame it belonged to, so the rebuild puts it back there
+            // rather than on the main frame.
+            names.push((world.frame, world.name.borrow().clone()));
         }
         for world in drained.iter().rev() {
             Self::destroy(world);
@@ -257,10 +264,6 @@ impl WorldTable {
         drop(drained);
     }
 }
-
-/// The main world's id, mirrored from `bindings` so this module does not depend
-/// on the constant's path in a hot loop.
-const MAIN_WORLD_ID: WorldId = oxidepage_bindings::MAIN_WORLD;
 
 impl Drop for WorldTable {
     fn drop(&mut self) {

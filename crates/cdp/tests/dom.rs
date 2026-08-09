@@ -26,8 +26,8 @@ fn started() -> (Harness, Fixtures) {
 }
 
 /// A page loaded, with `DOM` enabled and the initial `frameNavigated` drained.
-fn loaded(harness: &Harness, fixtures: &Fixtures) -> (Client, String) {
-    let (mut client, session, _) = harness.attached();
+fn loaded(harness: &Harness, fixtures: &Fixtures) -> (Client, String, String) {
+    let (mut client, session, target) = harness.attached();
     client.call_on(&session, "DOM.enable", json!({}));
     client.call_on(
         &session,
@@ -35,7 +35,7 @@ fn loaded(harness: &Harness, fixtures: &Fixtures) -> (Client, String) {
         json!({ "url": fixtures.url("/") }),
     );
     client.await_event("Page.frameNavigated");
-    (client, session)
+    (client, session, target)
 }
 
 fn document_id(client: &mut Client, session: &str) -> i64 {
@@ -61,7 +61,7 @@ fn heading_id(client: &mut Client, session: &str) -> i64 {
 #[test]
 fn describe_node_and_resolve_node_round_trip_an_element() {
     let (harness, fixtures) = started();
-    let (mut client, session) = loaded(&harness, &fixtures);
+    let (mut client, session, _target) = loaded(&harness, &fixtures);
 
     let found = client.call_on(
         &session,
@@ -120,7 +120,7 @@ fn describe_node_and_resolve_node_round_trip_an_element() {
 #[test]
 fn get_document_reports_the_tree_and_query_selector_finds_nodes() {
     let (harness, fixtures) = started();
-    let (mut client, session) = loaded(&harness, &fixtures);
+    let (mut client, session, _target) = loaded(&harness, &fixtures);
 
     let root = client.call_on(&session, "DOM.getDocument", json!({ "depth": -1 }))["root"].clone();
     assert_eq!(root["nodeType"], 9);
@@ -162,7 +162,7 @@ fn get_document_reports_the_tree_and_query_selector_finds_nodes() {
 #[test]
 fn request_node_turns_an_object_handle_into_a_node_id() {
     let (harness, fixtures) = started();
-    let (mut client, session) = loaded(&harness, &fixtures);
+    let (mut client, session, _target) = loaded(&harness, &fixtures);
 
     let object_id = client.call_on(
         &session,
@@ -199,7 +199,7 @@ fn request_node_turns_an_object_handle_into_a_node_id() {
 #[test]
 fn each_id_form_drives_the_geometry_commands() {
     let (harness, fixtures) = started();
-    let (mut client, session) = loaded(&harness, &fixtures);
+    let (mut client, session, _target) = loaded(&harness, &fixtures);
 
     let node_id = heading_id(&mut client, &session);
     let object_id = client.call_on(
@@ -253,14 +253,18 @@ fn each_id_form_drives_the_geometry_commands() {
 #[test]
 fn resolve_node_accepts_an_announced_world_and_refuses_a_bogus_one() {
     let (harness, fixtures) = started();
-    let (mut client, session) = loaded(&harness, &fixtures);
+    let (mut client, session, target) = loaded(&harness, &fixtures);
     client.call_on(&session, "Runtime.enable", json!({}));
 
     let node_id = heading_id(&mut client, &session);
+    // A real `frameId`. It used to be literally `"ignored"`, which encoded the
+    // old behaviour: the parameter was accepted and dropped. It is honoured now
+    // (ADR-0035 D3) — a world of the wrong frame sees the wrong document — so
+    // an id naming no frame is refused rather than quietly served.
     let main = client.call_on(
         &session,
         "Page.createIsolatedWorld",
-        json!({ "frameId": "ignored", "worldName": "util" }),
+        json!({ "frameId": target, "worldName": "util" }),
     )["executionContextId"]
         .as_i64()
         .expect("executionContextId");
@@ -296,7 +300,7 @@ fn resolve_node_accepts_an_announced_world_and_refuses_a_bogus_one() {
 #[test]
 fn navigation_updates_the_document_and_retires_every_id() {
     let (harness, fixtures) = started();
-    let (mut client, session) = loaded(&harness, &fixtures);
+    let (mut client, session, _target) = loaded(&harness, &fixtures);
     let stale = heading_id(&mut client, &session);
 
     client.call_on(
@@ -336,16 +340,44 @@ fn document_updated_needs_dom_enable() {
 
 /// The refusal register (ADR-0031 D4): absent where the capability is absent,
 /// a named reason where it exists or is scheduled.
+///
+/// `DOM.getFrameOwner` used to be the *absent* case — there were no nested
+/// browsing contexts to own a frame. ADR-0035 gave the engine frames, so it is
+/// implemented, and the refusal it can still produce is a named one: an id
+/// that names no frame.
 #[test]
 fn the_refusal_register_distinguishes_absent_from_scheduled() {
     let harness = Harness::start();
-    let (mut client, session, _) = harness.attached();
+    let (mut client, session, target) = harness.attached();
 
-    // No nested browsing contexts, so there is nothing to withhold.
     let error = client
         .try_call_on(&session, "DOM.getFrameOwner", json!({ "frameId": "x" }))
         .unwrap_err();
-    assert_eq!(error["code"], -32601, "{error}");
+    assert_eq!(
+        error["code"], -32000,
+        "a named refusal, not absent: {error}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("frame"),
+        "{error}"
+    );
+
+    // The top-level frame is a real frame with no owning element, which is a
+    // different answer from "no such frame".
+    let error = client
+        .try_call_on(&session, "DOM.getFrameOwner", json!({ "frameId": target }))
+        .unwrap_err();
+    assert_eq!(error["code"], -32000, "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owner"),
+        "{error}"
+    );
 }
 
 /// `DOM.setFileInputFiles` landed with ADR-0032; the refusal this replaces was

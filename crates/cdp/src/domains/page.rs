@@ -566,6 +566,8 @@ fn create_isolated_world(connection: &Arc<Connection>, request: &Request) -> Com
     struct Params {
         #[serde(default)]
         world_name: Option<String>,
+        #[serde(default)]
+        frame_id: Option<String>,
     }
     let session = connection.require_session(request)?;
     let params: Params = request.parse()?;
@@ -573,10 +575,30 @@ fn create_isolated_world(connection: &Arc<Connection>, request: &Request) -> Com
     if world_name.is_empty() {
         return Err(ProtocolError::server("worldName is required"));
     }
-    let world = session
-        .page
-        .create_isolated_world(world_name.clone())?
-        .map_err(ProtocolError::server)?;
+    // **The frame matters.** Playwright evaluates every locator in a utility
+    // world *of that frame*, so a world minted on the main frame would see the
+    // wrong document and the wrong tree — which is exactly what left
+    // `frameLocator()` waiting (ADR-0035 D3).
+    let frame = match params.frame_id.as_deref() {
+        // The main frame's CDP id *is* the target id, by construction — no
+        // lookup, and no round trip to the page thread for the common case.
+        None | Some("") => None,
+        Some(id) if id == session.target_id => None,
+        Some(id) => {
+            let contexts = session.page.frame_tree().unwrap_or_default();
+            Some(
+                crate::frame::frame_by_cdp_id(&session.target_id, &contexts, id)
+                    .ok_or_else(|| ProtocolError::server("no frame with the given id"))?,
+            )
+        }
+    };
+    let world = match frame {
+        Some(frame) => session
+            .page
+            .create_isolated_world_in(frame, world_name.clone())?,
+        None => session.page.create_isolated_world(world_name.clone())?,
+    }
+    .map_err(ProtocolError::server)?;
     let context_id = world.context_id;
 
     // Announcing the context is not optional. A driver does not use the id this
@@ -591,6 +613,7 @@ fn create_isolated_world(connection: &Arc<Connection>, request: &Request) -> Com
         &world_name,
         /* is_default */ false,
         context_id,
+        params.frame_id.as_deref(),
     ));
 
     Ok(serde_json::json!({ "executionContextId": context_id }))

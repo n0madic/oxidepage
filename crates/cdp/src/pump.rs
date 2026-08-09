@@ -522,6 +522,7 @@ fn navigation_events(
                         &world.name,
                         false,
                         world.context_id,
+                        None,
                     ));
                 }
             }

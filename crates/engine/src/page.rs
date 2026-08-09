@@ -15,7 +15,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use oxidepage_page::{
     BoxQuads, CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluateOutcome,
-    FrameInfo, InterceptControl, KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput,
+    FrameId, FrameInfo, InterceptControl, KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput,
     NavigationHistory, NodeDescription, NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob,
     PageOptions, PageRecord, PaintOptions, PdfOptions, Point, PropertyDescriptor, Rect,
     RemoteError, RemoteObject, ScreenshotOptions, SharedLocalStorage, SharedNetConfig, Viewport,
@@ -397,6 +397,11 @@ impl PageHandle {
         self.with(Page::frame_tree)
     }
 
+    /// A backend handle for the `<iframe>` embedding `frame`.
+    pub fn frame_owner_handle(&self, frame: FrameId) -> EngineResult<Option<u64>> {
+        self.with(move |page| page.frame_owner_handle(frame))
+    }
+
     /// Traverses to an absolute session-history index.
     pub fn navigate_to_history_entry(
         &self,
@@ -504,6 +509,15 @@ impl PageHandle {
         name: String,
     ) -> EngineResult<Result<oxidepage_page::WorldInfo, String>> {
         self.with(move |page| page.create_isolated_world(&name))
+    }
+
+    /// The same, for one browsing context.
+    pub fn create_isolated_world_in(
+        &self,
+        frame: FrameId,
+        name: String,
+    ) -> EngineResult<Result<oxidepage_page::WorldInfo, String>> {
+        self.with(move |page| page.create_isolated_world_in(frame, &name))
     }
 
     /// Evaluates in the world a context id names (main world when `None`).

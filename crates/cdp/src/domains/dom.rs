@@ -48,6 +48,7 @@ pub fn dispatch(connection: &Arc<Connection>, request: &Request) -> CommandResul
         "DOM.getContentQuads" => get_content_quads(connection, request),
         "DOM.scrollIntoViewIfNeeded" => scroll_into_view_if_needed(connection, request),
         "DOM.setFileInputFiles" => set_file_input_files(connection, request),
+        "DOM.getFrameOwner" => get_frame_owner(connection, request),
         // There are no nested browsing contexts to own a frame, so there is
         // nothing to withhold — a driver can feature-detect this one.
         _ => Err(ProtocolError::method_not_found(&request.method)),
@@ -160,6 +161,31 @@ fn describe_node(connection: &Arc<Connection>, request: &Request) -> CommandResu
         )?
         .map_err(node_error)?;
     Ok(json!({ "node": node_json(&node, &session.target_id) }))
+}
+
+/// `DOM.getFrameOwner`: the `<iframe>` embedding a frame (ADR-0035 D9).
+///
+/// The inverse of `DOM.Node.frameId`, and the direction a driver goes when it
+/// has a frame and wants the element — Playwright's frame→element path.
+/// Answers a `backendNodeId`, which is the id this engine's node handles are.
+fn get_frame_owner(connection: &Arc<Connection>, request: &Request) -> CommandResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        frame_id: String,
+    }
+    let session = connection.require_session(request)?;
+    let params: Params = request.parse()?;
+    let contexts = session.page.frame_tree().unwrap_or_default();
+    let frame = crate::frame::frame_by_cdp_id(&session.target_id, &contexts, &params.frame_id)
+        .ok_or_else(|| ProtocolError::server("no frame with the given id"))?;
+    // The top-level frame has no owning element, which is a real answer rather
+    // than a missing one.
+    let handle = session
+        .page
+        .frame_owner_handle(frame)?
+        .ok_or_else(|| ProtocolError::server("the frame has no owner element"))?;
+    Ok(json!({ "backendNodeId": handle, "nodeId": handle }))
 }
 
 fn resolve_node(connection: &Arc<Connection>, request: &Request) -> CommandResult {

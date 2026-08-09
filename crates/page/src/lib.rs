@@ -2303,6 +2303,17 @@ impl Page {
             .collect()
     }
 
+    /// A backend handle for the `<iframe>` embedding `frame`.
+    ///
+    /// Minted on demand rather than carried in [`Self::frame_tree`]: a handle
+    /// pins its node, and a snapshot that minted one per frame on every read
+    /// would pin every `<iframe>` of the page for the life of the driver.
+    #[must_use]
+    pub fn frame_owner_handle(&self, frame: oxidepage_base::FrameId) -> Option<u64> {
+        let owner = self.frames.get(frame)?.owner()?;
+        self.node_handle(owner).ok()
+    }
+
     #[must_use]
     pub fn navigation_history(&self) -> NavigationHistory {
         let history = self.state.history();
@@ -6456,10 +6467,26 @@ impl Page {
     /// An empty name would collide with the main world, which is the one name a
     /// driver must never be able to take over.
     pub fn create_isolated_world(&self, name: &str) -> Result<WorldInfo, String> {
+        self.create_isolated_world_in(oxidepage_base::MAIN_FRAME, name)
+    }
+
+    /// The same, for one browsing context.
+    ///
+    /// A driver asks per frame — Playwright evaluates every locator in a
+    /// utility world **of that frame** — so this is not a convenience: an
+    /// isolated world of the wrong frame sees the wrong `document` and the
+    /// wrong tree (ADR-0035 D3).
+    pub fn create_isolated_world_in(
+        &self,
+        frame: oxidepage_base::FrameId,
+        name: &str,
+    ) -> Result<WorldInfo, String> {
         if name.is_empty() {
             return Err("an isolated world needs a name".into());
         }
-        let frame = oxidepage_base::MAIN_FRAME;
+        if self.frames.get(frame).is_none() {
+            return Err("no such frame".into());
+        }
         if let Some(existing) = self.worlds.by_name(frame, name) {
             let state = existing
                 .state()
@@ -6479,7 +6506,7 @@ impl Page {
                 worlds::MAX_WORLDS
             ));
         }
-        let info = self.install_isolated_world(name)?;
+        let info = self.install_isolated_world(frame, name)?;
         // A binding registered for this world (or for every world) must exist
         // in it from the moment it is created, not from the next commit.
         self.apply_bindings_to(name);
@@ -6487,7 +6514,17 @@ impl Page {
     }
 
     /// Builds a world's runtime, installs the bindings and registers it.
-    fn install_isolated_world(&self, name: &str) -> Result<WorldInfo, String> {
+    fn install_isolated_world(
+        &self,
+        frame: oxidepage_base::FrameId,
+        name: &str,
+    ) -> Result<WorldInfo, String> {
+        let shared = self
+            .frames
+            .get(frame)
+            .ok_or_else(|| "no such frame".to_owned())?
+            .shared()
+            .clone();
         // The page's own limits, not `Default`: an embedder that capped the
         // heap or the GC threshold to contain a hostile page meant the page,
         // and a world a driver adds later must not be the way out of that cap.
@@ -6509,11 +6546,10 @@ impl Page {
             dom: Rc::clone(&self.state.dom),
         }));
         let id = self.worlds.next_id();
-        let state = oxidepage_bindings::install_world(&realm, &self.shared, id, name)
+        let state = oxidepage_bindings::install_world(&realm, &shared, id, name)
             .map_err(|e| e.to_string())?;
         let context_id = state.context_id.get();
-        self.worlds
-            .push(id, oxidepage_base::MAIN_FRAME, name, realm, state);
+        self.worlds.push(id, frame, name, realm, state);
         Ok(WorldInfo {
             name: name.to_owned(),
             context_id,
@@ -6529,12 +6565,16 @@ impl Page {
     /// the dead document (ADR-0033 D9). The rebuilt world keeps its name and
     /// gets a new `context_id`, which is how a driver learns the old one died.
     fn reset_worlds_for_navigation(&self) {
-        let names = self.worlds.take_isolated();
+        let worlds = self.worlds.take_isolated();
         // The registry is rebuilt from scratch: `install_world` re-appends,
         // and a stale entry would advertise a world that no longer exists.
-        self.shared.forget_isolated_worlds();
-        for name in names {
-            match self.install_isolated_world(&name) {
+        // Every frame's, not only the top one's — an isolated world belongs to
+        // a browsing context (ADR-0035 D3).
+        for frame in self.frames.pre_order() {
+            frame.shared().forget_isolated_worlds();
+        }
+        for (frame, name) in worlds {
+            match self.install_isolated_world(frame, &name) {
                 Ok(_) => self.apply_bindings_to(&name),
                 Err(error) => self
                     .hooks

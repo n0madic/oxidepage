@@ -357,6 +357,25 @@ pub fn frame_id_for(
     format!("{hash:016X}{:08X}", frame.index())
 }
 
+/// The engine `FrameId` an opaque CDP `frameId` names.
+///
+/// A scan rather than a stored reverse map, because [`frame_id_for`] *derives*
+/// its ids: recomputing over a page's frames is a handful of hashes against a
+/// cap of 64, and there is no second structure to keep in step with attach and
+/// detach. An id naming a frame that has gone answers `None`, which is what a
+/// driver's stale reference must get.
+#[must_use]
+pub fn frame_by_cdp_id(
+    target_id: &str,
+    contexts: &[oxidepage_engine::page_api::FrameInfo],
+    id: &str,
+) -> Option<oxidepage_engine::page_api::FrameId> {
+    contexts
+        .iter()
+        .find(|info| frame_id_for(target_id, info.id, info.parent.is_none()) == id)
+        .map(|info| info.id)
+}
+
 /// The serialized origin of `url`, or `"://"` for one that has none — which is
 /// what Chrome reports for `about:blank`.
 pub fn security_origin(url: &str) -> String {
