@@ -176,6 +176,23 @@ bounces through a child. Same for the native-stack anchor: it is taken once per
 runtime entry, and re-anchoring mid-stack would hand a nested frame a fresh full
 stack budget.
 
+**"Main world" stops being an id and becomes a property.** `MAIN_WORLD` is the
+constant `WorldId` 0, and roughly fifteen sites read it as "the default world" —
+`customElements` installs only there, `forget_isolated_worlds` retains it across
+a commit, job pumping and `with_cx` special-case it, and CDP reports it as
+`isDefault`. Every frame has a default world, and `WorldId`s must stay unique
+page-wide because the world table is flat, so a child frame's default world
+cannot also be 0.
+
+The split: `WorldId` 0 stays the **top-level** frame's default world, which is
+what keeps every existing check and every driver expectation correct where they
+already are; a child frame's default world takes a fresh id and is marked
+default on the world itself. `FrameShared` learns its own default world's id, so
+"is this the frame's main world" and "keep the default world, drop the isolated
+ones" are answered per frame rather than by comparing against a constant.
+Leaving the constant to mean both is the kind of thing that reads fine and
+installs `customElements` in exactly one frame.
+
 ### D4 — Cross-frame DOM is real; cross-frame JS object graphs are not
 
 The shared arena makes `iframe.contentDocument` a real Document the parent realm
