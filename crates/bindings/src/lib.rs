@@ -131,6 +131,7 @@ pub fn install_with_profiles<R: JsRealm>(
 ) -> Result<Rc<WorldState>, JsError> {
     let page = install_frame(
         crate::state::PageGlobal::new(),
+        oxidepage_base::MAIN_FRAME,
         dom,
         hooks,
         viewport,
@@ -148,13 +149,14 @@ pub fn install_with_profiles<R: JsRealm>(
 #[must_use]
 pub fn install_frame(
     global: Rc<crate::state::PageGlobal>,
+    frame: oxidepage_base::FrameId,
     dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
     hooks: Rc<dyn HostHooks>,
     viewport: Viewport,
     navigator: NavigatorData,
     screen: ScreenData,
 ) -> Rc<crate::state::FrameShared> {
-    crate::state::FrameShared::new(global, dom, hooks, viewport, navigator, screen)
+    crate::state::FrameShared::new(global, frame, dom, hooks, viewport, navigator, screen)
 }
 
 /// Installs one world's globals into `realm` over shared page state.

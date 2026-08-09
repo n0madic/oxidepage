@@ -63,6 +63,17 @@ define_id! {
     RequestId
 }
 
+/// The page's top-level browsing context.
+///
+/// A well-known constant rather than something handed out, because the state
+/// of the top-level frame is built before the frame table that would allocate
+/// its id — and because it is the one frame guaranteed to exist for a page's
+/// whole life. Its slot is never freed, so the generation never moves.
+pub const MAIN_FRAME: FrameId = FrameId {
+    index: 0,
+    generation: FIRST_GENERATION,
+};
+
 define_id! {
     /// Identifies a browsing context — the page's top-level one, or the nested
     /// one an `<iframe>` owns (ADR-0035).

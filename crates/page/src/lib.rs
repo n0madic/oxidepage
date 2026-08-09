@@ -1871,6 +1871,7 @@ impl Page {
         install_rejection_tracker(&realm, &hooks);
         let shared = oxidepage_bindings::install_frame(
             oxidepage_bindings::PageGlobal::new(),
+            oxidepage_base::MAIN_FRAME,
             dom,
             Rc::clone(&hooks) as Rc<dyn HostHooks>,
             viewport,
@@ -1881,7 +1882,13 @@ impl Page {
             oxidepage_bindings::install_world(&realm, &shared, oxidepage_bindings::MAIN_WORLD, "")?;
         let frames = Rc::new(frame::FrameTree::new(Rc::clone(&shared)));
         let world_table = Rc::new(worlds::WorldTable::new());
-        world_table.push(oxidepage_bindings::MAIN_WORLD, "", realm, Rc::clone(&state));
+        world_table.push(
+            oxidepage_bindings::MAIN_WORLD,
+            oxidepage_base::MAIN_FRAME,
+            "",
+            realm,
+            Rc::clone(&state),
+        );
         // The hop a host callback in one world uses to reach another. Weak, so
         // the `Page -> WorldTable -> realm -> WorldState -> FrameShared` chain
         // stays acyclic and every runtime is freed on drop.
@@ -5844,7 +5851,9 @@ impl Page {
             .collect()
     }
 
-    /// Creates — or returns — the isolated world named `name`.
+    /// Creates — or returns — the top-level frame's isolated world named
+    /// `name`. A `frameId`-aware entry point arrives with the CDP frame
+    /// surface; until then a driver's isolated world is the main frame's.
     ///
     /// **Idempotent by name within a document.** Chrome mints a fresh context
     /// per call, but drivers call this once per navigation expecting to rebind,
@@ -5857,7 +5866,8 @@ impl Page {
         if name.is_empty() {
             return Err("an isolated world needs a name".into());
         }
-        if let Some(existing) = self.worlds.by_name(name) {
+        let frame = oxidepage_base::MAIN_FRAME;
+        if let Some(existing) = self.worlds.by_name(frame, name) {
             let state = existing
                 .state()
                 .ok_or_else(|| "the world is being torn down".to_owned())?;
@@ -5867,9 +5877,12 @@ impl Page {
                 is_default: false,
             });
         }
-        if self.worlds.len() >= worlds::MAX_WORLDS {
+        // Per frame, not per page: each browsing context has its own set of
+        // worlds, and a page with several frames would otherwise hit the cap
+        // for reasons no single frame's driver could see (ADR-0035 D3).
+        if self.worlds.count_in(frame) >= worlds::MAX_WORLDS {
             return Err(format!(
-                "a page may hold at most {} execution worlds",
+                "a frame may hold at most {} execution worlds",
                 worlds::MAX_WORLDS
             ));
         }
@@ -5906,7 +5919,8 @@ impl Page {
         let state = oxidepage_bindings::install_world(&realm, &self.shared, id, name)
             .map_err(|e| e.to_string())?;
         let context_id = state.context_id.get();
-        self.worlds.push(id, name, realm, state);
+        self.worlds
+            .push(id, oxidepage_base::MAIN_FRAME, name, realm, state);
         Ok(WorldInfo {
             name: name.to_owned(),
             context_id,
@@ -6029,8 +6043,15 @@ impl Page {
     }
 
     /// The id of the world registered under `name` (`""` is the main world).
+    /// The id of the **top-level frame's** world called `name`.
+    ///
+    /// A driver naming a world without naming a frame means the main one;
+    /// `Page.createIsolatedWorld` carries a `frameId` and resolves through
+    /// [`worlds::WorldTable::by_name`] directly.
     pub(crate) fn world_id_by_name(&self, name: &str) -> Option<oxidepage_bindings::WorldId> {
-        self.worlds.by_name(name).map(|w| w.id)
+        self.worlds
+            .by_name(oxidepage_base::MAIN_FRAME, name)
+            .map(|w| w.id)
     }
 
     /// The id of the world a `Runtime.ExecutionContextId` names.

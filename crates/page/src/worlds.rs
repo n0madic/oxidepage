@@ -22,6 +22,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use oxidepage_base::FrameId;
 use oxidepage_bindings::{BindCx, WorldEnter, WorldId, WorldState};
 use oxidepage_js::{JsRealm, QuickJsRealm};
 
@@ -51,6 +52,10 @@ pub(crate) const WORLD_STACK_BYTES: usize = 512 * 1024;
 /// One execution world: a realm, its bindings state, and its re-entry latch.
 pub(crate) struct World {
     pub(crate) id: WorldId,
+    /// The browsing context this world belongs to. A world is per (frame,
+    /// world name), so the same isolated world in two frames is two realms
+    /// (ADR-0035 D3).
+    pub(crate) frame: FrameId,
     /// `""` for the main world. A world's name is its only identity over CDP.
     pub(crate) name: RefCell<String>,
     /// True while this world is on the stack. Entering a `Context` that is
@@ -95,9 +100,17 @@ impl WorldTable {
 
     /// Registers an installed world. The caller has already built the realm and
     /// run `install_world` over it.
-    pub(crate) fn push(&self, id: WorldId, name: &str, realm: QuickJsRealm, state: Rc<WorldState>) {
+    pub(crate) fn push(
+        &self,
+        id: WorldId,
+        frame: FrameId,
+        name: &str,
+        realm: QuickJsRealm,
+        state: Rc<WorldState>,
+    ) {
         self.slots.borrow_mut().push(Rc::new(World {
             id,
+            frame,
             name: RefCell::new(name.to_owned()),
             entered: Cell::new(false),
             state: RefCell::new(Some(state)),
@@ -105,25 +118,35 @@ impl WorldTable {
         }));
     }
 
+    /// How many live worlds `frame` holds.
+    pub(crate) fn count_in(&self, frame: FrameId) -> usize {
+        self.slots
+            .borrow()
+            .iter()
+            .filter(|w| w.frame == frame)
+            .count()
+    }
+
     pub(crate) fn get(&self, id: WorldId) -> Option<Rc<World>> {
         self.slots.borrow().iter().find(|w| w.id == id).cloned()
     }
 
-    pub(crate) fn by_name(&self, name: &str) -> Option<Rc<World>> {
+    /// The world called `name` **in `frame`**.
+    ///
+    /// Scoped, because a driver's `Page.createIsolatedWorld` names a world per
+    /// frame: the same `worldName` in two frames is two realms, and an
+    /// unscoped lookup would hand back whichever was created first.
+    pub(crate) fn by_name(&self, frame: FrameId, name: &str) -> Option<Rc<World>> {
         self.slots
             .borrow()
             .iter()
-            .find(|w| *w.name.borrow() == name)
+            .find(|w| w.frame == frame && *w.name.borrow() == name)
             .cloned()
     }
 
     /// Whether `world` is currently on the stack.
     pub(crate) fn is_entered(&self, world: WorldId) -> bool {
         self.get(world).is_some_and(|w| w.entered.get())
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.slots.borrow().len()
     }
 
     /// Every live world, main first then creation order.
@@ -288,8 +311,13 @@ impl WorldEnter for WorldTable {
         true
     }
 
-    fn world_ids(&self) -> Vec<WorldId> {
-        self.slots.borrow().iter().map(|w| w.id).collect()
+    fn world_ids_of(&self, frame: FrameId) -> Vec<WorldId> {
+        self.slots
+            .borrow()
+            .iter()
+            .filter(|w| w.frame == frame)
+            .map(|w| w.id)
+            .collect()
     }
 
     fn has_listener(

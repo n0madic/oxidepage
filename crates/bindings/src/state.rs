@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 
-use oxidepage_base::{NodeId, RequestId};
+use oxidepage_base::{FrameId, NodeId, RequestId};
 use oxidepage_dom::observer::MutationObserverId;
 use oxidepage_dom::{DomTree, MutationRecord, QualName};
 use oxidepage_js::{JsObject, JsValue};
@@ -912,9 +912,11 @@ pub trait WorldEnter {
     /// gone, is **already on the stack** (entering a live `Context` twice is a
     /// `BorrowMutError`), or the nesting cap is hit.
     fn enter(&self, world: WorldId, f: &mut dyn FnMut(&crate::cx::BindCx<'_>)) -> bool;
-    /// Live world ids, **main first**, then creation order — the cross-world
-    /// listener order rule (D6).
-    fn world_ids(&self) -> Vec<WorldId>;
+    /// Live world ids **of one frame**, main first then creation order — the
+    /// cross-world listener order rule (D6). Scoped to a frame because events
+    /// do not cross a document boundary (ADR-0035 D8), so a dispatch must
+    /// never reach a sibling context's listeners.
+    fn world_ids_of(&self, frame: FrameId) -> Vec<WorldId>;
     /// Whether `world` has any listener for `event_type` on `target`.
     ///
     /// A plain map read on the page thread: **no scope is entered**, which is
@@ -1155,6 +1157,9 @@ impl PageGlobal {
 pub struct FrameShared {
     /// State shared by every browsing context of the page (ADR-0035 D2).
     pub global: Rc<PageGlobal>,
+    /// Which browsing context this is. Fixed for the state's whole life — a
+    /// commit replaces the *document*, never the frame.
+    frame: FrameId,
     /// The document tree, shared with the parser during loads.
     ///
     /// The arena is shared by every browsing context of the page; **this**
@@ -1460,6 +1465,7 @@ impl FrameShared {
     #[must_use]
     pub fn new(
         global: Rc<PageGlobal>,
+        frame: FrameId,
         dom: Rc<RefCell<DomTree>>,
         hooks: Rc<dyn HostHooks>,
         viewport: Viewport,
@@ -1482,6 +1488,7 @@ impl FrameShared {
             * 1000.0;
         Rc::new(Self {
             global,
+            frame,
             dom,
             document: Cell::new(document),
             style,
@@ -1514,6 +1521,12 @@ impl FrameShared {
         })
     }
 
+    /// Which browsing context this state belongs to.
+    #[must_use]
+    pub fn frame(&self) -> FrameId {
+        self.frame
+    }
+
     /// The rendered document of this browsing context.
     ///
     /// Reach for this — not `dom.document()` — wherever the question is "which
@@ -1540,7 +1553,7 @@ impl FrameShared {
     #[must_use]
     pub fn world_ids(&self) -> Vec<WorldId> {
         if let Some(table) = self.global.enter.borrow().upgrade() {
-            return table.world_ids();
+            return table.world_ids_of(self.frame);
         }
         self.worlds.borrow().clone()
     }
@@ -1564,7 +1577,7 @@ impl WorldEnter for NoWorlds {
     fn enter(&self, _world: WorldId, _f: &mut dyn FnMut(&crate::cx::BindCx<'_>)) -> bool {
         match *self {}
     }
-    fn world_ids(&self) -> Vec<WorldId> {
+    fn world_ids_of(&self, _frame: FrameId) -> Vec<WorldId> {
         match *self {}
     }
     fn has_listener(
