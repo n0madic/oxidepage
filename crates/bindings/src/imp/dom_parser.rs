@@ -31,7 +31,9 @@ pub(crate) fn parse_from_string(
 ) -> Result<NodeId, JsThrow> {
     // The spec enumerates exactly these five; anything else is a TypeError
     // (not a DOMException), and feature-detecting code relies on that.
-    let url = cx.state.dom.borrow().document_url().to_owned();
+    // The parsed document inherits the URL of the realm that parsed it — this
+    // frame's document, not the page's (ADR-0035 D1).
+    let url = cx.state.frame.document_url();
     let data = match ty.as_str() {
         "text/html" => DocumentData::html(url),
         "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => {

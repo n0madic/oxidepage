@@ -1355,16 +1355,19 @@ fn install_pair_iteration(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     Ok(())
 }
 
+// Cookies are keyed on **this realm's** document URL, not the page's: a frame's
+// jar is its own document's, and `dom.document_url()` gave a cross-origin frame
+// the embedder's cookies (ADR-0035 D1).
 fn cookie_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     cx.this_document(&call.this)?;
-    let url = cx.state.dom.borrow().document_url().to_owned();
+    let url = cx.state.frame.document_url();
     Ok(JsValue::String(cx.state.hooks.get_cookie(&url)))
 }
 
 fn cookie_set(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     cx.this_document(&call.this)?;
     let value = cx.arg_dom_string(call, 0)?;
-    let url = cx.state.dom.borrow().document_url().to_owned();
+    let url = cx.state.frame.document_url();
     cx.state.hooks.set_cookie(&url, &value);
     Ok(JsValue::Undefined)
 }
@@ -1420,7 +1423,11 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
         (method, url, headers, body, credentials, mode, signal)
     };
 
-    let doc_url = cx.state.dom.borrow().document_url().to_owned();
+    // The calling realm's document URL, not the page's: the request is already
+    // tagged with this frame, and resolving it against the top-level document
+    // aimed a frame's `fetch('/api')` at the embedder's origin — with
+    // credentials — and reported the embedder's origin as the initiator.
+    let doc_url = cx.state.frame.document_url();
     let absolute = match url::Url::parse(&url) {
         Ok(u) => u.to_string(),
         Err(_) => url::Url::parse(&doc_url)
@@ -1717,6 +1724,13 @@ fn install_location(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<
     // — but only for the document that *has* a browsing context. A document from
     // `createDocument`/`createHTMLDocument`/`new Document()` reports `null`, and
     // `DOMImplementation-createDocument.html` asserts exactly that.
+    //
+    // Compared against **this realm's** document, not the page's: with nested
+    // contexts there are several rendered documents (ADR-0035 D1), and the
+    // page-wide comparison made `document.location` null inside every frame.
+    // The Location returned is this realm's, so a *parent* realm reading
+    // `iframe.contentDocument.location` still gets `null` rather than its own —
+    // documented limit, not a silent wrong answer.
     let doc_proto = {
         let interfaces = cx.state.interfaces.borrow();
         interfaces.get("Document").map(|entry| entry.proto.clone())
@@ -1724,7 +1738,7 @@ fn install_location(cx: &BindCx<'_>, global: &oxidepage_js::JsObject) -> Result<
     if let Some(proto) = doc_proto {
         cx.define_getter(&proto, "location", |cx, call| {
             let this = cx.this_document(&call.this)?;
-            if this != cx.state.dom.borrow().document() {
+            if !imp::document::is_page_document(cx, this) {
                 return Ok(JsValue::Null);
             }
             window_location(cx, call)

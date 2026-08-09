@@ -709,6 +709,23 @@ Conformance work landing outside the phase plan:
   `frame.evaluate()` and `frameLocator()` all work. Decisions and v1 limits:
   ADR-0035.
 
+  A review pass closed the remaining places that still answered with the
+  **top-level** document where the question was "which browsing context is
+  asking": `document.location` (null in every frame), `document.styleSheets`
+  (empty beside a live stylist), `history.pushState` (which rewrote the
+  *embedder's* URL), `new Image()`, and every relative-URL resolution behind
+  `fetch`/XHR/`new Request`/`document.cookie`/`window.open`/`DOMParser` plus the
+  `reflect_url` that backs `img.src` and `a.href` — each of which aimed a
+  frame's request at its embedder's origin, with the embedder's credentials.
+  The page-side scans followed: `background-image` and lazy-image visibility now
+  key on every frame's engine rather than the top one's, so a sheet or a scroll
+  inside a frame reopens their gates. A navigation now records its **initiator**
+  (ADR-0035 D12) so a `target="side"` link sends the right `Referer`, and
+  `drain_frame_navigations` re-checks liveness per iteration — a parent
+  committing mid-loop retires the descendants the same batch had queued.
+  Regression tests: `crates/page/tests/frame_realms.rs`, plus the frame cases in
+  `frame_subresources.rs` and `lazy_images.rs`.
+
 ## Deliberate limits at the Puppeteer milestone
 
 The roadmap's P6 accounting: the union of every stage's non-goals, so a user of

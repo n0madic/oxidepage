@@ -419,8 +419,17 @@ fn a_control_job_is_answered_during_a_navigation() {
     handle.join().unwrap();
 }
 
+/// `suspend()` freezes the page's **own** sources, not the driver's turn
+/// (ADR-0034 D3).
+///
+/// This test used to assert the opposite — that an ordinary job parks until
+/// `resume()` — which was the semantics before `waitForDebuggerOnStart` became
+/// a real pause. It kept passing only by a race: it gave the page 300 ms to not
+/// answer, and on a cold machine `load_html_page` alone took longer than that.
+/// On a warm one the job was answered inside the window and the assertion
+/// failed, which is what made it a CI flake rather than a caught regression.
 #[test]
-fn a_suspended_page_parks_jobs_until_resumed() {
+fn a_suspended_page_serves_jobs_but_freezes_its_own_sources() {
     let (tx, rx) = crossbeam_channel::unbounded::<PageJob>();
     let handle = std::thread::spawn(move || {
         let page = load_html_page("<p>x</p>", PageOptions::default()).expect("page");
@@ -428,24 +437,44 @@ fn a_suspended_page_parks_jobs_until_resumed() {
         page.run_command_loop(rx);
     });
 
-    let (reply_tx, reply_rx) = mpsc::channel();
-    tx.send(PageJob::new(move |page| {
-        let _ = reply_tx.send(page.eval_to_string("40 + 2").unwrap());
-    }))
-    .unwrap();
+    // An ordinary job runs *while suspended*, and that is the whole point: a
+    // driver sends its entire session setup before `runIfWaitingForDebugger`,
+    // so deferring it would deadlock the setup the pause exists to allow. The
+    // generous timeout is `await_running`'s, for its reason — the first `Page`
+    // in the process pays for the system font scan.
+    let armed = call(&tx, Duration::from_secs(60), |page| {
+        page.eval_to_string(
+            "window.fired = false; setTimeout(() => { window.fired = true; }, 0); 40 + 2",
+        )
+        .unwrap()
+    });
+    assert_eq!(armed, "42", "a suspended page must still serve the driver");
 
-    assert!(
-        reply_rx.recv_timeout(Duration::from_millis(300)).is_err(),
-        "a suspended page must not run ordinary jobs"
-    );
+    // The page's own scheduling stays frozen, though: the timer that job armed
+    // does not fire. Read through another job, which is the only thing that
+    // *does* run here — so this is not a "wait and hope" window.
+    std::thread::sleep(Duration::from_millis(200));
+    let fired = call(&tx, Duration::from_secs(5), |page| {
+        page.eval_to_string("window.fired").unwrap()
+    });
+    assert_eq!(fired, "false", "a suspended page ran a timer");
 
+    // …and it fires once the pause is lifted. Polled rather than slept on: the
+    // assertion is "it eventually runs", and a fixed sleep would only make that
+    // flaky under load.
     tx.send(PageJob::control(Page::resume)).unwrap();
-    assert_eq!(
-        reply_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the parked job must run on resume"),
-        "42"
-    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut fired = String::new();
+    while Instant::now() < deadline {
+        fired = call(&tx, Duration::from_secs(5), |page| {
+            page.eval_to_string("window.fired").unwrap()
+        });
+        if fired == "true" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fired, "true", "the timer must run once the page resumes");
 
     tx.send(PageJob::control(Page::request_close)).unwrap();
     handle.join().unwrap();

@@ -65,15 +65,14 @@ pub(crate) fn open(
     target: String,
     features: String,
 ) -> Result<JsValue, JsThrow> {
-    // Resolve, then **drop the borrow** before the hook: it is embedder code
-    // called with JavaScript on the stack, exactly like the dialog handler.
-    let (opener_url, resolved) = {
-        let dom = cx.state.dom.borrow();
-        let opener_url = dom.document_url().to_owned();
-        let resolved =
-            (!url.is_empty()).then(|| crate::window_open::resolve_against(&opener_url, &url));
-        (opener_url, resolved)
-    };
+    // The opener is **this realm's** document, not the page's: a frame calling
+    // `window.open('/x')` opens its own origin's URL (ADR-0035 D1).
+    // `document_url` takes the `dom` borrow and drops it, which is what the hook
+    // below needs — it is embedder code called with JavaScript on the stack,
+    // exactly like the dialog handler.
+    let opener_url = cx.state.frame.document_url();
+    let resolved =
+        (!url.is_empty()).then(|| crate::window_open::resolve_against(&opener_url, &url));
 
     // HTML: "If target is the empty string, then set target to `_blank`." An
     // explicit `window.open(url, "")` therefore opens a page — unlike an `<a>`
@@ -103,6 +102,9 @@ pub(crate) fn open(
                 body: None,
                 reload: false,
                 download: None,
+                // The *opener's* document, which for a named target is not the
+                // context being navigated.
+                initiator: Some(opener_url.clone()),
             });
         }
         // The calling window *is* its own `WindowProxy`, which is what a
@@ -139,7 +141,9 @@ fn open_dialog(
     message: String,
     default_value: String,
 ) -> DialogResponse {
-    let url = cx.state.dom.borrow().document_url().to_owned();
+    // The dialog names the document that raised it — this realm's, so an
+    // `alert()` from inside a frame is attributed to the frame (ADR-0035 D1).
+    let url = cx.state.frame.document_url();
     cx.state.hooks.run_dialog(DialogRequest {
         kind,
         message,

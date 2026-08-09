@@ -133,6 +133,14 @@ fn route(path: &str, html: &str, hits: &Hits) -> Vec<u8> {
             hits.img2.fetch_add(1, Ordering::SeqCst);
             resp(200, "OK", "image/png", &png_bytes(100, 50))
         }
+        // A nested browsing context whose one image is at the top of *its*
+        // viewport — visible in the frame, whatever the page's scroll is.
+        "/frame.html" => resp(
+            200,
+            "OK",
+            "text/html",
+            b"<!DOCTYPE html><body style='margin:0'><img src='/img.png' style='display:block'>",
+        ),
         "/reveal.css" => resp(200, "OK", "text/css", b"#hidden { display: block }"),
         _ => resp(404, "Not Found", "text/plain", b"nope"),
     }
@@ -445,5 +453,25 @@ fn a_deferred_image_does_not_pin_its_node() {
     assert!(
         page.dom().node_count() < before,
         "a removed deferred image must be collectable ({before} nodes before)"
+    );
+}
+
+/// A visible image **inside a frame** is fetched in lazy mode.
+///
+/// The deferred set is page-wide, but the visibility walk hit-tested every
+/// entry against the *page's* layout engine. A node in a frame has no box
+/// there, so `bounding_client_rect` returned `None`, the loop skipped it, and
+/// the image stayed deferred forever — no fetch, no `load`, a permanent hole
+/// (ADR-0035 D1/D6).
+#[test]
+fn an_image_inside_a_frame_is_fetched_when_visible() {
+    let (_page, hits) = run(
+        "<iframe src='/frame.html' style='display:block;width:200px;height:200px'></iframe>",
+        true,
+    );
+    assert_eq!(
+        hits.img(),
+        1,
+        "an image at the top of a frame's own viewport must be fetched"
     );
 }

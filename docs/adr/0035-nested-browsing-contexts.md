@@ -429,6 +429,25 @@ nothing silently claims a restriction it does not apply. Implementing the two
 that work and rejecting the rest by name is P6; parsing all of them and
 enforcing two would be the silent no-op it forbids.
 
+### D12 — A navigation records its initiator
+
+`PendingNavigation::Load` carries an `initiator: Option<String>` — the document
+URL of the realm that asked for the navigation — populated at queue time and
+used by the page as the request's `Referer`.
+
+It cannot be recovered at drain time. A *named* target (`window.open(url,
+"side")`, `<a target="side">`, `<form target="side">`) queues onto a context the
+initiator is not in (D10), so deriving the referrer from the frame about to be
+navigated reported that frame's **own previous URL** — self-referential after
+the first such navigation, and the wrong origin for any server doing
+referrer-based access control. `None` means embedder-driven, which has no
+initiating document and therefore sends no referrer.
+
+Only the `Load` variant carries it: `ReplaceDocument` keeps the URL it already
+has (`document.open()` does not move it) and `JavaScriptUrl` is evaluated with
+the target document as its base, so for both of those the target context's own
+URL is the correct answer, not the initiator's.
+
 ## Consequences
 
 The invariant in CLAUDE.md changes text: an arena holds N rendered documents,
@@ -555,3 +574,16 @@ driver suite exercises it, which is exactly why it is written down.
   creating a context under that name. There is no registry of *page* names, so
   opening one page per click would be unbounded and would change behaviour once
   the popup cap was reached; `_blank` still opens.
+- **`document.location` and `document.styleSheets` answer for the realm that
+  asks, and only for it.** Both compare `this` against `cx.state.frame.document()`,
+  so a frame's own script gets its own `Location` and its own sheet list — but a
+  *parent* realm reading `iframe.contentDocument.location` still gets `null`, and
+  `.styleSheets` an empty list, because the `Location` object and the stylist
+  they would have to return belong to the child's realm and this one cannot
+  reach them. Null beats the embedder's own `Location` wearing the child's name.
+- **A lazy `<img>` inside a frame is judged against that frame's viewport**, not
+  against the frame's position on the page. An image at the top of a frame's own
+  scroll counts as visible even when the `<iframe>` is below the page's fold.
+  Composing the two would need the frame's offset in the embedder, which the
+  visibility walk does not have; over-fetching one frame's first screen errs
+  towards a complete render, which is what lazy mode is for.

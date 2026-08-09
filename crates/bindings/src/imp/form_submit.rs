@@ -256,6 +256,9 @@ fn encode(
             body: None,
             reload: false,
             download: None,
+            // The document the form is in; a `target="side"` submission is
+            // queued on another context and must not borrow its referrer.
+            initiator: Some(cx.state.frame.document_url()),
         };
     }
 
@@ -295,6 +298,7 @@ fn encode(
         }),
         reload: false,
         download: None,
+        initiator: Some(cx.state.frame.document_url()),
     }
 }
 

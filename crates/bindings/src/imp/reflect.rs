@@ -92,7 +92,15 @@ pub(crate) fn reflect_url(cx: &BindCx<'_>, this: NodeId, name: &str) -> String {
         else {
             return String::new();
         };
-        (raw, dom.base_url())
+        // The base URL of the document **this node is in**, not the page's.
+        // `img.src` / `a.href` written inside a frame are relative to that
+        // frame's document, and resolving them against the embedder's reported
+        // a URL from another origin — one that disagreed with the URL
+        // `page::resolve_url_for` actually fetched (ADR-0035 D1).
+        let doc = dom
+            .containing_document(this)
+            .unwrap_or_else(|| dom.document());
+        (raw, dom.base_url_of(doc))
     };
     url::Url::parse(&base)
         .and_then(|base| base.join(&raw))

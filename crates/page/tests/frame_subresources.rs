@@ -34,13 +34,38 @@ fn resp(content_type: &str, body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A server recording every requested path.
+/// One recorded request: the path asked for, and the `Referer` it carried.
+type Seen = Vec<(String, Option<String>)>;
+
+/// The paths of every recorded request, sorted and deduplicated.
+fn paths_of(seen: &Arc<Mutex<Seen>>) -> Vec<String> {
+    let mut paths: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The `Referer` the first request for `path` carried.
+fn referer_of(seen: &Arc<Mutex<Seen>>, path: &str) -> Option<String> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .find(|(seen_path, _)| seen_path == path)
+        .and_then(|(_, referer)| referer.clone())
+}
+
+/// A server recording every requested path and its `Referer`.
 ///
 /// `/index.html` embeds `/nested/frame.html`, which asks for three relative
 /// subresources. Resolved against the frame they are `/nested/*`; resolved
 /// against the embedder they are `/*` — and the server answers both, which is
 /// exactly why the assertion is on the path and not on the result.
-fn spawn_server() -> (u16, Arc<Mutex<Vec<String>>>) {
+fn spawn_server() -> (u16, Arc<Mutex<Seen>>) {
     let paths = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&paths);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -76,9 +101,21 @@ fn spawn_server() -> (u16, Arc<Mutex<Vec<String>>>) {
                     }
                     let head = String::from_utf8_lossy(&buf).into_owned();
                     let path = head.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                    seen.lock().unwrap().push(path.clone());
+                    let referer = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("referer")
+                                .then(|| value.trim().to_owned())
+                        });
+                    seen.lock().unwrap().push((path.clone(), referer));
                     let body = if path.ends_with(".png") {
                         resp("image/png", &png_bytes())
+                    } else if path.ends_with("bg.css") {
+                        // Arrives *after* the frame's first layout, and bumps
+                        // only that frame's style engine — the gate the
+                        // background-image scan used to miss entirely.
+                        resp("text/css", b"#d { background-image: url(bg.png); }")
                     } else if path.ends_with(".css") {
                         resp("text/css", b"#p { color: rgb(1, 2, 3); }")
                     } else if path.ends_with("cp1251.js") {
@@ -101,6 +138,39 @@ fn spawn_server() -> (u16, Arc<Mutex<Vec<String>>>) {
                             "text/html",
                             b"<!doctype html><script src='cp1251.js'></script>",
                         )
+                    } else if path == "/net.html" {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><iframe src='nested/net-frame.html'></iframe>",
+                        )
+                    } else if path.ends_with("net-frame.html") {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><script>\
+                              fetch('api-fetch');\
+                              const x = new XMLHttpRequest();\
+                              x.open('GET', 'api-xhr'); x.send();\
+                              </script>",
+                        )
+                    } else if path == "/bg.html" {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><iframe src='nested/bg-frame.html'></iframe>",
+                        )
+                    } else if path.ends_with("bg-frame.html") {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><link rel=stylesheet href='bg.css'>\
+                              <div id=d style='width:20px;height:20px'></div>",
+                        )
+                    } else if path == "/ref.html" {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><iframe name=side src='nested/frame.html'></iframe>\
+                              <a id=a href='/landed.html' target='side'>go</a>",
+                        )
+                    } else if path == "/landed.html" {
+                        resp("text/html", b"<!doctype html><title>Landed</title>")
                     } else if path == "/origin.html" {
                         resp(
                             "text/html",
@@ -148,9 +218,7 @@ fn a_frames_relative_subresources_resolve_against_the_frames_document() {
     .unwrap();
     page.settle(Duration::from_millis(1500));
 
-    let mut seen = paths.lock().unwrap().clone();
-    seen.sort();
-    seen.dedup();
+    let seen = paths_of(&paths);
     for expected in ["/nested/s.css", "/nested/p.png", "/nested/s.js"] {
         assert!(
             seen.iter().any(|path| path == expected),
@@ -317,5 +385,88 @@ fn a_src_less_frame_inherits_the_embedders_origin() {
         page.eval_to_string("document.getElementById('b').contentDocument.URL")
             .unwrap(),
         format!("{base}/origin.html")
+    );
+}
+
+/// `fetch` and `XMLHttpRequest` inside a frame resolve a relative URL against
+/// **the frame's** document.
+///
+/// Both read `dom.document_url()` — the *top-level* document — while tagging the
+/// request with the frame it came from, so a frame loaded from another origin
+/// aimed its own API calls at the embedder, with the embedder's credentials.
+/// Asserted on the wire, because the server answers both spellings.
+#[test]
+fn a_frames_fetch_and_xhr_resolve_against_the_frames_document() {
+    let (port, paths) = spawn_server();
+    let page = page();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/net.html"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.settle(Duration::from_millis(1500));
+
+    let seen = paths_of(&paths);
+    for expected in ["/nested/api-fetch", "/nested/api-xhr"] {
+        assert!(
+            seen.iter().any(|path| path == expected),
+            "the frame did not ask for {expected}; saw {seen:?}"
+        );
+    }
+    for wrong in ["/api-fetch", "/api-xhr"] {
+        assert!(
+            !seen.iter().any(|path| path == wrong),
+            "a frame's script API resolved against its embedder: {seen:?}"
+        );
+    }
+}
+
+/// A `background-image` introduced by a sheet that lands *inside a frame* is
+/// fetched.
+///
+/// The scan's gate was `(dom.style_version(), <top frame>.style.version())`. An
+/// external `<link>` completing inside a frame bumps neither term — it bumps
+/// that frame's own engine — so the gate stayed shut and the image was never
+/// requested, however often the frame restyled.
+#[test]
+fn a_background_image_from_a_frames_own_sheet_is_fetched() {
+    let (port, paths) = spawn_server();
+    let page = page();
+    page.navigate(&format!("http://127.0.0.1:{port}/bg.html"), WaitUntil::Load)
+        .unwrap();
+    page.settle(Duration::from_millis(1500));
+
+    let seen = paths_of(&paths);
+    assert!(
+        seen.iter().any(|path| path == "/nested/bg.png"),
+        "the frame's background image was never fetched; saw {seen:?}"
+    );
+}
+
+/// A navigation queued through a *named* target carries the **initiator's**
+/// URL as its `Referer`, not the target frame's own previous one.
+///
+/// `drain_frame_navigations` derived the referrer from the frame it was about
+/// to navigate, so a `target="side"` link reported the side frame's last URL —
+/// self-referential after the first such click, and the wrong origin for any
+/// server doing referrer-based access control.
+#[test]
+fn a_named_target_carries_the_initiators_referrer() {
+    let (port, paths) = spawn_server();
+    let page = page();
+    let base = format!("http://127.0.0.1:{port}");
+    page.navigate(&format!("{base}/ref.html"), WaitUntil::Load)
+        .unwrap();
+    page.settle(Duration::from_millis(1500));
+
+    page.eval_to_string("document.getElementById('a').click(); 0")
+        .unwrap();
+    page.settle(Duration::from_millis(1500));
+
+    assert_eq!(
+        referer_of(&paths, "/landed.html").as_deref(),
+        Some(format!("{base}/ref.html").as_str()),
+        "the referrer came from the target frame, not from the document that \
+         initiated the navigation"
     );
 }

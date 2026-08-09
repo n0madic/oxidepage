@@ -24,12 +24,15 @@ fn init_str(cx: &BindCx<'_>, obj: &JsObject, key: &str) -> Option<String> {
         .and_then(|v| v.as_str().map(str::to_owned))
 }
 
-/// Resolves `raw` against the document base URL, mirroring `fetch`.
+/// Resolves `raw` against **this realm's** document URL, mirroring `fetch`.
+///
+/// The page's would send `new Request('/api')` from inside a frame at the
+/// embedder's origin (ADR-0035 D1).
 fn resolve_url(cx: &BindCx<'_>, raw: &str) -> Result<String, JsThrow> {
     match url::Url::parse(raw) {
         Ok(u) => Ok(u.to_string()),
         Err(_) => {
-            let doc_url = cx.state.dom.borrow().document_url().to_owned();
+            let doc_url = cx.state.frame.document_url();
             url::Url::parse(&doc_url)
                 .and_then(|base| base.join(raw))
                 .map(|u| u.to_string())

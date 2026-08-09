@@ -1706,8 +1706,13 @@ impl DomTree {
 
     /// The `<iframe>` whose `contentDocument` is `document`, if any.
     ///
-    /// A scan rather than a reverse index: a page holds tens of frames at most,
-    /// and a second map is a second thing to keep in step.
+    /// A reverse index, not a scan: the callers — `frameElement`,
+    /// `activeElement`'s walk out of a nested context, the cross-frame `:hover`
+    /// chain — ask this per node on hot paths, and a tree walk per question does
+    /// not belong there. The index is therefore a second thing to keep in step,
+    /// and [`Self::set_content_document`] is the **only** place it may be
+    /// written: a `content_document` assignment that bypassed it would leave
+    /// this answering with a stale owner, or none at all.
     #[must_use]
     pub fn owner_of_content_document(&self, document: NodeId) -> Option<NodeId> {
         self.content_document_owners.get(&document).copied()

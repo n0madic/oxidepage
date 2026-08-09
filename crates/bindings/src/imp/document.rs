@@ -19,7 +19,7 @@ use crate::imp::names::{NameKind, validate, validate_and_extract, validate_xml_n
 /// Compared against the *frame's* document rather than `dom.document()`: with
 /// nested browsing contexts there are several rendered documents (ADR-0035 D1),
 /// and a script in an iframe asking `document.readyState` means its own.
-fn is_page_document(cx: &BindCx<'_>, this: NodeId) -> bool {
+pub(crate) fn is_page_document(cx: &BindCx<'_>, this: NodeId) -> bool {
     this == cx.state.frame.document()
 }
 

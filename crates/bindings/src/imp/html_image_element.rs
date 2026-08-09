@@ -113,16 +113,22 @@ pub(crate) fn set_height(cx: &BindCx<'_>, this: NodeId, value: u32) -> Result<()
 }
 
 /// `new Image(width, height)` — the `[LegacyFactoryFunction]`. Per HTML it is
-/// `createElement("img")` on the *page* document plus the two optional content
-/// attributes; the element is returned detached, and `src` is what starts a
-/// load, so nothing is fetched here.
+/// `createElement("img")` on the **current global object's** associated
+/// Document plus the two optional content attributes; the element is returned
+/// detached, and `src` is what starts a load, so nothing is fetched here.
+///
+/// That document is this realm's, not the page's (ADR-0035 D1). Created in the
+/// top-level one, an `<img>` minted inside a frame resolved its `src` against
+/// the embedder's base URL and routed its `load` event into the embedder's
+/// world — so the preload idiom `new Image().src = …` fetched the wrong URL and
+/// reported nothing.
 pub(crate) fn factory_image(
     cx: &BindCx<'_>,
     _call: &HostCall,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<JsValue, JsThrow> {
-    let document = cx.state.dom.borrow().document();
+    let document = cx.state.frame.document();
     let img = crate::imp::document::create_element(cx, document, "img".to_owned(), JsValue::Null)?;
     if let Some(width) = width {
         set_u32(cx, img, "width", width);

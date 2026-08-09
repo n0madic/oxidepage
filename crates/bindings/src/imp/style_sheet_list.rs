@@ -8,12 +8,20 @@ use crate::cx::BindCx;
 
 /// The owner nodes of `document`'s author sheets, in document order.
 ///
-/// Only the page document has a stylist. A second document's `<style>` and
+/// Only a *rendered* document has a stylist. An inert document's `<style>` and
 /// `<link>` elements are never connected, so none of its sheets are registered
-/// anywhere — reporting the page's list for it would be a lie, so it gets an
+/// anywhere — reporting a stylist's list for it would be a lie, so it gets an
 /// honestly empty one.
+///
+/// The one compared against is **this realm's** document, not the page's:
+/// `cx.state.style` already *is* this browsing context's engine (ADR-0035 D1),
+/// so the page-wide comparison made `document.styleSheets` permanently empty
+/// inside every frame while its own sheets sat registered right there. A parent
+/// realm reading `iframe.contentDocument.styleSheets` still gets an empty list,
+/// because the engine it would have to consult is not this realm's — the same
+/// documented limit `document.location` has.
 fn sheet_owners(cx: &BindCx<'_>, document: NodeId) -> Vec<NodeId> {
-    if document != cx.state.dom.borrow().document() {
+    if document != cx.state.frame.document() {
         return Vec::new();
     }
     cx.state

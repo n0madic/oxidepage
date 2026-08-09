@@ -245,6 +245,20 @@ pub enum PendingNavigation {
         /// anything is *written*: that is still the operator's
         /// `DownloadBehavior`, which denies by default.
         download: Option<String>,
+        /// The document URL of the realm that *asked* for this navigation —
+        /// the `Referer` the request must carry.
+        ///
+        /// Recorded at queue time because it cannot be recovered at drain
+        /// time: a *named* target (`window.open(url, 'side')`, `<a
+        /// target="side">`, `<form target="side">`) queues onto a context the
+        /// initiator is not in (ADR-0035 D10), so the page would otherwise
+        /// derive the referrer from the **target's** own previous URL —
+        /// self-referential after the first such navigation, and the wrong
+        /// origin for anything doing referrer-based access control.
+        ///
+        /// `None` for an embedder-driven navigation, which has no initiating
+        /// document and therefore sends no referrer.
+        initiator: Option<String>,
     },
     /// `history.go(delta)`. The entry list lives here in the bindings, but a
     /// traversal may need a document load, so the page performs the move.
@@ -1133,6 +1147,14 @@ impl PageGlobal {
     /// two runs of the same page the moment two contexts shared a name. This
     /// reconstructs the tree from the parent links and orders siblings by slot,
     /// which is their creation order.
+    ///
+    /// **Depth-first**, so a context's own subtree precedes its next sibling —
+    /// that is what "tree order" means, and it is the order
+    /// [`Self::frame_by_name`] breaks a name collision by. A frontier walked
+    /// breadth-first (or, worse, LIFO, which is neither) put a child of the
+    /// first sibling after the second sibling's whole subtree, so which of two
+    /// contexts named `side` won depended on the shape of the tree rather than
+    /// on document order.
     fn frames_in_tree_order(&self) -> Vec<Rc<FrameShared>> {
         let mut all: Vec<Rc<FrameShared>> = self
             .frames_by_id
@@ -1142,15 +1164,27 @@ impl PageGlobal {
             .collect();
         all.sort_by_key(|state| (state.frame().index(), state.frame().generation()));
         let mut out: Vec<Rc<FrameShared>> = Vec::with_capacity(all.len());
-        let mut frontier: Vec<Option<FrameId>> = vec![None];
-        // Bounded by the frame count: each pass appends at least one context or
-        // the frontier empties, and a context is appended exactly once.
-        while let Some(parent) = frontier.pop() {
-            for state in &all {
-                if state.parent_frame() == parent {
-                    out.push(Rc::clone(state));
-                    frontier.push(Some(state.frame()));
-                }
+        // An explicit stack rather than recursion. Children are pushed in
+        // reverse so the first sibling pops first, and the "already emitted"
+        // guard makes a parent link that formed a cycle terminate instead of
+        // spinning — each context is emitted at most once, so the pushes are
+        // bounded by the context count.
+        let children_of = |parent: Option<FrameId>| -> Vec<Rc<FrameShared>> {
+            all.iter()
+                .filter(|state| state.parent_frame() == parent)
+                .cloned()
+                .collect()
+        };
+        let mut stack: Vec<Rc<FrameShared>> = children_of(None);
+        stack.reverse();
+        while let Some(state) = stack.pop() {
+            if out.iter().any(|seen| seen.frame() == state.frame()) {
+                continue;
+            }
+            let children = children_of(Some(state.frame()));
+            out.push(state);
+            for child in children.into_iter().rev() {
+                stack.push(child);
             }
         }
         // A context whose parent link names a frame already gone would be
@@ -1902,6 +1936,22 @@ impl FrameShared {
     #[must_use]
     pub fn document(&self) -> NodeId {
         self.document.get()
+    }
+
+    /// This browsing context's document URL, owned.
+    ///
+    /// The base every realm-scoped resolution starts from — `fetch`, XHR,
+    /// `new Request`, a form's `action`, `document.cookie`, `pushState`. Reach
+    /// for this rather than `dom.document_url()` for the same reason
+    /// [`Self::document`] exists: the page's URL is the *top* context's, and
+    /// resolving a frame's relative URL against it aimed the request at the
+    /// embedder's origin (ADR-0035 D1).
+    #[must_use]
+    pub fn document_url(&self) -> String {
+        self.dom
+            .borrow()
+            .document_url_of(self.document.get())
+            .to_owned()
     }
 
     /// This browsing context's name — HTML's `window.name`, seeded from the

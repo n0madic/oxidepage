@@ -171,7 +171,8 @@ pub(crate) fn open(
             "XMLHttpRequest.open: synchronous mode is not supported",
         ));
     }
-    let doc_url = cx.state.dom.borrow().document_url().to_owned();
+    // This realm's document URL, not the page's — see `FrameShared::document_url`.
+    let doc_url = cx.state.frame.document_url();
     let absolute = match url::Url::parse(&url) {
         Ok(u) => u.to_string(),
         Err(_) => url::Url::parse(&doc_url)
@@ -305,7 +306,9 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
     };
     let body_len = body_bytes.as_ref().map_or(0.0, |b| b.len() as f64);
 
-    let doc_url = cx.state.dom.borrow().document_url().to_owned();
+    // The initiating *realm's* origin: a frame's request is its own origin's,
+    // and reporting the embedder's made the CORS decision the wrong one.
+    let doc_url = cx.state.frame.document_url();
     let initiator_origin = url::Url::parse(&doc_url)
         .ok()
         .map(|u| u.origin().ascii_serialization());

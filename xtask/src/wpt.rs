@@ -786,11 +786,34 @@ fn settle_budget(vendor: &Path, html_rel: &str) -> Duration {
         return SETTLE_NORMAL;
     };
     let long = source.split('<').any(|tag| {
-        tag.starts_with("meta")
+        is_tag(tag, "meta")
             && extract_attr(tag, "name").as_deref() == Some("timeout")
             && extract_attr(tag, "content").as_deref() == Some("long")
     });
     if long { SETTLE_LONG } else { SETTLE_NORMAL }
+}
+
+/// Whether the text after a `<` opens the element `name`.
+///
+/// A prefix test is not enough in either direction. HTML tag names are ASCII
+/// case-insensitive and WPT files are not normalized, so `<META name=timeout
+/// content=long>` must match — a file that declared itself slow in uppercase
+/// silently got the 12s budget and reported a partial `TIMEOUT` instead of its
+/// results. And the name has to *end*: `starts_with("meta")` also matched
+/// `<metadata …>`, which is a different element entirely.
+fn is_tag(tag: &str, name: &str) -> bool {
+    let Some(rest) = tag.get(..name.len()) else {
+        return false;
+    };
+    if !rest.eq_ignore_ascii_case(name) {
+        return false;
+    }
+    // The name is delimited by whitespace, the tag's own `>`, or a self-closing
+    // `/`. Nothing at all (a truncated file) is not a tag.
+    match tag[name.len()..].chars().next() {
+        Some(c) => c.is_ascii_whitespace() || c == '>' || c == '/',
+        None => false,
+    }
 }
 
 fn print_output(output: Option<String>) -> ExitCode {
@@ -940,5 +963,22 @@ mod tests {
             extract_attr("<script src=raw.js>", "src").as_deref(),
             Some("raw.js")
         );
+    }
+
+    /// The `<meta name=timeout content=long>` detector must not answer on a
+    /// tag name it merely prefixes, and must answer whatever the case.
+    ///
+    /// A prefix test called `<metadata>` a `<meta>`, and a case-sensitive one
+    /// missed `<META>` — WPT files are not normalized, and a slow file that got
+    /// the 12s budget reports a partial `TIMEOUT` instead of its results.
+    #[test]
+    fn is_tag_ends_the_name_and_ignores_case() {
+        assert!(is_tag("meta name=timeout>", "meta"));
+        assert!(is_tag("META name=timeout>", "meta"));
+        assert!(is_tag("meta>", "meta"));
+        assert!(is_tag("meta/>", "meta"));
+        assert!(!is_tag("metadata name=timeout>", "meta"));
+        assert!(!is_tag("met", "meta"));
+        assert!(!is_tag("meta", "meta"));
     }
 }

@@ -52,7 +52,15 @@ pub(crate) fn default_value(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsT
 pub(crate) fn form_action(cx: &BindCx<'_>, this: NodeId) -> Result<String, JsThrow> {
     let raw = super::reflect::reflect_string(cx, this, "formaction");
     if raw.trim().is_empty() {
-        return Ok(cx.state.dom.borrow().document_url().to_owned());
+        // The URL of the document the *button* is in, not the page's: a form
+        // inside a frame submits to the frame's document, and reporting the
+        // embedder's URL both lied and disagreed with where the submission
+        // went (ADR-0035 D1).
+        let dom = cx.state.dom.borrow();
+        let doc = dom
+            .containing_document(this)
+            .unwrap_or_else(|| dom.document());
+        return Ok(dom.document_url_of(doc).to_owned());
     }
     Ok(super::reflect::reflect_url(cx, this, "formaction"))
 }

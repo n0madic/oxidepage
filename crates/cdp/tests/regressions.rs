@@ -159,11 +159,14 @@ fn create_target_answers_promptly_for_a_page_that_waits_for_the_debugger() {
     let harness = Harness::start();
     let mut client = harness.client();
 
-    // With `waitForDebuggerOnStart` the page is created **suspended**, and an
-    // ordinary job on a suspended page is deferred until `resume()` — which the
-    // driver can only send after this command answers. Probing the page's URL
-    // here was therefore a deadlock that resolved only when the 30 s command
-    // timeout expired, well past any driver's own timeout.
+    // With `waitForDebuggerOnStart` the page is created **suspended**. Probing
+    // the page's URL from inside this command was a deadlock that resolved only
+    // when the 30 s command timeout expired, well past any driver's own: back
+    // then an ordinary job on a suspended page was deferred until `resume()`,
+    // which the driver can only send after this command answers. ADR-0034 D3
+    // has since taken the other half of that fix — a suspended page serves the
+    // driver's jobs, and only its own sources are frozen — so both ends of the
+    // deadlock are gone. This still guards the command's promptness.
     client.call(
         "Target.setAutoAttach",
         json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),

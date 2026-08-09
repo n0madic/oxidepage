@@ -51,7 +51,7 @@ use oxidepage_js::{
     JsEngine, JsError, JsRealm, JsValue, ModuleSource, PromiseState, QuickJsEngine, QuickJsRealm,
     RealmOptions,
 };
-use oxidepage_layout::{LayoutEngine, PaintStamp};
+use oxidepage_layout::LayoutEngine;
 use oxidepage_net::{FetchOutcome, NetEvent, NetRequest, NetService, decode_charset};
 use oxidepage_style::{BlockingImportLoader, CssFetcher, StyleEngine};
 pub use remote::{
@@ -237,6 +237,11 @@ struct LoadKind {
     /// `<a download>`'s value — `Some` makes the response a download whatever
     /// it says it is. See [`Page::take_download`].
     download: Option<String>,
+    /// The initiating document's URL, carried from
+    /// [`PendingNavigation::Load::initiator`]. `None` falls back to the
+    /// navigating context's own current URL, which is right for everything
+    /// except a *named* target.
+    initiator: Option<String>,
 }
 
 impl LoadKind {
@@ -246,6 +251,7 @@ impl LoadKind {
             body: None,
             reload: false,
             download: None,
+            initiator: None,
         }
     }
 
@@ -2150,6 +2156,8 @@ impl Page {
                 body: None,
                 reload: false,
                 download: None,
+                // Embedder-driven: no initiating document, so no referrer.
+                initiator: None,
             },
             wait_until,
             /* embedder */ true,
@@ -2169,6 +2177,7 @@ impl Page {
                 body: None,
                 reload: true,
                 download: None,
+                initiator: None,
             },
             wait_until,
             /* embedder */ true,
@@ -2252,13 +2261,17 @@ impl Page {
     fn ensure_init_script_worlds(&self, frame: oxidepage_base::FrameId) {
         let names: Vec<String> = {
             let scripts = self.state.frame.global.init_scripts.borrow();
-            let mut names: Vec<String> = scripts
+            // Registration order, deduplicated. `Vec::dedup` alone collapses
+            // only *consecutive* duplicates, so `["util", "probe", "util"]`
+            // came out unchanged; a set keeps the first occurrence of each name
+            // without disturbing the order the driver registered them in.
+            let mut seen = std::collections::HashSet::new();
+            scripts
                 .iter()
                 .filter_map(|script| script.world.clone())
                 .filter(|name| !name.is_empty())
-                .collect();
-            names.dedup();
-            names
+                .filter(|name| seen.insert(name.clone()))
+                .collect()
         };
         for name in names {
             if let Err(error) = self.create_isolated_world_in(frame, &name) {
@@ -2344,11 +2357,6 @@ impl Page {
         self.state.clear_pending_navigations()
     }
 
-    /// The session history, as an owned snapshot.
-    ///
-    /// Owned rather than borrowed because the caller is on another thread:
-    /// `HistoryEntry` holds a `JsValue`, which is `!Send` and must not leave
-    /// the realm's thread. Only the URL crosses.
     /// A snapshot of every browsing context of this page, **parents before
     /// their children** (ADR-0035).
     ///
@@ -2387,6 +2395,13 @@ impl Page {
         self.node_handle(owner).ok()
     }
 
+    /// The top-level context's session history, as an owned snapshot.
+    ///
+    /// Owned rather than borrowed because the caller is on another thread: the
+    /// entry list lives behind a `RefCell` on the page thread's `FrameShared`,
+    /// and a `Ref` into it could not cross. Only the URLs do — a driver's
+    /// `Page.getNavigationHistory` needs nothing else, and the serialized
+    /// `pushState` payload is this page's business.
     #[must_use]
     pub fn navigation_history(&self) -> NavigationHistory {
         let history = self.state.history();
@@ -2900,6 +2915,7 @@ impl Page {
                     body,
                     reload,
                     download,
+                    initiator,
                 } => {
                     let target = if replace {
                         HistoryTarget::Replace
@@ -2910,6 +2926,7 @@ impl Page {
                         body,
                         reload,
                         download,
+                        initiator,
                     };
                     // A fragment-only change, a form POST and a reload are three
                     // different things and only the first stays in the document.
@@ -3087,11 +3104,18 @@ impl Page {
             body,
             reload,
             download,
+            initiator,
         } = load;
         self.record_navigation(NavigationEventKind::Started, url, None);
-        // The referrer of the new document is the URL of the one it left. An
-        // embedder-driven navigation has no predecessor, so it sends none.
-        let referrer = (!embedder).then(|| self.state.dom.borrow().document_url().to_owned());
+        // The referrer is the URL of the document that *asked* for the
+        // navigation. Usually that is the one being left, but a named target
+        // (`window.open(url, '_top')` from a frame) is queued on a context the
+        // initiator is not in, so the recorded initiator wins where there is
+        // one. An embedder-driven navigation has no initiating document, so it
+        // sends none.
+        let referrer = (!embedder).then(|| {
+            initiator.unwrap_or_else(|| self.state.dom.borrow().document_url().to_owned())
+        });
         let request = match body {
             Some(body) => NetRequest::form_navigation(
                 url.to_owned(),
@@ -3927,6 +3951,33 @@ impl Page {
         let dom = self.state.dom.borrow();
         dom.containing_document(node)
             .unwrap_or_else(|| dom.document())
+    }
+
+    /// One number covering the stylesheet state of **every** browsing context.
+    ///
+    /// A **hash of `(frame, version)` pairs**, not a sum. A sum is not monotonic
+    /// here — a frame that navigates gets a fresh engine whose version restarts,
+    /// and one that is discarded removes its term — so two different states can
+    /// add up alike, and the collision skips a scan outright rather than merely
+    /// delaying it.
+    ///
+    /// Shared by every page-wide resource scan gated on styles
+    /// (`@font-face`, `background-image`, the lazy-image visibility walk): each
+    /// of them looks at all frames, so each needs the same key, and two
+    /// hand-rolled copies is how one of them silently keeps gating on the top
+    /// frame alone (ADR-0035 D1).
+    fn frames_style_hash(&self) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for frame in self.frames.pre_order() {
+            for word in [
+                u64::from(frame.id().index()),
+                frame.shared().style.borrow().version(),
+            ] {
+                hash ^= word;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        hash
     }
 
     /// Resolves `rel` against the base URL of the document `node` is in.
@@ -5066,6 +5117,19 @@ impl Page {
     fn drain_frame_navigations(&self) -> bool {
         let mut progressed = false;
         for frame in self.frames.pre_order() {
+            // The list is a snapshot, and a navigation performed inside this
+            // loop retires the whole subtree beneath the context it commits
+            // (`load_frame_document` → `detach_below`). So a frame this `Vec`
+            // still holds by `Rc` may already be gone by the time we reach it —
+            // parent and child both queueing in one task batch is enough. The
+            // re-check must come *first*: reading `frame.document()` for the
+            // referrer panics on the freed id, and when a JS wrapper pinned that
+            // document instead there is no panic at all — the load simply
+            // commits into a context no longer in the table, adding a rendered
+            // root nothing removes and a world `release_frame` never reclaims.
+            if self.frames.get(frame.id()).is_none() {
+                continue;
+            }
             let Some(owner) = frame.owner() else {
                 continue; // the top-level frame has its own drain
             };
@@ -5073,7 +5137,12 @@ impl Page {
                 continue;
             };
             progressed = true;
-            let referrer = self
+            // This context's *own* current URL. It is the right answer for the
+            // two arms that are not a fetch — `ReplaceDocument` keeps the URL
+            // (`document.open()` does not move it) and a `javascript:` URL is
+            // evaluated with this document as its base. Only `Load` needs the
+            // initiator, and it carries its own.
+            let current = self
                 .state
                 .dom
                 .borrow()
@@ -5084,6 +5153,7 @@ impl Page {
                     url,
                     body,
                     download,
+                    initiator,
                     ..
                 } => {
                     if download.is_some() {
@@ -5094,14 +5164,20 @@ impl Page {
                         ));
                         continue;
                     }
+                    // The initiating document, not this frame's own previous
+                    // URL: a `target="side"` link or form queues here from
+                    // another context, and borrowing the target's URL made the
+                    // `Referer` self-referential after the first such
+                    // navigation (ADR-0035 D10).
+                    let referrer = initiator.unwrap_or_else(|| current.clone());
                     self.load_frame_url(&frame, owner, &url, &referrer, body);
                 }
                 oxidepage_bindings::PendingNavigation::ReplaceDocument { html, .. } => {
-                    self.load_frame_document(&frame, owner, &html, &referrer);
+                    self.load_frame_document(&frame, owner, &html, &current);
                 }
                 oxidepage_bindings::PendingNavigation::JavaScriptUrl { source } => {
                     let world = frame.shared().default_world();
-                    self.eval_classic_in(frame.shared(), world, &source, &referrer, None);
+                    self.eval_classic_in(frame.shared(), world, &source, &current, None);
                 }
                 oxidepage_bindings::PendingNavigation::Traverse { delta } => {
                     // A frame's history is replace-only (ADR-0035 D10), so
@@ -5852,7 +5928,6 @@ impl Page {
 
         let visible: Vec<(NodeId, String)> = {
             let dom = self.state.dom.borrow();
-            let layout = self.state.layout.borrow();
             let mut deferred = self.deferred_images.borrow_mut();
             // Nodes wait here indefinitely, so unlike a drain queue this set
             // outlives removals: an SPA that drops an `<img>` leaves a freed id
@@ -5860,12 +5935,28 @@ impl Page {
             // guard IntersectionObserver keeps over its targets.
             deferred.retain(|node| dom.get(*node).is_some());
 
-            let viewport = layout.viewport();
             let mut visible = Vec::new();
             for &node in deferred.iter() {
                 if !dom.node(node).is_connected() {
                     continue;
                 }
+                // The engine of the context the image is *in*. The deferred set
+                // is page-wide but a frame has its own box tree and its own
+                // viewport, so hit-testing a frame's node against the page's
+                // engine found no box at all and every `loading="lazy"` image
+                // inside a frame stayed deferred forever (ADR-0035 D1/D6).
+                //
+                // A frame's own viewport is the whole test: an image is
+                // "visible" when it is inside the frame's scroll position, even
+                // if the `<iframe>` itself is below the page's fold. Composing
+                // the two viewports would need the frame's offset in the page,
+                // which nothing here has; over-fetching one frame's first screen
+                // is the honest v1 and errs towards a complete render.
+                let Some(frame) = self.frames.of_node(&dom, node) else {
+                    continue;
+                };
+                let layout = frame.shared().layout.borrow();
+                let viewport = layout.viewport();
                 // No box (`display: none`) — no load, exactly as a browser does.
                 // The node stays queued: revealing it restyles the document,
                 // which reopens the gate.
@@ -5911,14 +6002,25 @@ impl Page {
 
     /// Every input to the visibility scan, read without a reflow.
     fn lazy_scan_gate(&self) -> LazyScanGate {
+        let frames_style = self.frames_style_hash();
+        let mut frames_paint: u64 = 0xcbf2_9ce4_8422_2325;
+        for frame in self.frames.pre_order() {
+            let layout = frame.shared().layout.borrow();
+            for word in [
+                u64::from(frame.id().index()),
+                layout.paint_stamp().hash_value(),
+                layout.document_scroll_version(),
+            ] {
+                frames_paint ^= word;
+                frames_paint = frames_paint.wrapping_mul(0x100_0000_01b3);
+            }
+        }
         let dom = self.state.dom.borrow();
-        let layout = self.state.layout.borrow();
         LazyScanGate {
             dom_style_version: dom.style_version(),
             dom_structure_version: dom.structure_version(),
-            style_version: self.state.style.borrow().version(),
-            paint: layout.paint_stamp(),
-            document_scroll_version: layout.document_scroll_version(),
+            frames_style,
+            frames_paint,
         }
     }
 
@@ -5997,10 +6099,22 @@ impl Page {
     /// an external `<link>`/`@import` completing, or a CSSOM `insertRule` — bumps
     /// only `style.version()` (the same trap `start_font_face_loads` documents).
     /// Gating on either alone silently drops one of the two sources.
+    ///
+    /// The style term covers **every** browsing context, not just the top one.
+    /// A sheet landing inside an `<iframe>` bumps that frame's engine and
+    /// nothing else, so the top-level counter alone left the gate shut and the
+    /// `background-image` that sheet introduced was never fetched, however often
+    /// the frame restyled (ADR-0035 D1). Unlike `start_font_face_loads` the DOM
+    /// counter stays in the key, because `@font-face` comes from sheets alone
+    /// while a background image comes from the cascade — dropping it would lose
+    /// the class-toggle source above. The per-frame term is a **hash** of
+    /// `(frame, version)` pairs for the reason that function spells out: a sum
+    /// is not monotonic across a frame navigating or being discarded, and a
+    /// collision there skips a scan outright.
     fn start_background_image_loads(&self) {
         let version = (
             self.state.dom.borrow().style_version(),
-            self.state.style.borrow().version(),
+            self.frames_style_hash(),
         );
         if self.last_bg_scan.get() == version {
             return;
@@ -6245,24 +6359,7 @@ impl Page {
         // rules, and gating on the top frame's engine alone left them unfetched
         // however often the frame restyled (ADR-0035 D1).
         //
-        // A **hash of `(frame, version)` pairs**, not a sum. A sum is not
-        // monotonic here — a frame that navigates gets a fresh engine whose
-        // version restarts, and one that is discarded removes its term — so two
-        // different states can add up alike, and the collision skips a scan
-        // outright rather than merely delaying it.
-        let version = {
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for frame in self.frames.pre_order() {
-                for word in [
-                    u64::from(frame.id().index()),
-                    frame.shared().style.borrow().version(),
-                ] {
-                    hash ^= word;
-                    hash = hash.wrapping_mul(0x100_0000_01b3);
-                }
-            }
-            hash
-        };
+        let version = self.frames_style_hash();
         if self.last_fontface_scan.get() == version {
             return;
         }
@@ -7909,13 +8006,20 @@ impl Page {
 }
 
 /// Every input to [`Page::start_visible_image_loads`]'s gate, read live.
+///
+/// The two style/paint terms are folded hashes over **every** browsing context,
+/// not the top one's values: the walk they gate hit-tests each deferred image
+/// against its own frame's engine, so scrolling or restyling a frame has to
+/// reopen the gate the same way scrolling the page does (ADR-0035 D1).
 #[derive(Clone, Copy, PartialEq)]
 struct LazyScanGate {
     dom_style_version: u64,
     dom_structure_version: u64,
-    style_version: u64,
-    paint: PaintStamp,
-    document_scroll_version: u64,
+    /// [`Page::frames_style_hash`] — every context's stylesheet version.
+    frames_style: u64,
+    /// Every context's [`oxidepage_layout::PaintStamp`] and document-scroll
+    /// version, folded.
+    frames_paint: u64,
 }
 
 /// Does `rect` (viewport-relative, as `bounding_client_rect` returns it) reach

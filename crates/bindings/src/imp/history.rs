@@ -1,4 +1,10 @@
-//! `History`: the session history of the page's one browsing context.
+//! `History`: the session history of **this realm's** browsing context.
+//!
+//! Every read and write here is scoped to `cx.state.frame` — the context the
+//! calling realm belongs to, not the page's top-level one. A nested context has
+//! its own entry list and its own document URL (ADR-0035 D1/D10), and reading
+//! the page's instead let a script inside an `<iframe>` rewrite its embedder's
+//! URL.
 //!
 //! The entry list lives in [`crate::state::SessionHistory`]; `this` here is
 //! only a brand token. Two halves, with different rules:
@@ -173,7 +179,13 @@ fn shared_history_push(
     replace: bool,
 ) -> Result<(), JsThrow> {
     let method = if replace { "replaceState" } else { "pushState" };
-    let current = cx.state.dom.borrow().document_url().to_owned();
+    // **This realm's** document, not the page's. `pushState` moves the URL of
+    // the browsing context that called it; reading `dom.document_url()` made a
+    // script inside a frame resolve against — and then overwrite — its
+    // embedder's URL, and made the same-origin check compare against the wrong
+    // origin as well (ADR-0035 D1).
+    let document = cx.state.frame.document();
+    let current = cx.state.dom.borrow().document_url_of(document).to_owned();
     let target = match url {
         None => current.clone(),
         Some(url) => {
@@ -205,7 +217,10 @@ fn shared_history_push(
     // JSON shape; recorded as a deliberate limit.
     let serialized = serialize_state(cx, &cloned)?;
 
-    cx.state.dom.borrow_mut().set_document_url(target.clone());
+    cx.state
+        .dom
+        .borrow_mut()
+        .set_document_url_of(document, target.clone());
     let mut history = cx.state.frame.history.borrow_mut();
     let seq = history.document_seq();
     if replace {

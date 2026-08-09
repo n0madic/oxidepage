@@ -461,6 +461,9 @@ fn follow_hyperlink(cx: &BindCx<'_>, node: NodeId) {
         body: None,
         reload: false,
         download,
+        // The document the link is in, which for `target="side"` is not the
+        // context the navigation is queued on.
+        initiator: Some(cx.state.frame.document_url()),
     };
     let target = target.unwrap_or_default();
     if let Some(context) = crate::window_open::resolve_target(&cx.state.frame, &target) {
@@ -640,14 +643,21 @@ pub(crate) fn active_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<Nod
         dom.focused().and_then(|focused| {
             // Walk out of the focused node's document until one of them is
             // `this`; the element to report is whatever we were standing on.
+            //
+            // Bounded, like every other frame-crossing walk here: a cycle is
+            // impossible by construction — `content_document_owners` is an index
+            // the page maintains — but this runs on the page thread with the
+            // `dom` borrow held, so an unbounded loop over a corrupted index
+            // would hang the process rather than answer wrongly.
             let mut node = focused;
-            loop {
+            for _ in 0..=crate::state::MAX_FRAME_DESCENT {
                 match dom.containing_document(node) {
                     Some(doc) if doc == this => return Some(node),
                     Some(doc) => node = dom.owner_of_content_document(doc)?,
                     None => return None,
                 }
             }
+            None
         })
     };
     // The borrow must be released: `html_child_of_root` takes its own.
