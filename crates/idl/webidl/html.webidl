@@ -199,6 +199,7 @@ interface HTMLIFrameElement : HTMLElement {
   [CEReactions] attribute USVString src;
   [CEReactions] attribute DOMString srcdoc;
   [CEReactions] attribute DOMString name;
+  [CEReactions] attribute DOMString sandbox;
   [CEReactions] attribute DOMString width;
   [CEReactions] attribute DOMString height;
   [CEReactions] attribute DOMString referrerPolicy;

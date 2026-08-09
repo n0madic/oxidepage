@@ -16,6 +16,11 @@ use crate::imp::reflect::{string_reflector, url_reflector};
 url_reflector!(src, set_src, "src");
 string_reflector!(srcdoc, set_srcdoc, "srcdoc");
 string_reflector!(name, set_name, "name");
+// Reflected as a string rather than a `DOMTokenList`: only `allow-scripts` and
+// `allow-same-origin` are enforced (ADR-0035 D11), and a `sandbox.add(...)`
+// that appeared to grant `allow-forms` would be the fake P6 forbids. The
+// attribute round-trips exactly, so a page can read what it wrote.
+string_reflector!(sandbox, set_sandbox, "sandbox");
 string_reflector!(width, set_width, "width");
 string_reflector!(height, set_height, "height");
 string_reflector!(referrer_policy, set_referrer_policy, "referrerpolicy");
@@ -27,14 +32,18 @@ string_reflector!(referrer_policy, set_referrer_policy, "referrerpolicy");
 /// mutate — the wrapper it gets is minted in the accessing realm, which is what
 /// makes it work without any value crossing a runtime boundary (ADR-0035 D4).
 pub(crate) fn content_document(cx: &BindCx<'_>, this: NodeId) -> Result<Option<NodeId>, JsThrow> {
-    let dom = cx.state.dom.borrow();
-    let Some(document) = dom.content_document(this) else {
+    let document = cx.state.dom.borrow().content_document(this);
+    let Some(document) = document else {
         return Ok(None);
     };
-    // HTML returns null rather than throwing for a cross-origin frame.
-    let here = dom.document_url_of(cx.state.frame.document());
-    let there = dom.document_url_of(document);
-    Ok(same_origin(here, there).then_some(document))
+    // HTML returns null rather than throwing for a frame this realm may not
+    // reach. `same_origin_frame` is the one place that decides, so a sandbox
+    // without `allow-same-origin` — an opaque origin — is refused here too
+    // (ADR-0035 D11) rather than only by the members that ask it separately.
+    let Some(state) = cx.state.frame.global.frame_of_document(document) else {
+        return Ok(None);
+    };
+    Ok(cx.same_origin_frame(&state).then_some(document))
 }
 
 /// The frame's `WindowProxy`, or `null` when there is no browsing context.

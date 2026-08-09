@@ -21,6 +21,11 @@ fn s(page: &oxidepage_page::Page, expr: &str) -> String {
     page.eval_to_string(expr).unwrap()
 }
 
+/// How many documents the page is rendering, top-level one included.
+fn rendered_roots_count(page: &oxidepage_page::Page) -> usize {
+    page.dom().rendered_roots().count()
+}
+
 #[test]
 fn the_top_level_context_is_its_own_parent_and_top() {
     let page = page("<!DOCTYPE html><body></body>");
@@ -208,4 +213,91 @@ fn a_detached_frames_proxy_reports_closed() {
         .unwrap();
     page.settle(Duration::from_millis(300));
     assert_eq!(s(&page, "window.w.closed"), "true");
+}
+
+/// `sandbox` without `allow-scripts` runs no script in the frame — and says so
+/// rather than leaving a page to wonder why its frame does nothing
+/// (ADR-0035 D11).
+///
+/// `allow-same-origin` is granted so the embedder can *see* the result; the two
+/// tokens are independent, and this is the one that is being withheld.
+#[test]
+fn a_sandboxed_frame_without_allow_scripts_runs_none() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' sandbox='allow-same-origin' srcdoc='<p id=p>x</p><script>\
+           document.getElementById(\"p\").textContent = \"ran\";\
+         </script>'></iframe></body>",
+    );
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument.getElementById('p').textContent"
+        ),
+        "x",
+        "the script must not have run"
+    );
+}
+
+/// `allow-scripts` gives it back.
+#[test]
+fn allow_scripts_lets_a_sandboxed_frame_run() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' sandbox='allow-scripts allow-same-origin' \
+          srcdoc='<p id=p>x</p><script>\
+           document.getElementById(\"p\").textContent = \"ran\";\
+         </script>'></iframe></body>",
+    );
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument.getElementById('p').textContent"
+        ),
+        "ran"
+    );
+}
+
+/// Without `allow-same-origin` the frame has an **opaque** origin, so its
+/// embedder cannot reach into it — `contentDocument` is `null`, as in a
+/// browser.
+#[test]
+fn a_sandboxed_frame_gets_an_opaque_origin() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='opaque' sandbox srcdoc='<p>x</p>'></iframe>\
+         <iframe id='same' sandbox='allow-same-origin' srcdoc='<p>x</p>'></iframe>\
+         </body>",
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('opaque').contentDocument"),
+        "null",
+        "an opaque-origin frame is not reachable from its embedder"
+    );
+    assert_ne!(
+        s(&page, "document.getElementById('same').contentDocument"),
+        "null",
+        "allow-same-origin gives access back"
+    );
+    // The context still exists and still rendered — only reaching into it is
+    // refused.
+    assert_eq!(rendered_roots_count(&page), 3);
+}
+
+/// The attribute round-trips exactly. It is a string, not a `DOMTokenList`:
+/// only two tokens are enforced, and a `sandbox.add('allow-forms')` that looked
+/// like it granted something would be the fake P6 forbids.
+#[test]
+fn the_sandbox_attribute_reflects() {
+    let page = page(
+        "<!DOCTYPE html><body><iframe id='f' sandbox='allow-scripts allow-forms'></iframe></body>",
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('f').sandbox"),
+        "allow-scripts allow-forms"
+    );
+    assert_eq!(
+        s(&page, "typeof document.getElementById('f').sandbox"),
+        "string"
+    );
 }

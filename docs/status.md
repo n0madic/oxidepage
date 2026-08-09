@@ -747,12 +747,16 @@ or transferables, and no `MessageChannel`. An object reached across a frame
 boundary carries the *accessing* realm's prototypes, and a child's globals
 (`contentWindow.myVar`) are unreachable — both deliberate (ADR-0035 D4).
 `window.name` and named frame targets are absent, as is indexed access
-(`window[0]`). Events do not cross a document boundary (as the spec says) and
-neither does input:
-clicking through an `<iframe>` reaches the element, not the content inside it,
-and `:hover` stops at the frame. `sandbox`, `allow` (Permissions Policy) and
-`loading="lazy"` are not implemented on `<iframe>`. Frame history is not
-implemented at all, so `history` inside a frame addresses nothing. Inside a
+(`window[0]`). `sandbox` enforces **`allow-scripts` and `allow-same-origin`
+only** — the rest of HTML's tokens are not implemented and the attribute
+reflects as a string rather than a `DOMTokenList`, so nothing can appear to
+grant one of them. Frame session history is absent, so `history` inside a frame
+addresses nothing. Events do not cross a document boundary (as the spec says);
+**input does** — a click over an `<iframe>` presses what the frame is showing —
+but
+`:hover` still stops at the `<iframe>` rather than crossing into it, and
+`document.activeElement` is not derived per document. `allow` (Permissions Policy) and `loading="lazy"` are not
+implemented on `<iframe>`. Inside a
 frame, `async`/`defer` scripts run where they appear rather than being
 reordered, and a module script is **refused with a diagnostic** rather than run:
 the loader is per realm, and a half-wired module graph is worse than an absent

@@ -1,6 +1,6 @@
 # ADR-0035: Nested browsing contexts — one arena, N rendered documents
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-09
 - Builds on: ADR-0017 (real `Document` nodes), ADR-0022 (navigation), ADR-0027
   (browser contexts), ADR-0030 (CDP), ADR-0033 (isolated worlds), ADR-0034
@@ -216,6 +216,11 @@ a browser says false; and a child's globals (`contentWindow.myVar`) are not
 reachable. Neither touches automation — a driver's `frame.evaluate()` runs
 through CDP in the frame's own realm.
 
+**Amended after implementation.** `contentDocument` returns `null` for a frame
+this realm may not reach, rather than throwing — that is what browsers do, and
+one predicate (`same_origin_frame`) decides it for every member, so the sandbox
+rule below lands there too rather than being re-derived per member.
+
 **The alternative is a real fork in the road, and it is closed.** Making
 `contentWindow` the child's actual global means the two realms share a
 `Runtime`, because `Persistent::restore` compares runtime pointers and would
@@ -304,6 +309,9 @@ through `PaintOptions`. At the iframe box, `paint_replaced` emits the child's
 items between a `PushClip` on the content box and a `PushLayer` translating by
 the content origin less the child's scroll.
 
+**Amended: `ResourceTable::merge` needs no id rebasing at all**, because the
+store below became page-wide. What follows is why that decision was taken.
+
 Two details are load-bearing. `ImageId` is minted by an `ImageStore`'s own
 counter, and a store per frame would mean two frames both minting `1` — so
 merging resource tables would have to rebase every image id, and getting that
@@ -341,9 +349,19 @@ into pixels in the display-list goldens, so it was rejected.
 
 ### D8 — Events stop at a document boundary; hit testing does not
 
-An event's propagation path ends at its own frame's `Window`, per spec; `composed`
-crosses shadow boundaries and does not change this. `EventTargetKey::Window` is
-a unit variant today and becomes `Window(FrameId)`.
+An event's propagation path ends at its own frame's `Window`, per spec;
+`composed` crosses shadow boundaries and does not change this.
+
+**Amended: `EventTargetKey::Window` stays a unit variant.** This ADR predicted
+`Window(FrameId)`; the listener registry turned out to be per *world*, and a
+frame has its own worlds, so entering the target's world already disambiguates.
+The frame in the key would have been ceremony.
+
+Input is the other half, and it has a second step that is easy to miss: finding
+the right node is not enough. A hit that crossed into a frame must be
+**dispatched in that frame's world** — firing it in the embedder's reaches a
+realm whose listeners are not the ones the page registered, so the event is
+found, dispatched, and silently never arrives.
 
 Hit testing does cross. `hit_box` already threads a point in each box's own
 space with inverse transforms applied, so the crossing is a subtraction of the
@@ -393,9 +411,16 @@ limit, not left ambiguous.
 
 ### D11 — `sandbox` implements the two tokens that mean something here
 
-Without `allow-scripts`, the frame runs no script. Without `allow-same-origin`,
-the frame gets an opaque origin, so `contentDocument` throws `SecurityError`.
+Without `allow-scripts`, the frame runs no script — reported once rather than
+silently, so a page whose frame does nothing can find out why. Without
+`allow-same-origin`, the frame gets an opaque origin, so `contentDocument` is
+`null` and every cross-frame member refuses. (This ADR first said
+`SecurityError`; browsers answer `null`, and matching them costs nothing.)
 Those two are enforceable and are enforced.
+
+`sandbox` reflects as a **string**, not a `DOMTokenList`: a `sandbox.add(
+"allow-forms")` that appeared to grant something would be exactly the fake the
+paragraph below refuses.
 
 The rest — `allow-forms`, `allow-popups`, `allow-top-navigation`,
 `allow-modals`, `allow-downloads` — are **not** implemented and do not pretend
@@ -425,22 +450,32 @@ Costs taken on deliberately:
 - **The frame caps are a policy, not a spec** (D3). A page legitimately building
   65 frames will be refused, and told.
 
-**Verification.** `crates/dom/tests/rendered_roots.rs` for the membership
-predicate and for `DOMParser` documents staying inert; `crates/page/tests/frames.rs`
-for loading (`src`, `srcdoc`, `data:`, 404 → `error`, nesting, recursive `src`,
-the caps, style isolation both ways); `crates/page/tests/frame_scripting.rs` for
-`contentDocument`/`contentWindow`, the same-origin checks, `srcdoc` origin
-inheritance, `postMessage` both directions, and dropping a page with live frames
-and worlds; `crates/page/tests/frame_input.rs` for click-through, `:hover` on the
-owner, per-document `activeElement` and a transformed iframe;
-`crates/layout/tests/construct.rs` for replaced-element sizing; a display-list
-golden (`tests/goldens/iframe.html`), an Ahem reftest pair
-(`tests/reftests/iframe-basic.html`) and iframe cases in
-`crates/page/tests/screenshot.rs` and `pdf.rs` for paint, including a fixed
-banner in a scrolled frame; `crates/cdp/tests/{page,runtime,dom}.rs` for the
-frame tree, the event ordering and the `DOM` additions; and new iframe checks in
-both `cargo xtask puppeteer` and `cargo xtask playwright`, expectation files
-regenerated in the same commits as the behaviour changes.
+**Verification.** `crates/dom/tests/documents.rs` pins that "which document" is
+`containing_document` and not `node_document`, for a shadow tree and for a
+second document. `crates/page/tests/frames.rs` (22) covers context creation and
+discard, `src`/`srcdoc` loading, scripts running in the frame's own realm,
+`contentDocument`, replaced-element sizing, the frame laying out in its own
+viewport, and the display-list splice — structurally, walking
+`PushClip → PushLayer → the frame's own fill → PopLayer`, with a frameless page
+asserted to gain no splice at all. `crates/page/tests/frame_scripting.rs` (13)
+covers the window family, `postMessage` in both directions and its
+`DataCloneError` refusals, a child's globals staying unreachable, and the
+`sandbox` slice. `crates/page/tests/frame_input.rs` (4) covers a click landing
+inside a frame, the crossing accounting for the frame's position, and the
+embedder's capturing listener seeing nothing. `crates/cdp/tests/{page,dom}.rs`
+covers the frame tree and the `DOM` additions. Both driver runners grew iframe
+fixtures and checks: `cargo xtask puppeteer` is 50/50 and `cargo xtask
+playwright` 22/23, its one expected failure being `frameLocator` for a reason
+not yet identified. `tests/wpt/expectations.tsv` was rebaselined once, and the
+diff is dominated by suites whose `<iframe>` fixtures could not load before and
+now run — no line moved from PASS to a failure.
+
+**Not implemented, and tracked rather than hidden:** cross-frame `:hover` and
+per-document `activeElement`; frame session history; named frame targets and
+`window.name`; a per-frame `loaderId`; `Runtime.executionContextDestroyed` on
+detach; `Network.*` events carrying the initiating frame; and a dedicated
+display-list golden and Ahem reftest pair for a frame, the splice being covered
+structurally instead.
 
 ## Deliberate limits (P6 — absent beats fake)
 

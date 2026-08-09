@@ -1014,6 +1014,54 @@ pub struct PageGlobal {
     messages: RefCell<VecDeque<PendingMessage>>,
 }
 
+/// The `sandbox` restrictions on a browsing context (ADR-0035 D11).
+///
+/// **Only the two tokens that can be enforced here are modelled.** The rest of
+/// HTML's list — `allow-forms`, `allow-popups`, `allow-top-navigation`,
+/// `allow-modals`, `allow-downloads` — is not implemented and does not pretend
+/// to be: the attribute reflects, the unimplemented tokens are listed as
+/// limits, and nothing claims a restriction it does not apply. Parsing all of
+/// them and enforcing two would be exactly the silent no-op P6 forbids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sandbox {
+    /// Script runs in this context. False for a sandboxed frame without
+    /// `allow-scripts`.
+    pub scripts: bool,
+    /// The context keeps its document's origin. False for a sandboxed frame
+    /// without `allow-same-origin`, which gives it an opaque one — so its
+    /// embedder cannot reach into it and it cannot reach out.
+    pub same_origin: bool,
+}
+
+impl Sandbox {
+    /// No `sandbox` attribute: nothing is restricted.
+    #[must_use]
+    pub fn unrestricted() -> Self {
+        Self {
+            scripts: true,
+            same_origin: true,
+        }
+    }
+
+    /// Parses a `sandbox` attribute value. The attribute's *presence* is what
+    /// restricts; each token gives one restriction back.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        let mut sandbox = Self {
+            scripts: false,
+            same_origin: false,
+        };
+        for token in value.split_ascii_whitespace() {
+            if token.eq_ignore_ascii_case("allow-scripts") {
+                sandbox.scripts = true;
+            } else if token.eq_ignore_ascii_case("allow-same-origin") {
+                sandbox.same_origin = true;
+            }
+        }
+        sandbox
+    }
+}
+
 /// Deepest chain of nested browsing contexts an input hit test will follow.
 ///
 /// Mirrors the page's own frame-depth cap. Kept here because `bindings` cannot
@@ -1263,6 +1311,9 @@ pub struct FrameShared {
     /// The embedding context, or `None` for the top-level one. What
     /// `window.parent` and `window.top` walk.
     parent_frame: Option<FrameId>,
+    /// The `sandbox` restrictions this browsing context runs under
+    /// (ADR-0035 D11).
+    pub(crate) sandbox: Cell<Sandbox>,
     /// This frame's **default** world — its `window`, the one a driver sees as
     /// `isDefault`.
     ///
@@ -1631,6 +1682,7 @@ impl FrameShared {
             global,
             frame,
             parent_frame,
+            sandbox: Cell::new(Sandbox::unrestricted()),
             default_world: Cell::new(MAIN_WORLD),
             dom,
             document: Cell::new(document),
@@ -1668,6 +1720,21 @@ impl FrameShared {
     #[must_use]
     pub fn frame(&self) -> FrameId {
         self.frame
+    }
+
+    /// The `sandbox` restrictions this context runs under.
+    #[must_use]
+    pub fn sandbox(&self) -> Sandbox {
+        self.sandbox.get()
+    }
+
+    /// Applies the `sandbox` content attribute of this context's `<iframe>`.
+    ///
+    /// Called at each of the frame's navigations: HTML applies the attribute's
+    /// value **at load**, so changing it afterwards affects the next document
+    /// rather than the current one.
+    pub fn set_sandbox(&self, sandbox: Sandbox) {
+        self.sandbox.set(sandbox);
     }
 
     /// The embedding browsing context, or `None` for the top-level one.

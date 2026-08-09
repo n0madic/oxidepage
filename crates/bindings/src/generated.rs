@@ -3478,6 +3478,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
     cx.define_accessor_ce(
         &proto_htmli_frame_element,
+        "sandbox",
+        gen_htmli_frame_element_get_sandbox,
+        gen_htmli_frame_element_set_sandbox,
+    )?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
         "width",
         gen_htmli_frame_element_get_width,
         gen_htmli_frame_element_set_width,
@@ -12062,6 +12068,26 @@ fn gen_htmli_frame_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<
     let this = cx.this_element(&call.this)?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_name(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_htmli_frame_element_get_sandbox(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::sandbox(
+        cx, this,
+    )?))
+}
+
+fn gen_htmli_frame_element_set_sandbox(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_sandbox(cx, this, a0)?;
     Ok(JsValue::Undefined)
 }
 

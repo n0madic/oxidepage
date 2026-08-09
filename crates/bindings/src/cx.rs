@@ -270,6 +270,12 @@ impl BindCx<'_> {
     /// (ADR-0022 §4). `srcdoc` and `about:blank` frames inherit the embedder's
     /// URL at load, so by the time this runs their URL already compares right.
     pub(crate) fn same_origin_frame(&self, other: &crate::state::FrameShared) -> bool {
+        // A `sandbox` without `allow-same-origin` gives the context an **opaque**
+        // origin, which is same-origin with nothing — not even with itself for
+        // this purpose, and certainly not with its embedder (ADR-0035 D11).
+        if !other.sandbox().same_origin || !self.state.frame.sandbox().same_origin {
+            return false;
+        }
         let dom = self.state.dom.borrow();
         let here = dom.document_url_of(self.state.frame.document()).to_owned();
         let there = dom.document_url_of(other.document()).to_owned();

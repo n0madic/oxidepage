@@ -4745,6 +4745,9 @@ impl Page {
     /// document handed out dies by the ordinary generation bump when its slots
     /// are freed.
     fn load_frame_document(&self, frame: &Rc<frame::Frame>, owner: NodeId, html: &str, url: &str) {
+        // HTML applies `sandbox` **at load**, so a later attribute change
+        // affects the next document rather than this one.
+        frame.shared().set_sandbox(self.sandbox_of(owner));
         let previous = frame.document();
         let document = {
             let mut dom = self.state.dom.borrow_mut();
@@ -4815,6 +4818,26 @@ impl Page {
         self.fire_frame_event(owner, "load");
     }
 
+    /// The `sandbox` restrictions an `<iframe>` element asks for.
+    ///
+    /// The attribute's *presence* is what restricts; each token gives one
+    /// restriction back. An absent attribute is unrestricted.
+    fn sandbox_of(&self, owner: NodeId) -> oxidepage_bindings::Sandbox {
+        let dom = self.state.dom.borrow();
+        let value = dom
+            .get(owner)
+            .and_then(|node| node.as_element())
+            .and_then(|el| {
+                el.attrs()
+                    .iter()
+                    .find(|a| a.name.ns.is_empty() && &*a.name.local == "sandbox")
+                    .map(|a| a.value.to_string())
+            });
+        value.map_or_else(oxidepage_bindings::Sandbox::unrestricted, |value| {
+            oxidepage_bindings::Sandbox::parse(&value)
+        })
+    }
+
     /// Runs one parser-encountered `<script>` of a frame's document, in **that
     /// frame's** world.
     ///
@@ -4824,6 +4847,15 @@ impl Page {
     /// reordered. That is a timing difference, not a missing feature, and it is
     /// recorded as a limit.
     fn execute_frame_script(&self, frame: &Rc<frame::Frame>, node: NodeId, doc_url: &str) {
+        // A sandboxed frame without `allow-scripts` runs none. Reported the
+        // first time rather than silently, so a page whose frame does nothing
+        // can find out why (ADR-0035 D11).
+        if !frame.shared().sandbox().scripts {
+            self.hooks.report_resource_error(
+                "a sandboxed iframe without `allow-scripts` runs no script".to_owned(),
+            );
+            return;
+        }
         let world = frame.shared().default_world();
         let (src, script_type, source) = {
             let mut dom = self.state.dom.borrow_mut();

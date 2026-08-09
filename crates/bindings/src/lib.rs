@@ -58,7 +58,7 @@ pub use script::is_classic_script_type;
 pub use state::{
     BindingCall, FrameShared, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES,
     NavigationBody, NavigatorData, PageGlobal, PendingMessage, PendingNavigation, ReadyState,
-    ScreenData, SessionHistory, TimingMilestone, WorldEnter, WorldId, WorldState,
+    Sandbox, ScreenData, SessionHistory, TimingMilestone, WorldEnter, WorldId, WorldState,
 };
 pub use storage::{
     MAX_STORAGE_ORIGINS, PrivateStorageAreas, QuotaExceeded, STORAGE_QUOTA_BYTES, SharedStorage,
