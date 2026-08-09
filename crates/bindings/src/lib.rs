@@ -1306,6 +1306,9 @@ fn fetch_impl(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
         initiator_origin: initiator,
         bypass_cache: false,
         resource_type: ResourceType::Fetch,
+        // The realm doing the asking is the frame doing the asking, which is
+        // what a driver reads off `Network.*` (ADR-0035 D9).
+        frame: Some(cx.state.frame.frame()),
         // The user agent's own credentials only; script has no way to set this.
         auth: None,
     };

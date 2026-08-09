@@ -371,7 +371,14 @@ pub enum PageRecord {
     /// request was retained, and a driver's `Network` domain needs both the
     /// milestones and the body. Both arrived together rather than as a half
     /// version a later stage would replace (ADR-0027's recorded deviation).
-    Network(oxidepage_net::NetworkEvent),
+    Network {
+        event: oxidepage_net::NetworkEvent,
+        /// The browsing context that started the request, when one named
+        /// itself (ADR-0035 D9). `None` for a request no context claimed —
+        /// the top-level document's own load, most of all, which happens
+        /// before there is a frame to name.
+        frame: Option<oxidepage_base::FrameId>,
+    },
     /// Page script called a function installed by [`Page::add_binding`].
     ///
     /// A task source rather than something the embedder polls: a binding called
@@ -1524,6 +1531,9 @@ struct PendingImage {
 /// then decoded (WOFF2/WOFF → sfnt) and registered into the layout font
 /// collection under `family` (Phase 7, WP-D).
 struct PendingFont {
+    /// The browsing context whose sheet declared the rule — the fallback chain
+    /// resumes there, and the request is reported as that frame's.
+    frame: oxidepage_base::FrameId,
     url: String,
     family: String,
     /// The rule's width/style/weight, used when registering the decoded font.
@@ -2744,9 +2754,9 @@ impl Page {
         let hooks = Rc::downgrade(&self.hooks);
         self.net
             .set_observer(if self.hooks.event_sink.borrow().is_some() {
-                Some(Rc::new(move |event| {
+                Some(Rc::new(move |event, frame| {
                     if let Some(hooks) = hooks.upgrade() {
-                        hooks.emit(PageRecord::Network(event));
+                        hooks.emit(PageRecord::Network { event, frame });
                     }
                 }))
             } else {
@@ -3709,9 +3719,10 @@ impl Page {
         ordered: Option<u64>,
     ) {
         let doc_url = self.document_url_for(node);
-        let id = self
-            .net
-            .start_resource(NetRequest::subresource(&url, doc_url).of_type(ResourceType::Script));
+        let id = self.net.start_resource(self.tag_frame(
+            NetRequest::subresource(&url, doc_url).of_type(ResourceType::Script),
+            node,
+        ));
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_async.borrow_mut().insert(
             id,
@@ -3842,19 +3853,6 @@ impl Page {
         });
     }
 
-    /// Resolves `rel` against the document base URL (`<base href>`, else the
-    /// document URL), `None` on failure. Every subresource — classic scripts,
-    /// `<link>` stylesheets, images, `background-image`, `@font-face` — goes
-    /// through here.
-    fn resolve_url(&self, rel: &str) -> Option<String> {
-        let base = self.state.dom.borrow().base_url();
-        url::Url::parse(&base)
-            .ok()?
-            .join(rel)
-            .ok()
-            .map(|u| u.to_string())
-    }
-
     /// The rendered document `node` belongs to, falling back to the page's own.
     ///
     /// [`DomTree::containing_document`], never `node_document`: a node inside a
@@ -3885,6 +3883,15 @@ impl Page {
             .join(rel)
             .ok()
             .map(|u| u.to_string())
+    }
+
+    /// Records which browsing context a subresource request belongs to, so a
+    /// `Network.*` event can name the frame that initiated it (ADR-0035 D9).
+    fn tag_frame(&self, request: NetRequest, node: NodeId) -> NetRequest {
+        match self.frame_of(node) {
+            Some(frame) => request.in_frame(frame.id()),
+            None => request,
+        }
     }
 
     /// The URL of the document `node` is in — a subresource request's referrer.
@@ -4902,7 +4909,9 @@ impl Page {
             self.load_frame_document(frame, owner, "", url);
             return;
         }
-        let request = NetRequest::subresource(url, referrer).of_type(ResourceType::Document);
+        let request = NetRequest::subresource(url, referrer)
+            .of_type(ResourceType::Document)
+            .in_frame(frame.id());
         match self.net.fetch_blocking(request) {
             Ok(outcome) => {
                 let final_url = outcome.head.final_url.clone();
@@ -5560,7 +5569,8 @@ impl Page {
             return;
         }
         self.register_image_waiter(node, url);
-        self.start_image_load_url(url, &self.document_url_for(node));
+        let frame = self.frame_of(node).map(|frame| frame.id());
+        self.start_image_load_url(url, &self.document_url_for(node), frame);
     }
 
     /// Registers `node` as a waiter on `url` and pins it for the wait.
@@ -5728,7 +5738,12 @@ impl Page {
 
     /// Starts a load for an absolute image `url`, deduplicating and decoding
     /// `data:` URLs inline (shared by `<img>` and background images).
-    fn start_image_load_url(&self, url: &str, referrer: &str) {
+    fn start_image_load_url(
+        &self,
+        url: &str,
+        referrer: &str,
+        frame: Option<oxidepage_base::FrameId>,
+    ) {
         // Deduplicate: a URL already loaded or in flight is not re-fetched.
         if !self.requested_images.borrow_mut().insert(url.to_owned()) {
             return;
@@ -5749,9 +5764,12 @@ impl Page {
             return;
         }
 
-        let id = self.net.start_resource(
-            NetRequest::subresource(url, referrer.to_owned()).of_type(ResourceType::Image),
-        );
+        let mut request =
+            NetRequest::subresource(url, referrer.to_owned()).of_type(ResourceType::Image);
+        if let Some(frame) = frame {
+            request = request.in_frame(frame);
+        }
+        let id = self.net.start_resource(request);
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_images.borrow_mut().insert(
             id,
@@ -5809,7 +5827,8 @@ impl Page {
             urls
         };
         for (node, url) in urls {
-            self.start_image_load_url(&url, &self.document_url_for(node));
+            let frame = self.frame_of(node).map(|frame| frame.id());
+            self.start_image_load_url(&url, &self.document_url_for(node), frame);
         }
     }
 
@@ -6016,7 +6035,15 @@ impl Page {
         // without an accompanying DOM mutation (an external `<link>`/`@import`
         // completing, or a CSSOM `insertRule`) bumps only `style.version()`. A
         // dom-version gate would miss those and never fetch their web fonts.
-        let version = self.state.style.borrow().version();
+        // Summed over every browsing context: a frame's own sheets carry
+        // `@font-face` rules, and gating on the top frame's engine alone left
+        // them unfetched however often the frame restyled (ADR-0035 D1).
+        let version: u64 = self
+            .frames
+            .pre_order()
+            .iter()
+            .map(|frame| frame.shared().style.borrow().version())
+            .sum();
         if self.last_fontface_scan.get() == version {
             return;
         }
@@ -6025,13 +6052,27 @@ impl Page {
         // `@font-face` rules come from the author sheets directly (no computed
         // style needed), so — unlike the background-image scan — no style
         // resolution is required here.
-        let faces = self.state.style.borrow().font_faces();
-        for info in faces {
-            let urls: Vec<String> = supported_font_srcs(&info.sources)
-                .filter_map(|src| self.resolve_url(src))
-                .collect();
-            let attrs = oxidepage_layout::WebFontAttrs::from_face(&info);
-            self.start_font_load(&info.family, &urls, attrs);
+        for frame in self.frames.pre_order() {
+            let base = self
+                .state
+                .dom
+                .borrow()
+                .base_url_of(frame.document())
+                .to_owned();
+            let faces = frame.shared().style.borrow().font_faces();
+            for info in faces {
+                let urls: Vec<String> = supported_font_srcs(&info.sources)
+                    .filter_map(|src| {
+                        url::Url::parse(&base)
+                            .ok()?
+                            .join(src)
+                            .ok()
+                            .map(|u| u.to_string())
+                    })
+                    .collect();
+                let attrs = oxidepage_layout::WebFontAttrs::from_face(&info);
+                self.start_font_load(&frame, &info.family, &urls, attrs);
+            }
         }
     }
 
@@ -6044,6 +6085,7 @@ impl Page {
     /// what makes `src: url(a.woff2), url(b.woff2)` survive `a.woff2` 404ing.
     fn start_font_load(
         &self,
+        frame: &Rc<frame::Frame>,
         family: &str,
         urls: &[String],
         attrs: oxidepage_layout::WebFontAttrs,
@@ -6071,14 +6113,22 @@ impl Page {
                 continue;
             }
 
-            let doc_url = self.state.dom.borrow().document_url().to_owned();
-            let id = self
-                .net
-                .start_resource(NetRequest::subresource(url, doc_url).of_type(ResourceType::Font));
+            let doc_url = self
+                .state
+                .dom
+                .borrow()
+                .document_url_of(frame.document())
+                .to_owned();
+            let id = self.net.start_resource(
+                NetRequest::subresource(url, doc_url)
+                    .of_type(ResourceType::Font)
+                    .in_frame(frame.id()),
+            );
             self.in_flight.set(self.in_flight.get() + 1);
             self.pending_fonts.borrow_mut().insert(
                 id,
                 PendingFont {
+                    frame: frame.id(),
                     url: url.clone(),
                     family: family.to_owned(),
                     attrs,
@@ -6116,7 +6166,14 @@ impl Page {
                     if !loaded {
                         // Downloaded but unusable (error status, or bytes we
                         // cannot decode): fall through to the next `src:`.
-                        self.start_font_load(&pending.family, &pending.fallbacks, pending.attrs);
+                        if let Some(frame) = self.frames.get(pending.frame) {
+                            self.start_font_load(
+                                &frame,
+                                &pending.family,
+                                &pending.fallbacks,
+                                pending.attrs,
+                            );
+                        }
                     }
                     self.decr_in_flight();
                     self.net.finish(id);
@@ -6128,7 +6185,14 @@ impl Page {
                 if let Some(pending) = pending {
                     self.hooks
                         .report_resource_error(format!("web font `{}`: {error}", pending.url));
-                    self.start_font_load(&pending.family, &pending.fallbacks, pending.attrs);
+                    if let Some(frame) = self.frames.get(pending.frame) {
+                        self.start_font_load(
+                            &frame,
+                            &pending.family,
+                            &pending.fallbacks,
+                            pending.attrs,
+                        );
+                    }
                     self.decr_in_flight();
                     self.net.finish(id);
                     self.settle_font_ready();
@@ -6570,9 +6634,10 @@ impl Page {
             return;
         }
 
-        let id = self.net.start_resource(
+        let id = self.net.start_resource(self.tag_frame(
             NetRequest::subresource(&url, doc_url).of_type(ResourceType::Stylesheet),
-        );
+            node,
+        ));
         self.in_flight.set(self.in_flight.get() + 1);
         self.pending_stylesheets
             .set(self.pending_stylesheets.get() + 1);

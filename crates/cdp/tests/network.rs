@@ -52,6 +52,68 @@ fn a_navigation_reports_the_request_and_the_response() {
     assert_eq!(received["params"]["requestId"], sent["params"]["requestId"]);
 }
 
+/// A request a frame started reports **that frame's** id.
+///
+/// `request.frame()` is how a driver attributes a request, and reporting the
+/// target id for everything told it the page had asked for all of them
+/// (ADR-0035 D9). The page's own document load still reports the target id —
+/// there is no frame to name before it commits.
+#[test]
+fn a_network_event_names_the_frame_that_started_it() {
+    let fixtures = Fixtures::start(vec![
+        (
+            "/frames",
+            "<!doctype html><title>Frames</title>\
+             <iframe id='f' src='/inner'></iframe>",
+        ),
+        (
+            "/inner",
+            "<!doctype html><title>Inner</title><link rel=stylesheet href='/sheet.css'>",
+        ),
+        ("/sheet.css", "p { color: red }"),
+    ]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(&session, "Network.enable", json!({}));
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+
+    let events = client.drain_events(Duration::from_millis(800));
+    let sent: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["method"] == "Network.requestWillBeSent")
+        .collect();
+    let frame_of = |suffix: &str| -> String {
+        sent.iter()
+            .find(|e| {
+                e["params"]["request"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.ends_with(suffix))
+            })
+            .unwrap_or_else(|| panic!("no request for {suffix}: {sent:?}"))["params"]["frameId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    assert_eq!(
+        frame_of("/frames"),
+        target,
+        "the page's own document has no frame to name yet"
+    );
+    let inner = frame_of("/inner");
+    assert_ne!(inner, target, "the frame's document is the frame's request");
+    assert_eq!(
+        frame_of("/sheet.css"),
+        inner,
+        "and so is a stylesheet that document asked for"
+    );
+}
+
 #[test]
 fn a_response_body_reads_back() {
     let body = "<!doctype html><title>Readable</title><p>hello</p>";

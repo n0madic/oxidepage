@@ -476,16 +476,20 @@ while the pointer is inside it **and stopping when it leaves**,
 never the embedder-relative one, plus an `<img>` firing `load` inside a frame
 and inside a shadow tree. `crates/cdp/tests/{page,dom}.rs`
 covers the frame tree and the `DOM` additions — including that each frame's
-execution context has an id of its own, and that a `worldName` init script
-reaches every frame. Both driver runners grew iframe fixtures and checks, and
+execution context has an id of its own, that a `worldName` init script reaches
+every frame, that each frame reports a `loaderId` of its own, and that a
+detached frame's contexts are retired before the frame is.
+`crates/cdp/tests/network.rs` pins that a request reports the frame that
+started it. Both driver runners grew iframe fixtures and checks, and
 both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`
 23/23. `tests/wpt/expectations.tsv` was rebaselined once, and the
 diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
-**Not implemented, and tracked rather than hidden:** `Network.*` events
-carrying the initiating frame; `<form target>`, which has never been read at
-all; and a download started inside a frame.
+**Not implemented, and tracked rather than hidden:** `<form target>`, which
+has never been read at all, so a form submission always navigates its own
+context; and a download started inside a frame, which is reported and refused
+rather than performed.
 
 ## Deliberate limits (P6 — absent beats fake)
 

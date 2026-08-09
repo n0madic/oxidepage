@@ -104,6 +104,10 @@ pub fn network_event(
     event: &NetworkEvent,
     loader_id: &str,
     document_loader: Option<&str>,
+    // The CDP id of the frame that started the request (ADR-0035 D9). The
+    // top-level frame's *is* the target id, so a request no context claimed
+    // reads exactly as it did before frames existed.
+    frame_id: &str,
 ) -> Option<crate::message::Event> {
     let id = match document_loader {
         Some(loader) => loader.to_owned(),
@@ -135,7 +139,7 @@ pub fn network_event(
                 "timestamp": seconds(*timestamp),
                 "wallTime": *timestamp / 1000.0,
                 "initiator": { "type": "other" },
-                "frameId": target_id,
+                "frameId": frame_id,
             }),
         ),
         NetworkEvent::Responded {
@@ -170,7 +174,7 @@ pub fn network_event(
                     "encodedDataLength": -1,
                     "securityState": if final_url.starts_with("https:") { "secure" } else { "insecure" },
                 },
-                "frameId": target_id,
+                "frameId": frame_id,
             }),
         ),
         NetworkEvent::Finished {

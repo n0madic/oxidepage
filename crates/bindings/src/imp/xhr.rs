@@ -330,6 +330,9 @@ pub(crate) fn send(cx: &BindCx<'_>, this: XhrRef, body: JsValue) -> Result<(), J
         initiator_origin,
         bypass_cache: false,
         resource_type: ResourceType::Xhr,
+        // The realm doing the asking is the frame doing the asking, which is
+        // what a driver reads off `Network.*` (ADR-0035 D9).
+        frame: Some(cx.state.frame.frame()),
         // Script never sets this: `Authorization` is a forbidden request header
         // and `open(url, user, password)`'s credentials are not implemented.
         auth: None,

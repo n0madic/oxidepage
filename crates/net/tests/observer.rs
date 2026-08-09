@@ -54,7 +54,9 @@ fn service_with_log() -> (NetService, Rc<RefCell<Vec<NetworkEvent>>>) {
         NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
     let log: Rc<RefCell<Vec<NetworkEvent>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&log);
-    service.set_observer(Some(Rc::new(move |event| sink.borrow_mut().push(event))));
+    service.set_observer(Some(Rc::new(move |event, _frame| {
+        sink.borrow_mut().push(event)
+    })));
     (service, log)
 }
 

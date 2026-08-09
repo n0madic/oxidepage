@@ -206,6 +206,11 @@ pub struct NetRequest {
     /// What this request is for (ADR-0032 D6). Set by the call site; the
     /// constructors below leave it at the kind they can actually infer.
     pub resource_type: ResourceType,
+    /// The browsing context that asked for this, when the caller knows
+    /// (ADR-0035 D9). Carried so a network observer can name the initiating
+    /// frame; `None` from a caller with no context to name, and this crate
+    /// never interprets it.
+    pub frame: Option<oxidepage_base::FrameId>,
     /// Credentials the **user agent** is attaching, as `(header name, value)`.
     ///
     /// Deliberately not part of [`NetRequest::headers`]: `Authorization` and
@@ -250,6 +255,7 @@ impl Default for NetRequest {
             initiator_origin: None,
             bypass_cache: false,
             resource_type: ResourceType::Other,
+            frame: None,
             auth: None,
         }
     }
@@ -271,6 +277,7 @@ impl NetRequest {
             initiator_origin: None,
             bypass_cache: false,
             resource_type: ResourceType::Document,
+            frame: None,
             auth: None,
         }
     }
@@ -349,6 +356,7 @@ impl NetRequest {
             // and stylesheets all build a subresource request. The caller
             // overrides this field; `Other` is the honest answer here.
             resource_type: ResourceType::Other,
+            frame: None,
             auth: None,
         }
     }
@@ -373,6 +381,7 @@ impl NetRequest {
             initiator_origin: initiator,
             bypass_cache: false,
             resource_type: ResourceType::Script,
+            frame: None,
             auth: None,
         }
     }
@@ -381,6 +390,13 @@ impl NetRequest {
     #[must_use]
     pub fn of_type(mut self, resource_type: ResourceType) -> Self {
         self.resource_type = resource_type;
+        self
+    }
+
+    /// Records which browsing context asked for this request (ADR-0035 D9).
+    #[must_use]
+    pub fn in_frame(mut self, frame: oxidepage_base::FrameId) -> Self {
+        self.frame = Some(frame);
         self
     }
 }

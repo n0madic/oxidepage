@@ -128,7 +128,9 @@ impl Harness {
             NetService::new(ResourcePolicy::permissive_localhost()).expect("net service");
         let log: Rc<RefCell<Vec<NetworkEvent>>> = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&log);
-        service.set_observer(Some(Rc::new(move |event| sink.borrow_mut().push(event))));
+        service.set_observer(Some(Rc::new(move |event, _frame| {
+            sink.borrow_mut().push(event)
+        })));
         Self {
             service,
             events,
@@ -536,7 +538,7 @@ fn a_blocking_fetch_pauses_and_resolves_inline() {
     service.intercept().enable(0, "s", Vec::new(), false);
 
     let control = service.intercept();
-    service.set_observer(Some(Rc::new(move |event| {
+    service.set_observer(Some(Rc::new(move |event, _frame| {
         if let NetworkEvent::Paused { id, .. } = event {
             control.send(InterceptCommand::Fulfill {
                 id,
@@ -573,7 +575,7 @@ fn a_decision_for_another_request_does_not_extend_a_blocking_park() {
 
     let control = service.intercept();
     let stranger = oxidepage_net::RequestId::from_parts(9999, oxidepage_base::id::FIRST_GENERATION);
-    service.set_observer(Some(Rc::new(move |event| {
+    service.set_observer(Some(Rc::new(move |event, _frame| {
         if let NetworkEvent::Paused { id, .. } = event {
             control.send(InterceptCommand::release(stranger));
             control.send(InterceptCommand::release(id));
@@ -607,7 +609,7 @@ fn a_basic_challenge_is_answered_under_the_same_id() {
     let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let control = service.intercept();
     let sink = Rc::clone(&seen);
-    service.set_observer(Some(Rc::new(move |event| match event {
+    service.set_observer(Some(Rc::new(move |event, _frame| match event {
         NetworkEvent::Paused { id, .. } => control.send(InterceptCommand::release(id)),
         NetworkEvent::AuthRequired { id, challenge, .. } => {
             sink.borrow_mut().push(challenge.realm.clone());
@@ -646,7 +648,7 @@ fn a_default_auth_answer_lets_the_challenge_through() {
     service.intercept().enable(0, "s", Vec::new(), true);
 
     let control = service.intercept();
-    service.set_observer(Some(Rc::new(move |event| match event {
+    service.set_observer(Some(Rc::new(move |event, _frame| match event {
         NetworkEvent::Paused { id, .. } => control.send(InterceptCommand::release(id)),
         NetworkEvent::AuthRequired { id, .. } => control.send(InterceptCommand::Auth {
             id,
@@ -680,11 +682,13 @@ fn no_challenge_is_raised_when_auth_handling_is_off() {
     let control = harness.service.intercept();
     let outcome = {
         let control = control.clone();
-        harness.service.set_observer(Some(Rc::new(move |event| {
-            if let NetworkEvent::Paused { id, .. } = event {
-                control.send(InterceptCommand::release(id));
-            }
-        })));
+        harness
+            .service
+            .set_observer(Some(Rc::new(move |event, _frame| {
+                if let NetworkEvent::Paused { id, .. } = event {
+                    control.send(InterceptCommand::release(id));
+                }
+            })));
         harness
             .service
             .fetch_blocking(NetRequest::navigation(format!(
@@ -779,7 +783,7 @@ fn a_server_that_keeps_refusing_does_not_loop_forever() {
     let challenges = Rc::new(std::cell::Cell::new(0u32));
     let control = service.intercept();
     let counter = Rc::clone(&challenges);
-    service.set_observer(Some(Rc::new(move |event| match event {
+    service.set_observer(Some(Rc::new(move |event, _frame| match event {
         NetworkEvent::Paused { id, .. } => control.send(InterceptCommand::release(id)),
         NetworkEvent::AuthRequired { id, .. } => {
             counter.set(counter.get() + 1);
@@ -824,7 +828,7 @@ fn a_proxy_challenge_is_answered_in_the_proxy_header() {
     service.intercept().enable(0, "s", Vec::new(), true);
 
     let control = service.intercept();
-    service.set_observer(Some(Rc::new(move |event| match event {
+    service.set_observer(Some(Rc::new(move |event, _frame| match event {
         NetworkEvent::Paused { id, .. } => control.send(InterceptCommand::release(id)),
         NetworkEvent::AuthRequired { id, challenge, .. } => {
             assert_eq!(

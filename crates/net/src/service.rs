@@ -273,6 +273,12 @@ pub struct NetService {
     /// nor — the direction a plain "did headers arrive" test misses — vanish
     /// with no terminal event at all when it is aborted *before* its headers.
     open: RefCell<HashMap<RequestId, OpenRequest>>,
+    /// The browsing context each live request was started for, so a network
+    /// observer can report *which frame* initiated it (ADR-0035 D9).
+    ///
+    /// Beside `open` rather than inside it: the terminal events are announced
+    /// after the `OpenRequest` has been taken, and they need this too.
+    request_frames: RefCell<HashMap<RequestId, oxidepage_base::FrameId>>,
     /// Told about every request's progress, when an embedder wants to know.
     ///
     /// `Rc`, not `Arc`: the service lives on the page thread and so does the
@@ -355,7 +361,7 @@ enum PauseKind {
 const MAX_AUTH_ATTEMPTS: u32 = 1;
 
 /// A callback told about each request's progress.
-pub type NetObserver = Rc<dyn Fn(NetworkEvent)>;
+pub type NetObserver = Rc<dyn Fn(NetworkEvent, Option<oxidepage_base::FrameId>)>;
 
 /// What [`NetService::open`] remembers about a request still in flight.
 #[derive(Clone, Debug, Default)]
@@ -448,6 +454,7 @@ impl NetService {
                 sem: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
                 log: RefCell::new(RequestLog::default()),
                 open: RefCell::new(HashMap::new()),
+                request_frames: RefCell::new(HashMap::new()),
                 observer: RefCell::new(None),
                 intercept,
                 decisions,
@@ -499,12 +506,30 @@ impl NetService {
         *self.observer.borrow_mut() = observer;
     }
 
+    /// Which browsing context asked for `id`, when the caller said (ADR-0035).
+    #[must_use]
+    pub fn frame_of(&self, id: RequestId) -> Option<oxidepage_base::FrameId> {
+        self.request_frames.borrow().get(&id).copied()
+    }
+
     fn notify(&self, event: NetworkEvent) {
+        // Read before the observer runs and before a terminal event drops the
+        // entry: an observer is free to start another request, and holding this
+        // borrow across the call would be the re-entrancy the clone below
+        // exists to avoid.
+        let id = event.request_id();
+        let frame = self.frame_of(id);
+        if matches!(
+            event,
+            NetworkEvent::Finished { .. } | NetworkEvent::Failed { .. }
+        ) {
+            self.request_frames.borrow_mut().remove(&id);
+        }
         // Cloned out of the `RefCell` before the call: an observer that starts
         // another request would otherwise re-enter this borrow.
         let observer = self.observer.borrow().clone();
         if let Some(observer) = observer {
-            observer(event);
+            observer(event, frame);
         }
     }
 
@@ -532,6 +557,9 @@ impl NetService {
 
     /// Announces an outgoing request and starts its record.
     fn note_request(&self, id: RequestId, request: &NetRequest) {
+        if let Some(frame) = request.frame {
+            self.request_frames.borrow_mut().insert(id, frame);
+        }
         // Opened here, not on the response: a request aborted before its
         // headers arrive still owes the observer a terminal event, and the
         // driver's in-flight count — hence every `networkidle` wait — never

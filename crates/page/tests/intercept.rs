@@ -99,7 +99,11 @@ fn auto_resolve(
     let sink = Rc::clone(&seen);
     let control = page.intercept();
     page.set_event_sink(Some(Rc::new(move |record: PageRecord| {
-        if let PageRecord::Network(NetworkEvent::Paused { id, url, .. }) = record {
+        if let PageRecord::Network {
+            event: NetworkEvent::Paused { id, url, .. },
+            ..
+        } = record
+        {
             sink.borrow_mut().push(url);
             answer(&control, id);
         }
@@ -186,7 +190,10 @@ fn navigating_away_from_a_paused_subresource_leaves_nothing_behind() {
     // Only the *document* is answered; the image is abandoned mid-pause.
     let control = page.intercept();
     page.set_event_sink(Some(Rc::new(move |record: PageRecord| {
-        if let PageRecord::Network(NetworkEvent::Paused { id, url, .. }) = record
+        if let PageRecord::Network {
+            event: NetworkEvent::Paused { id, url, .. },
+            ..
+        } = record
             && url.ends_with(".html")
         {
             control.send(InterceptCommand::release(id));
@@ -226,7 +233,11 @@ fn a_fulfilled_document_never_reaches_the_network() {
 
     let control = page.intercept();
     page.set_event_sink(Some(Rc::new(move |record: PageRecord| {
-        if let PageRecord::Network(NetworkEvent::Paused { id, .. }) = record {
+        if let PageRecord::Network {
+            event: NetworkEvent::Paused { id, .. },
+            ..
+        } = record
+        {
             control.send(InterceptCommand::Fulfill {
                 id,
                 response: Box::new(oxidepage_page::FulfilledResponse {
@@ -316,7 +327,10 @@ fn a_suspended_page_resolves_nothing() {
 
     let control = page.intercept();
     page.set_event_sink(Some(Rc::new(move |record: PageRecord| {
-        if let PageRecord::Network(NetworkEvent::Paused { id, url, .. }) = record
+        if let PageRecord::Network {
+            event: NetworkEvent::Paused { id, url, .. },
+            ..
+        } = record
             && url.ends_with(".html")
         {
             control.send(InterceptCommand::release(id));

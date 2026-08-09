@@ -1226,7 +1226,7 @@ fn run_page_thread(
             // timeout with nobody able to release it.
             let load_bearing = (matches!(dialog_policy, DialogPolicy::Ask { .. })
                 && matches!(record, PageRecord::DialogOpening(_)))
-                || matches!(&record, PageRecord::Network(event) if event.is_load_bearing());
+                || matches!(&record, PageRecord::Network { event, .. } if event.is_load_bearing());
             let event = PageEvent::from_record(record);
             if load_bearing {
                 let _ = events.send_timeout(event, TERMINAL_EVENT_GRACE);

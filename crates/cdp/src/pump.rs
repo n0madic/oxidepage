@@ -157,7 +157,7 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
             // A pause belongs to `Fetch`, not `Network`, and is gated on
             // `Fetch.enable` alone: a driver may intercept without ever having
             // sent `Network.enable`, and Puppeteer does exactly that.
-            PageEvent::Network(network)
+            PageEvent::Network { event: network, .. }
                 if session.flags.fetch.load(Ordering::Relaxed)
                     && matches!(
                         network,
@@ -166,18 +166,36 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
             {
                 fetch_event(connection, session, target_id, network);
             }
-            PageEvent::Network(network) if session.flags.network.load(Ordering::Relaxed) => {
+            PageEvent::Network {
+                event: network,
+                frame,
+            } if session.flags.network.load(Ordering::Relaxed) => {
                 // Built once per session rather than once per target: the
                 // envelope carries the `sessionId`, so two sessions watching one
                 // page each need their own copy.
                 let document_loader = connection
                     .registry
                     .document_loader(target_id, network.request_id());
+                // The frame that started it, when one named itself. A request
+                // no context claimed — the top-level document's own load, which
+                // happens before there is a frame to name — reports the target
+                // id, exactly as every request did before frames existed.
+                let frame_id = frame.map_or_else(
+                    || target_id.to_owned(),
+                    |frame| {
+                        crate::frame::frame_id_for(
+                            target_id,
+                            frame,
+                            frame == oxidepage_engine::page_api::MAIN_FRAME,
+                        )
+                    },
+                );
                 if let Some(mut event) = crate::domains::network::network_event(
                     target_id,
                     network,
                     &loader_id,
                     document_loader.as_deref(),
+                    &frame_id,
                 ) {
                     event.session_id = Some(session.id.clone());
                     connection.emit(event);

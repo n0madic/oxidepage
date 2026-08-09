@@ -36,8 +36,12 @@ pub enum PageEvent {
         /// The execution context the call came from (ADR-0033 D10).
         context_id: u64,
     },
-    /// One step of a network request's life (ADR-0030).
-    Network(oxidepage_page::NetworkEvent),
+    /// One step of a network request's life (ADR-0030), and the browsing
+    /// context that started it when one named itself (ADR-0035 D9).
+    Network {
+        event: oxidepage_page::NetworkEvent,
+        frame: Option<oxidepage_page::FrameId>,
+    },
     /// The answer to an evaluation that returned
     /// [`EvaluateOutcome::Deferred`](oxidepage_page::EvaluateOutcome::Deferred)
     /// (ADR-0034 D1).
@@ -105,7 +109,7 @@ impl PageEvent {
                 payload,
                 context_id,
             },
-            PageRecord::Network(event) => Self::Network(event),
+            PageRecord::Network { event, frame } => Self::Network { event, frame },
             PageRecord::AwaitSettled { token, result } => Self::AwaitSettled { token, result },
             PageRecord::FileChooser(event) => Self::FileChooser(event),
             PageRecord::Download(event) => Self::Download(event),

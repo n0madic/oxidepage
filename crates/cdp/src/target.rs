@@ -418,12 +418,20 @@ impl TargetRegistry {
                     }
                 }
                 // The top-level document request is the one whose protocol id
-                // *is* the loader; this records which request that is.
-                if let PageEvent::Network(NetworkEvent::Requested {
-                    id,
-                    resource_type: ResourceType::Document,
-                    ..
-                }) = &event
+                // *is* the loader; this records which request that is. A
+                // *nested* frame's document request is not — it belongs to that
+                // frame's loader, and claiming it here would make a frame's
+                // load look like the page's (ADR-0035 D9).
+                if let PageEvent::Network {
+                    event:
+                        NetworkEvent::Requested {
+                            id,
+                            resource_type: ResourceType::Document,
+                            ..
+                        },
+                    frame,
+                } = &event
+                    && frame.is_none_or(|frame| frame == oxidepage_engine::page_api::MAIN_FRAME)
                 {
                     registry.begin_document_load(&pumped, *id);
                 }
