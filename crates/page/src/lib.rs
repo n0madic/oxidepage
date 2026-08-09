@@ -4671,9 +4671,15 @@ impl Page {
             return true;
         };
         let url = url.to_string();
-        // `about:blank` is what the context already shows.
+        // `about:blank` has no bytes to fetch, but it is still a navigation:
+        // it replaces whatever the frame was showing with an empty document
+        // and fires `load` on the element. Skipping it — on the grounds that a
+        // fresh context already shows `about:blank` — leaves
+        // `contentWindow.location = "about:blank"` silently doing nothing, and
+        // a page waiting on that `load` waits forever.
         if url == "about:blank" {
-            return false;
+            self.load_frame_document(&frame, owner, "", &url);
+            return true;
         }
 
         let request = NetRequest::subresource(&url, &parent_url).of_type(ResourceType::Document);

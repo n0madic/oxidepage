@@ -65,19 +65,13 @@ pub(crate) fn focus(_cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<(), J
 /// context this realm cannot synchronously introspect.
 pub(crate) fn location(cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<JsValue, JsThrow> {
     // A frame of this page *can* be introspected — same thread, one arena — so
-    // a same-origin read answers with its URL, as a browser does. Only the
-    // cross-origin and cross-thread cases throw.
+    // a same-origin read answers with a real `location`, as a browser does.
+    // Only the cross-origin and cross-thread cases throw.
     if let WindowProxyData::Frame(frame) = &*this
         && let Some(state) = cx.frame_state(*frame)
         && cx.same_origin_frame(&state)
     {
-        let url = cx
-            .state
-            .dom
-            .borrow()
-            .document_url_of(state.document())
-            .to_owned();
-        return Ok(JsValue::String(url));
+        return frame_location_object(cx, *frame);
     }
     Err(cx.dom_throw(
         DomExceptionKind::SecurityError,
@@ -225,4 +219,94 @@ fn clone_message(cx: &BindCx<'_>, message: &JsValue) -> Result<String, JsThrow> 
         // and HTML's clone of `undefined` is `undefined`.
         _ => Ok("null".to_owned()),
     }
+}
+
+/// A `location` for a same-origin frame, minted in the **accessing** realm.
+///
+/// An object rather than the URL string, because `w.location.href = url` is the
+/// idiom pages actually write — a string would let that assignment succeed and
+/// do nothing, which is the silent no-op P6 forbids and which a page waiting on
+/// the frame's `load` never recovers from. Not the child's own `Location`: that
+/// is a value of another runtime and could not cross (ADR-0035 D4).
+///
+/// `href`, `assign` and `replace` all navigate through the same path a `src`
+/// write takes, so the load stays a task.
+fn frame_location_object(
+    cx: &BindCx<'_>,
+    frame: oxidepage_base::FrameId,
+) -> Result<JsValue, JsThrow> {
+    let object = cx.scope.new_object().map_err(JsThrow::from)?;
+    let read_href = {
+        let cx_state = Rc::clone(&cx.state);
+        move |scope: &dyn oxidepage_js::JsScope| -> Result<JsValue, JsThrow> {
+            let _ = scope;
+            let Some(state) = cx_state.frame.global.frame_state(frame) else {
+                return Ok(JsValue::String(String::from("about:blank")));
+            };
+            let url = cx_state
+                .dom
+                .borrow()
+                .document_url_of(state.document())
+                .to_owned();
+            Ok(JsValue::String(url))
+        }
+    };
+    let getter = JsValue::Object(
+        cx.scope
+            .new_function("get href", 0, {
+                let read_href = read_href.clone();
+                Rc::new(move |scope: &dyn oxidepage_js::JsScope, _call| read_href(scope))
+            })
+            .map_err(JsThrow::from)?,
+    );
+    let navigate = move |scope: &dyn oxidepage_js::JsScope,
+                         call: oxidepage_js::HostCall|
+          -> Result<JsValue, JsThrow> {
+        let cx = BindCx {
+            scope,
+            state: crate::cx::world_state(scope)?,
+        };
+        let value = call.args.first().cloned().unwrap_or(JsValue::Undefined);
+        let url = cx.scope.coerce_string(&value)?;
+        let data = Rc::new(WindowProxyData::Frame(frame));
+        set_frame_location(&cx, &data, &url)?;
+        Ok(JsValue::Undefined)
+    };
+    let setter = JsValue::Object(
+        cx.scope
+            .new_function("set href", 1, Rc::new(navigate))
+            .map_err(JsThrow::from)?,
+    );
+    cx.scope
+        .define_property(
+            &object,
+            "href",
+            oxidepage_js::PropertyDef::Accessor {
+                getter: Some(&getter),
+                setter: Some(&setter),
+                enumerable: true,
+                configurable: false,
+            },
+        )
+        .map_err(JsThrow::from)?;
+    for name in ["assign", "replace"] {
+        let f = JsValue::Object(
+            cx.scope
+                .new_function(name, 1, Rc::new(navigate))
+                .map_err(JsThrow::from)?,
+        );
+        cx.scope.set(&object, name, &f).map_err(JsThrow::from)?;
+    }
+    let to_string = JsValue::Object(
+        cx.scope
+            .new_function("toString", 0, {
+                let read_href = read_href.clone();
+                Rc::new(move |scope: &dyn oxidepage_js::JsScope, _call| read_href(scope))
+            })
+            .map_err(JsThrow::from)?,
+    );
+    cx.scope
+        .set(&object, "toString", &to_string)
+        .map_err(JsThrow::from)?;
+    Ok(JsValue::Object(object))
 }
