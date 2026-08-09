@@ -471,3 +471,36 @@ fn a_form_target_names_a_context() {
     assert_eq!(s(&page, "!!document.getElementById('form')"), "true");
     assert_eq!(rendered_roots_count(&page), 2);
 }
+
+/// `window.open(url, "<name>")` navigates the frame that answers to the name
+/// and hands back a proxy for it — the third caller of the same target
+/// resolution links and forms use.
+#[test]
+fn window_open_with_a_name_drives_that_frame() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' name='side' srcdoc='<p id=p>before</p>'></iframe></body>",
+    );
+    let returned = page
+        .eval_to_string(
+            "(() => { const w = window.open('data:text/html,<p>landed', 'side'); \
+              return w === null ? 'null' : typeof w; })()",
+        )
+        .unwrap();
+    assert_eq!(returned, "object", "a named context answers with its proxy");
+    page.settle(Duration::from_millis(600));
+
+    let dom = page.dom();
+    let top = dom.document();
+    let frame_url = dom
+        .rendered_roots()
+        .find(|&root| root != top)
+        .map(|root| dom.document_url_of(root).to_owned())
+        .expect("a frame");
+    assert!(
+        frame_url.starts_with("data:text/html"),
+        "the named frame navigated, and nothing was opened: {frame_url}"
+    );
+    drop(dom);
+    assert_eq!(rendered_roots_count(&page), 2);
+}

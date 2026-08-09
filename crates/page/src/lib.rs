@@ -6059,15 +6059,28 @@ impl Page {
         // without an accompanying DOM mutation (an external `<link>`/`@import`
         // completing, or a CSSOM `insertRule`) bumps only `style.version()`. A
         // dom-version gate would miss those and never fetch their web fonts.
-        // Summed over every browsing context: a frame's own sheets carry
-        // `@font-face` rules, and gating on the top frame's engine alone left
-        // them unfetched however often the frame restyled (ADR-0035 D1).
-        let version: u64 = self
-            .frames
-            .pre_order()
-            .iter()
-            .map(|frame| frame.shared().style.borrow().version())
-            .sum();
+        // Over every browsing context: a frame's own sheets carry `@font-face`
+        // rules, and gating on the top frame's engine alone left them unfetched
+        // however often the frame restyled (ADR-0035 D1).
+        //
+        // A **hash of `(frame, version)` pairs**, not a sum. A sum is not
+        // monotonic here — a frame that navigates gets a fresh engine whose
+        // version restarts, and one that is discarded removes its term — so two
+        // different states can add up alike, and the collision skips a scan
+        // outright rather than merely delaying it.
+        let version = {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for frame in self.frames.pre_order() {
+                for word in [
+                    u64::from(frame.id().index()),
+                    frame.shared().style.borrow().version(),
+                ] {
+                    hash ^= word;
+                    hash = hash.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+            hash
+        };
         if self.last_fontface_scan.get() == version {
             return;
         }

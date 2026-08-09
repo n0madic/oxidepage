@@ -461,12 +461,13 @@ asserted to gain no splice at all. The splice is pinned twice more outside
 Rust: `tests/goldens/iframe.json` fixes the exact
 `PushClip → PushLayer → the child's items → PopLayer → PopClip` sequence, and
 the `tests/reftests/iframe-basic{,-ref}.html` pair asserts the pixels it
-produces — including that the clip holds content taller than the frame. `crates/page/tests/frame_scripting.rs` (18)
+produces — including that the clip holds content taller than the frame. `crates/page/tests/frame_scripting.rs` (20)
 covers the window family, `postMessage` in both directions and its
 `DataCloneError` refusals, a child's globals staying unreachable, the
 `sandbox` slice, a frame navigating itself, a context being named and renamed,
-a `target="<name>"` link driving the frame that answers to it, and `_top`
-reaching out of a frame. `crates/page/tests/frame_input.rs` (7) covers a click landing
+`_top` reaching out of a frame, and all three callers of the target
+resolution — a `target="<name>"` link, `<form target>` and
+`window.open(url, "<name>")` — driving the frame that answers to the name. `crates/page/tests/frame_input.rs` (7) covers a click landing
 inside a frame, the crossing accounting for the frame's position, the
 embedder's capturing listener seeing nothing, an `<iframe>` matching `:hover`
 while the pointer is inside it **and stopping when it leaves**,
@@ -487,9 +488,14 @@ diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 
 **Not implemented, and tracked rather than hidden:** a download started inside
-a frame, which is reported and refused rather than performed; and indexed
-access to a frame from its embedder (`window[0]`), where `window.length` and
-`frames` are present but the index is not.
+a frame, which is reported and refused rather than performed; indexed access to
+a frame from its embedder (`window[0]`), where `window.length` and `frames` are
+present but the index is not; and a nested frame's document request keeping its
+own protocol id rather than taking its `loaderId`. Chrome makes those two equal
+for a frame as it does for the page, and Puppeteer's `isNavigationRequest` is
+`requestId === loaderId` — so a frame's document load reads to it as an
+ordinary subresource. Nothing in either driver suite exercises it, which is
+exactly why it is written down.
 
 ## Deliberate limits (P6 — absent beats fake)
 
