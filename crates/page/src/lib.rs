@@ -69,6 +69,36 @@ mod render;
 mod worlds;
 pub use command::{LoopStats, PageJob};
 
+/// A browsing context appearing or going away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameEvent {
+    pub kind: FrameEventKind,
+    pub frame: oxidepage_base::FrameId,
+    /// The embedding context. Always `Some` — the top-level frame is neither
+    /// attached nor detached while the page lives.
+    pub parent: Option<oxidepage_base::FrameId>,
+    /// The URL the context is showing at the moment of the event.
+    pub url: String,
+    /// The `Runtime.ExecutionContextId` of the frame's default world, when the
+    /// event is about a context that now exists.
+    ///
+    /// A frame's realm is **rebuilt at each of its navigations** — `document`
+    /// is a non-configurable data property and cannot be re-pointed — so this
+    /// moves with the document, and a driver that cached the old id must be
+    /// told. `None` on detach, where there is nothing left to evaluate in.
+    pub context_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameEventKind {
+    /// The context was created — HTML does this when the `<iframe>` is
+    /// inserted, before any `src` is fetched, so its document is `about:blank`.
+    Attached,
+    /// The context committed a document, and with it a fresh realm.
+    Navigated,
+    Detached,
+}
+
 /// One browsing context, as an embedder or the protocol layer sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameInfo {
@@ -79,6 +109,8 @@ pub struct FrameInfo {
     pub url: String,
     /// The `<iframe>` element embedding it, in its parent's document.
     pub owner: Option<NodeId>,
+    /// The `Runtime.ExecutionContextId` of its default world.
+    pub context_id: Option<u64>,
 }
 pub use domnode::{KeyEvent, LayoutMetrics, MAX_DESCRIPTION_DEPTH, NodeDescription, NodeRef};
 
@@ -309,6 +341,13 @@ pub struct NavigationEvent {
 #[derive(Clone, Debug)]
 pub enum PageRecord {
     Navigation(NavigationEvent),
+    /// A nested browsing context was created or discarded (ADR-0035 D9).
+    ///
+    /// A driver builds its frame set once, from `Page.getFrameTree`, and
+    /// indexes every later event into it — so a frame that appears afterwards
+    /// is invisible without this. Puppeteer's `FrameManager` and Playwright's
+    /// `_onFrameAttached` both work that way.
+    Frame(FrameEvent),
     Console(ConsoleMessage),
     Error(ScriptError),
     /// A dialog is **open** and the page is parked on it.
@@ -1661,6 +1700,9 @@ pub struct Page {
     /// The navigation milestone stream, drained by
     /// [`Page::drain_navigation_events`].
     navigation_events: RefCell<VecDeque<NavigationEvent>>,
+    /// Browsing contexts appearing and going away, buffered for a pull-API
+    /// embedder exactly as navigation events are.
+    frame_events: RefCell<VecDeque<FrameEvent>>,
     /// Current viewport, retained so a navigation can rebuild the style/layout
     /// engines for the fresh document.
     viewport: Cell<Viewport>,
@@ -1974,6 +2016,7 @@ impl Page {
             preserving_contexts: Cell::new(false),
             navigating: Cell::new(false),
             navigation_events: RefCell::new(VecDeque::new()),
+            frame_events: RefCell::new(VecDeque::new()),
             viewport: Cell::new(viewport),
             render: render::RenderState::default(),
             start_time: Cell::new(Instant::now()),
@@ -2251,6 +2294,11 @@ impl Page {
                 parent: frame.shared().parent_frame(),
                 url: dom.document_url_of(frame.document()).to_owned(),
                 owner: frame.owner(),
+                context_id: self
+                    .worlds
+                    .get(frame.shared().default_world())
+                    .and_then(|world| world.state())
+                    .map(|state| state.context_id.get()),
             })
             .collect()
     }
@@ -4720,6 +4768,10 @@ impl Page {
                 dom.free_detached_tree_if_unpinned(previous);
             }
         }
+        // The realm was rebuilt, so the frame's execution context id moved.
+        // A driver that cached the old one would evaluate into a context that
+        // no longer exists (ADR-0035 D9).
+        self.record_frame(FrameEventKind::Navigated, frame);
         self.fire_frame_event(owner, "load");
     }
 
@@ -4901,6 +4953,7 @@ impl Page {
         let frame = self.frames.attach(parent.id(), owner, |id| {
             parent_shared.new_child(id, document, viewport)
         });
+        self.record_frame(FrameEventKind::Attached, &frame);
         // What `iframe.contentDocument` reads. Recorded on the element rather
         // than looked up through the frame table, because `bindings` cannot see
         // the table and this is a plain structural fact — the mirror of an
@@ -4968,6 +5021,36 @@ impl Page {
         true
     }
 
+    /// Reports a browsing context appearing or going away.
+    fn record_frame(&self, kind: FrameEventKind, frame: &Rc<frame::Frame>) {
+        let context_id = (kind != FrameEventKind::Detached)
+            .then(|| {
+                self.worlds
+                    .get(frame.shared().default_world())
+                    .and_then(|world| world.state())
+                    .map(|state| state.context_id.get())
+            })
+            .flatten();
+        let event = FrameEvent {
+            kind,
+            frame: frame.shared().frame(),
+            parent: frame.shared().parent_frame(),
+            url: self
+                .state
+                .dom
+                .borrow()
+                .document_url_of(frame.document())
+                .to_owned(),
+            context_id,
+        };
+        self.hooks.emit_or_push(
+            &self.frame_events,
+            MAX_NAVIGATION_EVENTS,
+            event,
+            PageRecord::Frame,
+        );
+    }
+
     /// Tears down already-detached frames, deepest first.
     ///
     /// **Two passes over the worlds, and the split is the same one
@@ -4978,6 +5061,12 @@ impl Page {
     /// A's `Persistent`s aborts the process inside `JS_FreeRuntime` rather than
     /// failing a test.
     fn discard_frames(&self, doomed: Vec<Rc<frame::Frame>>) {
+        // Reported before the teardown, while the context still has a URL to
+        // name — a driver removing a frame from its set needs the id, and the
+        // id is all that survives the discard.
+        for frame in &doomed {
+            self.record_frame(FrameEventKind::Detached, frame);
+        }
         let mut realms = Vec::new();
         for frame in &doomed {
             realms.extend(self.worlds.release_frame(frame.id()));

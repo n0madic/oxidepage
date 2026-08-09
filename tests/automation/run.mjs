@@ -657,6 +657,26 @@ try {
     });
     assertEqual(result, '[11,"text/plain",5,"world","hello world"]', 'Blob + FileReader');
   });
+  await check('page.frames sees a nested browsing context', async () => {
+    await page.goto(`${base}/frames.html`);
+    const frames = page.frames();
+    assertEqual(String(frames.length), '2', 'the page frame plus the iframe');
+    const child = frames.find((f) => f !== page.mainFrame());
+    if (!child) throw new Error('no child frame');
+    assertEqual(String(child.parentFrame() === page.mainFrame()), 'true', 'parent');
+  });
+
+  await check('frame.evaluate runs in the frame own realm', async () => {
+    await page.goto(`${base}/frames.html`);
+    const child = page.frames().find((f) => f !== page.mainFrame());
+    // The frame's own document, not the embedder's — `other.html` is what the
+    // `<iframe src>` loaded.
+    const title = await child.evaluate(() => document.title);
+    assertEqual(title, 'Other page', 'the frame evaluates against its own document');
+    const heading = await child.evaluate(() => document.querySelector('h1').textContent);
+    assertEqual(heading, 'Other', 'and its own tree');
+  });
+
 } finally {
   // `disconnect`, not `close`: the endpoint is owned by the runner, which stops
   // it when the harness exits. `browser.close()` here would race the runner's

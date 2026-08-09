@@ -134,7 +134,7 @@ fn get_document(connection: &Arc<Connection>, request: &Request) -> CommandResul
         .page
         .document_description(params.depth.unwrap_or(1), params.pierce.unwrap_or(false))?
         .map_err(node_error)?;
-    Ok(json!({ "root": node_json(&root) }))
+    Ok(json!({ "root": node_json(&root, &session.target_id) }))
 }
 
 fn describe_node(connection: &Arc<Connection>, request: &Request) -> CommandResult {
@@ -159,7 +159,7 @@ fn describe_node(connection: &Arc<Connection>, request: &Request) -> CommandResu
             params.depth.pierce.unwrap_or(false),
         )?
         .map_err(node_error)?;
-    Ok(json!({ "node": node_json(&node) }))
+    Ok(json!({ "node": node_json(&node, &session.target_id) }))
 }
 
 fn resolve_node(connection: &Arc<Connection>, request: &Request) -> CommandResult {
@@ -381,10 +381,12 @@ pub fn get_layout_metrics(connection: &Arc<Connection>, request: &Request) -> Co
 ///    array, not a map or a list of pairs.
 /// 2. `childNodeCount` is omitted for the kinds that cannot hold children, as
 ///    Chrome does.
-/// 3. **`frameId` is never emitted.** Puppeteer's `contentFrame()` returns
-///    `null` iff `typeof node.frameId !== 'string'`, and `null` is the correct
-///    answer until nested browsing contexts exist.
-fn node_json(node: &NodeDescription) -> Value {
+/// 3. **`frameId` is emitted only on an `<iframe>` that owns a context.**
+///    Puppeteer's `contentFrame()` returns `null` iff
+///    `typeof node.frameId !== 'string'`, and Playwright's `frameLocator()`
+///    resolves through the same member — so a `frameId` on anything else would
+///    hand both a frame that is not there (ADR-0035 D9).
+fn node_json(node: &NodeDescription, target_id: &str) -> Value {
     let mut out = serde_json::Map::new();
     out.insert(String::from("nodeId"), json!(node.handle));
     out.insert(String::from("backendNodeId"), json!(node.handle));
@@ -406,8 +408,18 @@ fn node_json(node: &NodeDescription) -> Value {
         }
         out.insert(String::from("attributes"), json!(flat));
     }
+    if let Some(frame) = node.frame {
+        out.insert(
+            String::from("frameId"),
+            json!(crate::frame::frame_id_for(target_id, frame, false)),
+        );
+    }
     if !node.children.is_empty() {
-        let children: Vec<Value> = node.children.iter().map(node_json).collect();
+        let children: Vec<Value> = node
+            .children
+            .iter()
+            .map(|child| node_json(child, target_id))
+            .collect();
         out.insert(String::from("children"), json!(children));
     }
     if let Some(url) = &node.document_url {
@@ -430,7 +442,11 @@ fn node_json(node: &NodeDescription) -> Value {
         out.insert(String::from("shadowRootType"), json!(mode));
     }
     if !node.shadow_roots.is_empty() {
-        let roots: Vec<Value> = node.shadow_roots.iter().map(node_json).collect();
+        let roots: Vec<Value> = node
+            .shadow_roots
+            .iter()
+            .map(|root| node_json(root, target_id))
+            .collect();
         out.insert(String::from("shadowRoots"), json!(roots));
     }
     Value::Object(out)

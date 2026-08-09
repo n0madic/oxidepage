@@ -88,6 +88,13 @@ pub struct NodeDescription {
     pub shadow_root_mode: Option<&'static str>,
     /// A host element's shadow root, when piercing was asked for.
     pub shadow_roots: Vec<NodeDescription>,
+    /// The browsing context an `<iframe>` embeds (ADR-0035).
+    ///
+    /// This is how a driver goes from an element handle to a frame:
+    /// Puppeteer's `contentFrame()` and Playwright's `frameLocator()` both
+    /// resolve through it. `None` for every other element, which is what makes
+    /// `contentFrame()` answer `null`.
+    pub frame: Option<oxidepage_base::FrameId>,
 }
 
 /// The document's scroll position and the two sizes a driver measures against —
@@ -414,6 +421,7 @@ impl Page {
         };
 
         let mut shadow_root = None;
+        let mut frame_document = None;
         match dom.node(node).data() {
             NodeData::Element(el) => {
                 description.local_name = el.name.local.to_string();
@@ -423,6 +431,13 @@ impl Page {
                     .map(|a| (oxidepage_dom::qualified_name(&a.name), a.value.to_string()))
                     .collect();
                 shadow_root = el.shadow_root();
+                // An `<iframe>` names the context it embeds. Read from the
+                // element's own `contentDocument` pointer rather than from the
+                // frame table, so it is the same fact `iframe.contentDocument`
+                // answers with.
+                if let Some(document) = el.content_document() {
+                    frame_document = Some(document);
+                }
             }
             NodeData::Document(doc) => {
                 description.document_url = Some(doc.url().to_owned());
@@ -443,6 +458,11 @@ impl Page {
             _ => {}
         }
         drop(dom);
+        description.frame = frame_document.and_then(|document| {
+            self.frames
+                .of_document(document)
+                .map(|frame| frame.shared().frame())
+        });
 
         if let Some(parent) = parent {
             description.parent = self.node_handle(parent).ok();

@@ -262,6 +262,44 @@ try {
     await target.evaluate(() => console.log('from the page'));
     assertEqual(await within(10000, 'console event', seen), 'from the page', 'console text');
   });
+  await check('page.frames sees a nested browsing context', async () => {
+    const target = requirePage();
+    await target.goto(`${base}/frames.html`);
+    const frames = target.frames();
+    assertEqual(String(frames.length), '2', 'the page frame plus the iframe');
+    const child = frames.find((f) => f !== target.mainFrame());
+    if (!child) throw new Error('no child frame');
+    assertEqual(String(child.parentFrame() === target.mainFrame()), 'true', 'parent');
+  });
+
+  await check('frame.evaluate runs in the frame own realm', async () => {
+    const target = requirePage();
+    await target.goto(`${base}/frames.html`);
+    const child = target.frames().find((f) => f !== target.mainFrame());
+    // `other.html` is what the `<iframe src>` loaded — the frame's own
+    // document, not the embedder's. (Its title and heading are deliberately
+    // each other's near-miss, so a check that read the wrong document would
+    // still fail rather than coincide.)
+    assertEqual(await child.evaluate(() => document.title), 'Other', 'own document');
+    assertEqual(
+      await child.evaluate(() => document.querySelector('h1').textContent),
+      'Other page',
+      'own tree',
+    );
+  });
+
+  // Expected to fail until `Page.createIsolatedWorld` honours `frameId`:
+  // Playwright evaluates a locator in a **utility world of that frame**, and
+  // ours is still the main frame's, so the locator never gets a world to run
+  // in and the wait times out. `page.frames()` and `frame.evaluate()` above do
+  // not need one, which is why they pass.
+  await check('frameLocator reaches into the frame', async () => {
+    const target = requirePage();
+    await target.goto(`${base}/frames.html`);
+    const text = await target.frameLocator('#inner').locator('h1').textContent();
+    assertEqual(text, 'Other page', 'frameLocator resolved through the <iframe>');
+  });
+
 } finally {
   // `close`, not a teardown of the endpoint: the runner owns the server and
   // stops it when this process exits.

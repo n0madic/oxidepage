@@ -91,6 +91,9 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
                     navigation_events(connection, session, frame, &loader_id, &url, navigation);
                 }
             }
+            PageEvent::Frame(frame_event) => {
+                frame_lifecycle_events(connection, session, target_id, &loader_id, frame_event);
+            }
             PageEvent::DialogOpening(request) if session.flags.page.load(Ordering::Relaxed) => {
                 {
                     connection.emit(Event::session(
@@ -605,6 +608,112 @@ fn navigation_events(
         }
     }
     let _ = url;
+}
+
+/// `Page.frameAttached` / `Page.frameDetached` for a nested browsing context
+/// (ADR-0035 D9).
+///
+/// A driver builds its frame set once from `Page.getFrameTree` and indexes
+/// every later event into it, so a frame that appears afterwards is invisible
+/// without `frameAttached` — Puppeteer's `FrameManager` and Playwright's
+/// `_onFrameAttached` both work that way.
+///
+/// **Order matters**: `frameAttached` must precede the `frameNavigated` that
+/// describes the frame's first document, or the later event names a frame the
+/// driver has never heard of and is dropped. Attach is emitted when the context
+/// is created — before its `src` is loaded — which is the order HTML creates
+/// them in and therefore the order they arrive here.
+fn frame_lifecycle_events(
+    connection: &Arc<Connection>,
+    session: &Arc<SessionState>,
+    target_id: &str,
+    loader_id: &str,
+    event: &oxidepage_engine::page_api::FrameEvent,
+) {
+    if !session.flags.page.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(parent) = event.parent else {
+        return; // the top-level frame is never attached or detached
+    };
+    let id = crate::frame::frame_id_for(target_id, event.frame, false);
+    let parent_is_main = connection
+        .registry
+        .frame(target_id)
+        .is_some_and(|f| f.id() == target_id);
+    let parent_id = crate::frame::frame_id_for(target_id, parent, parent_is_main);
+    let frame_json = |url: &str| {
+        json!({
+            "id": id,
+            "parentId": parent_id,
+            "loaderId": loader_id,
+            "url": url,
+            "securityOrigin": crate::frame::security_origin(url),
+            "mimeType": "text/html",
+        })
+    };
+    let announce_context = |context_id: Option<u64>| {
+        // The frame's realm is rebuilt at each of its navigations, so a driver
+        // caching the old id would evaluate into a context that is gone. This
+        // is also what makes `frame.evaluate()` work at all: both drivers wait
+        // for a context whose `auxData.frameId` is the frame's.
+        if let Some(context_id) = context_id
+            && session.flags.runtime.load(Ordering::Relaxed)
+        {
+            connection.emit(Event::session(
+                &session.id,
+                "Runtime.executionContextCreated",
+                json!({
+                    "context": {
+                        "id": context_id,
+                        "origin": crate::frame::security_origin(&event.url),
+                        "name": "",
+                        "uniqueId": format!("{}.{}", session.target_id, context_id),
+                        "auxData": { "frameId": id, "isDefault": true },
+                    }
+                }),
+            ));
+        }
+    };
+
+    match event.kind {
+        oxidepage_engine::page_api::FrameEventKind::Attached => {
+            connection.emit(Event::session(
+                &session.id,
+                "Page.frameAttached",
+                json!({
+                    "frameId": id,
+                    "parentFrameId": parent_id,
+                    // Chrome carries the stack that created the frame; there is
+                    // no capture for it here and an empty one would be a lie.
+                }),
+            ));
+            // The frame is showing `about:blank` at this point, which is what
+            // HTML gives a fresh context. A driver wants a `frameNavigated`
+            // before it will treat the frame as usable.
+            connection.emit(Event::session(
+                &session.id,
+                "Page.frameNavigated",
+                json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
+            ));
+            announce_context(event.context_id);
+        }
+        oxidepage_engine::page_api::FrameEventKind::Navigated => {
+            connection.emit(Event::session(
+                &session.id,
+                "Page.frameNavigated",
+                json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
+            ));
+            announce_context(event.context_id);
+        }
+        oxidepage_engine::page_api::FrameEventKind::Detached => {
+            connection.emit(Event::session(
+                &session.id,
+                "Page.frameDetached",
+                json!({ "frameId": id, "reason": "remove" }),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

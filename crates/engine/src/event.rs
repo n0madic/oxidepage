@@ -13,6 +13,8 @@ use oxidepage_page::{
 #[non_exhaustive]
 pub enum PageEvent {
     Navigation(NavigationEvent),
+    /// A nested browsing context was created or discarded (ADR-0035 D9).
+    Frame(oxidepage_page::FrameEvent),
     Console(ConsoleMessage),
     Error(ScriptError),
     /// A dialog is open and **the page thread is parked on it right now**.
@@ -89,6 +91,7 @@ impl PageEvent {
     pub(crate) fn from_record(record: PageRecord) -> Self {
         match record {
             PageRecord::Navigation(event) => Self::Navigation(event),
+            PageRecord::Frame(event) => Self::Frame(event),
             PageRecord::Console(message) => Self::Console(message),
             PageRecord::Error(error) => Self::Error(error),
             PageRecord::DialogOpening(request) => Self::DialogOpening(request),
