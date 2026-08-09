@@ -15,11 +15,11 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender};
 use oxidepage_page::{
     BoxQuads, CallArgument, DialogRequest, DialogResponse, EvaluateOptions, EvaluateOutcome,
-    InterceptControl, KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput, NavigationHistory,
-    NodeDescription, NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob, PageOptions,
-    PageRecord, PaintOptions, PdfOptions, Point, PropertyDescriptor, Rect, RemoteError,
-    RemoteObject, ScreenshotOptions, SharedLocalStorage, SharedNetConfig, Viewport, WaitUntil,
-    WheelInput, WindowOp,
+    FrameInfo, InterceptControl, KeyEvent, KeyInput, LayoutMetrics, LoopStats, MouseInput,
+    NavigationHistory, NodeDescription, NodeRef, OpenWindowRequest, OpenedWindow, Page, PageJob,
+    PageOptions, PageRecord, PaintOptions, PdfOptions, Point, PropertyDescriptor, Rect,
+    RemoteError, RemoteObject, ScreenshotOptions, SharedLocalStorage, SharedNetConfig, Viewport,
+    WaitUntil, WheelInput, WindowOp,
 };
 
 use crate::context::{BrowserContext, PageSettings};
@@ -390,6 +390,11 @@ impl PageHandle {
     /// A snapshot of the session history.
     pub fn navigation_history(&self) -> EngineResult<NavigationHistory> {
         self.with(Page::navigation_history)
+    }
+
+    /// Every browsing context of this page, parents before their children.
+    pub fn frame_tree(&self) -> EngineResult<Vec<FrameInfo>> {
+        self.with(Page::frame_tree)
     }
 
     /// Traverses to an absolute session-history index.

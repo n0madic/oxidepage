@@ -35,7 +35,7 @@ use crossbeam_channel::{Receiver, Sender};
 // Geometry is part of this crate's own public surface (`layout_rect`,
 // `content_quads`, `ScreenshotOptions::clip`), so an embedder needs no
 // `oxidepage_base` dependency of its own.
-pub use oxidepage_base::{NodeId, Point, Rect, RequestId, Size};
+pub use oxidepage_base::{FrameId, NodeId, Point, Rect, RequestId, Size};
 /// The remote object model (ADR-0030): CDP's `Runtime` vocabulary as plain,
 /// `Send` Rust data. The live values stay in `WorldState`.
 pub use oxidepage_bindings::remote::{
@@ -68,6 +68,18 @@ pub mod remote;
 mod render;
 mod worlds;
 pub use command::{LoopStats, PageJob};
+
+/// One browsing context, as an embedder or the protocol layer sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub id: oxidepage_base::FrameId,
+    /// The embedding context, or `None` for the top-level one.
+    pub parent: Option<oxidepage_base::FrameId>,
+    /// The URL of the document this context is showing.
+    pub url: String,
+    /// The `<iframe>` element embedding it, in its parent's document.
+    pub owner: Option<NodeId>,
+}
 pub use domnode::{KeyEvent, LayoutMetrics, MAX_DESCRIPTION_DEPTH, NodeDescription, NodeRef};
 
 pub use render::{ImageFormat, ScreenshotOptions};
@@ -2221,6 +2233,28 @@ impl Page {
     /// Owned rather than borrowed because the caller is on another thread:
     /// `HistoryEntry` holds a `JsValue`, which is `!Send` and must not leave
     /// the realm's thread. Only the URL crosses.
+    /// A snapshot of every browsing context of this page, **parents before
+    /// their children** (ADR-0035).
+    ///
+    /// A snapshot rather than a live handle: the caller is the protocol layer,
+    /// which needs plain data it can map onto its own opaque ids, and a `Frame`
+    /// is `pub(crate)` for the same reason the world table is — nothing above
+    /// `page` should be able to reach into a browsing context.
+    #[must_use]
+    pub fn frame_tree(&self) -> Vec<FrameInfo> {
+        let dom = self.state.dom.borrow();
+        self.frames
+            .pre_order()
+            .into_iter()
+            .map(|frame| FrameInfo {
+                id: frame.shared().frame(),
+                parent: frame.shared().parent_frame(),
+                url: dom.document_url_of(frame.document()).to_owned(),
+                owner: frame.owner(),
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn navigation_history(&self) -> NavigationHistory {
         let history = self.state.history();

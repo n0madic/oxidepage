@@ -919,3 +919,65 @@ fn set_bypass_csp_is_accepted() {
     let (mut client, session, _) = harness.attached();
     client.call_on(&session, "Page.setBypassCSP", json!({ "enabled": true }));
 }
+
+/// `Page.getFrameTree` reports the page's real browsing contexts (ADR-0035 D9).
+/// The top-level frame keeps the target id — churning it would break every
+/// existing driver expectation — and a nested frame gets an opaque id of its
+/// own plus a `parentId` pointing back.
+#[test]
+fn get_frame_tree_reports_nested_frames() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title>\
+         <iframe srcdoc='<p>one</p>'></iframe>\
+         <iframe srcdoc='<p>two</p>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+
+    let tree = client.call_on(&session, "Page.getFrameTree", json!({}));
+    let root = &tree["frameTree"];
+    assert_eq!(
+        root["frame"]["id"], target,
+        "the top-level frame keeps the target id"
+    );
+    assert!(root["frame"].get("parentId").is_none());
+
+    let children = root["childFrames"].as_array().expect("childFrames");
+    assert_eq!(children.len(), 2, "two <iframe>s, two frames: {tree}");
+    for child in children {
+        let frame = &child["frame"];
+        assert_eq!(frame["parentId"], target);
+        assert_ne!(
+            frame["id"], target,
+            "a nested frame gets an id of its own: {frame}"
+        );
+        assert!(!frame["id"].as_str().unwrap().is_empty());
+        // Its own contexts, so it iterates like any other node in the tree.
+        assert!(child["childFrames"].as_array().unwrap().is_empty());
+    }
+    // The two frames are distinct.
+    assert_ne!(children[0]["frame"]["id"], children[1]["frame"]["id"]);
+}
+
+/// A page with no `<iframe>` still answers with the shape a driver iterates:
+/// one frame, an empty `childFrames`.
+#[test]
+fn get_frame_tree_of_a_frameless_page_has_one_frame() {
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+
+    let tree = client.call_on(&session, "Page.getFrameTree", json!({}));
+    assert_eq!(tree["frameTree"]["frame"]["id"], target);
+    assert!(
+        tree["frameTree"]["childFrames"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

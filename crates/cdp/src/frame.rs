@@ -317,6 +317,46 @@ impl Frame {
     }
 }
 
+/// CDP's opaque `frameId` for one of a page's browsing contexts.
+///
+/// **The top-level frame keeps the target id.** Minting a fresh one for it
+/// would churn every existing driver expectation for no gain, and it is the
+/// mapping the protocol has always reported.
+///
+/// A nested frame's id is *derived* from the target id and the engine's
+/// generation-checked `FrameId` rather than drawn at random and stored. Derived
+/// means there is no registry to keep in step with attach and detach, and the
+/// id is stable across calls — which is what a driver comparing frame identity
+/// needs. It is still opaque: a `FrameId` never leaves the process.
+#[must_use]
+pub fn frame_id_for(
+    target_id: &str,
+    frame: oxidepage_engine::page_api::FrameId,
+    is_main: bool,
+) -> String {
+    if is_main {
+        return target_id.to_owned();
+    }
+    // FNV-1a over the target id and the frame's index+generation. A collision
+    // would need two frames of one page to hash alike, and the generation is
+    // what keeps a reused slot from reviving a detached frame's id.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |byte: u8| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    };
+    for byte in target_id.as_bytes() {
+        mix(*byte);
+    }
+    for byte in frame.index().to_le_bytes() {
+        mix(byte);
+    }
+    for byte in frame.generation().get().to_le_bytes() {
+        mix(byte);
+    }
+    format!("{hash:016X}{:08X}", frame.index())
+}
+
 /// The serialized origin of `url`, or `"://"` for one that has none — which is
 /// what Chrome reports for `about:blank`.
 pub fn security_origin(url: &str) -> String {

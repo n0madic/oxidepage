@@ -167,14 +167,73 @@ fn get_frame_tree(connection: &Arc<Connection>, request: &Request) -> CommandRes
         .registry
         .frame(&session.target_id)
         .ok_or_else(|| ProtocolError::no_target(&session.target_id))?;
-    Ok(serde_json::json!({
-        "frameTree": {
-            "frame": frame.json(frame.loader_id(), frame.url()),
-            // No child frames until stage 11. The member is present and empty
-            // rather than absent, because a driver iterates it unconditionally.
+    // The engine's own view of the page's browsing contexts (ADR-0035). The
+    // top-level entry keeps the loader the registry tracks — that is a protocol
+    // fact the engine knows nothing about — while a nested frame reports the
+    // top frame's, since per-frame loaders are not tracked yet.
+    let contexts = session.page.frame_tree().unwrap_or_default();
+    let tree = build_frame_tree(&session.target_id, &frame, &contexts);
+    Ok(serde_json::json!({ "frameTree": tree }))
+}
+
+/// Assembles `Page.FrameTree` from the engine's flat, parent-first list.
+fn build_frame_tree(
+    target_id: &str,
+    top: &crate::frame::Frame,
+    contexts: &[oxidepage_engine::page_api::FrameInfo],
+) -> serde_json::Value {
+    let Some(root) = contexts.first() else {
+        // No contexts reported (an embedder page with no frame plumbing):
+        // answer for the one frame the target has, as before.
+        return serde_json::json!({
+            "frame": top.json(top.loader_id(), top.url()),
             "childFrames": [],
-        }
-    }))
+        });
+    };
+    frame_subtree(target_id, top, contexts, root)
+}
+
+fn frame_subtree(
+    target_id: &str,
+    top: &crate::frame::Frame,
+    contexts: &[oxidepage_engine::page_api::FrameInfo],
+    node: &oxidepage_engine::page_api::FrameInfo,
+) -> serde_json::Value {
+    let is_main = node.parent.is_none();
+    let id = crate::frame::frame_id_for(target_id, node.id, is_main);
+    let mut frame = if is_main {
+        top.json(top.loader_id(), top.url())
+    } else {
+        serde_json::json!({
+            "id": id,
+            "loaderId": top.loader_id(),
+            "url": node.url,
+            "securityOrigin": crate::frame::security_origin(&node.url),
+            "mimeType": "text/html",
+        })
+    };
+    if let Some(parent) = node.parent
+        && let Some(object) = frame.as_object_mut()
+    {
+        let parent_is_main = contexts
+            .iter()
+            .find(|c| c.id == parent)
+            .is_some_and(|c| c.parent.is_none());
+        object.insert(
+            "parentId".to_owned(),
+            serde_json::Value::String(crate::frame::frame_id_for(
+                target_id,
+                parent,
+                parent_is_main,
+            )),
+        );
+    }
+    let children: Vec<serde_json::Value> = contexts
+        .iter()
+        .filter(|c| c.parent == Some(node.id))
+        .map(|child| frame_subtree(target_id, top, contexts, child))
+        .collect();
+    serde_json::json!({ "frame": frame, "childFrames": children })
 }
 
 fn get_navigation_history(connection: &Arc<Connection>, request: &Request) -> CommandResult {
