@@ -1869,9 +1869,11 @@ impl Page {
             *hooks.local_storage.borrow_mut() = local_storage;
         }
         install_rejection_tracker(&realm, &hooks);
+        let main_document = dom.borrow().document();
         let shared = oxidepage_bindings::install_frame(
             oxidepage_bindings::PageGlobal::new(),
             oxidepage_base::MAIN_FRAME,
+            main_document,
             dom,
             Rc::clone(&hooks) as Rc<dyn HostHooks>,
             viewport,
@@ -4318,12 +4320,17 @@ impl Page {
                 // order rather than finishing this pass against a stale view.
                 continue;
             }
+            // An `<iframe>` that entered or left the document gains or loses
+            // its browsing context *before* anything routes work at it: a
+            // style update or an image in the child document needs that
+            // frame's engines to already exist.
+            let mut progressed = self.drain_frame_updates();
             // Tasks (timers, event handlers) may have inserted/removed
             // `<style>`/`<link>` elements; apply those to the style engine.
             self.drain_style_updates();
             // DOM-created classic scripts are prepared after the mutation task
             // returns, before other newly relevant subresources.
-            let mut progressed = self.drain_script_updates();
+            progressed |= self.drain_script_updates();
             // Deliver queued custom-element reactions (may run author JS that
             // mutates the DOM, so it counts as progress).
             progressed |= self.drain_custom_element_reactions();
@@ -4505,6 +4512,154 @@ impl Page {
     /// Starts loads for every `<img>` queued by the DOM (connect / `src`
     /// change). Loads are deduplicated by absolute URL and their `in_flight`
     /// count makes `load`/`settle` wait for them.
+    /// Creates and discards nested browsing contexts for the `<iframe>`
+    /// elements the DOM reported entering or leaving a rendered document.
+    ///
+    /// A task source, never a step of `flush_layout`: creating a context
+    /// evaluates `bootstrap.js` in a fresh realm, and layout is flushed from
+    /// inside JS getters (`offsetWidth`) under live `RefCell` borrows.
+    fn drain_frame_updates(&self) -> bool {
+        let updates = self.state.dom.borrow_mut().take_frame_updates();
+        let mut progressed = false;
+        for update in updates {
+            progressed |= match update {
+                oxidepage_dom::FrameUpdate::Connected(owner) => self.attach_child_frame(owner),
+                oxidepage_dom::FrameUpdate::Disconnected(owner) => self.detach_child_frame(owner),
+            };
+            // The queue's pin (`push_frame_update`), released only after the
+            // transition is done — the disconnect path reaches the element to
+            // find which context to discard.
+            self.release_image_pin(update.node());
+        }
+        progressed
+    }
+
+    /// Gives an `<iframe>` its nested browsing context: a document, a style and
+    /// layout engine pair, and a realm.
+    ///
+    /// HTML creates the context when the element is inserted, independently of
+    /// `src`, so the document here is always `about:blank`; navigating it is a
+    /// separate task.
+    fn attach_child_frame(&self, owner: NodeId) -> bool {
+        // The element may have been removed and re-added, or freed, between the
+        // queue and this drain.
+        if self.frames.of_owner(owner).is_some() {
+            return false;
+        }
+        let Some(parent) = self.frame_of(owner) else {
+            return false;
+        };
+        if !self.frames.has_room_under(parent.id()) {
+            self.hooks.report_resource_error(format!(
+                "refusing to create a nested browsing context: a page may hold at most {} frames, \
+                 nested at most {} deep",
+                frame::MAX_FRAMES_PER_PAGE,
+                frame::MAX_FRAME_DEPTH,
+            ));
+            return false;
+        }
+
+        // A fresh document in the shared arena, rendered from the moment it
+        // exists — that is what makes style, layout and resource loading reach
+        // it (ADR-0035 D1).
+        let document = {
+            let mut dom = self.state.dom.borrow_mut();
+            let document = dom.create_document(oxidepage_dom::node::DocumentData::html(
+                "about:blank".into(),
+            ));
+            dom.add_rendered_root(document);
+            document
+        };
+        let viewport = self.viewport.get();
+        let parent_shared = Rc::clone(parent.shared());
+        let frame = self.frames.attach(parent.id(), owner, |id| {
+            parent_shared.new_child(id, document, viewport)
+        });
+        if let Err(error) = self.install_frame_main_world(&frame) {
+            // Roll the half-built context back rather than leave a frame whose
+            // document is rendered but which can never run a script.
+            self.discard_frames(self.frames.detach(frame.id()));
+            self.hooks
+                .report_resource_error(format!("nested browsing context: {error}"));
+            return false;
+        }
+        true
+    }
+
+    /// Builds the default world of a freshly attached frame.
+    ///
+    /// Every per-runtime facility is replicated exactly as
+    /// [`Self::install_isolated_world`] does, and for the same reasons: one
+    /// interrupt over the *same* `ScriptBudget`, so a task that crosses frames
+    /// keeps one deadline; the module loader, so `import()` is not a silent
+    /// no-op; the rejection tracker, since a job queue is per runtime.
+    fn install_frame_main_world(&self, frame: &Rc<frame::Frame>) -> Result<(), String> {
+        let realm = QuickJsEngine
+            .new_realm(self.realm_options)
+            .map_err(|e| e.to_string())?;
+        {
+            let budget = Rc::clone(&self.script_budget);
+            realm.set_interrupt(Some(Box::new(move || budget.expired())));
+        }
+        install_rejection_tracker(&realm, &self.hooks);
+        realm.set_module_loader(Rc::new(ModuleLoader {
+            net: Rc::clone(&self.net),
+            dom: Rc::clone(&self.state.dom),
+        }));
+        // A fresh id, not `MAIN_WORLD`: world ids are unique page-wide because
+        // the table is flat, and id 0 is the *top-level* frame's default world
+        // (ADR-0035 D3).
+        let id = self.worlds.next_id();
+        let state = oxidepage_bindings::install_world(&realm, frame.shared(), id, "")
+            .map_err(|e| e.to_string())?;
+        frame.shared().set_default_world(id);
+        self.worlds.push(id, frame.id(), "", realm, state);
+        Ok(())
+    }
+
+    /// Discards the browsing context an `<iframe>` owned, with everything
+    /// nested inside it.
+    fn detach_child_frame(&self, owner: NodeId) -> bool {
+        let Some(frame) = self.frames.of_owner(owner) else {
+            return false;
+        };
+        let doomed = self.frames.detach(frame.id());
+        if doomed.is_empty() {
+            return false;
+        }
+        self.discard_frames(doomed);
+        true
+    }
+
+    /// Tears down already-detached frames, deepest first.
+    ///
+    /// **Two passes over the worlds, and the split is the same one
+    /// `WorldTable::teardown` documents**: every doomed world's JS values are
+    /// released while every runtime is still alive, and only then may a realm
+    /// be freed. A value can legitimately sit in another world's container
+    /// mid-teardown, and freeing runtime A while world B still holds one of
+    /// A's `Persistent`s aborts the process inside `JS_FreeRuntime` rather than
+    /// failing a test.
+    fn discard_frames(&self, doomed: Vec<Rc<frame::Frame>>) {
+        let mut realms = Vec::new();
+        for frame in &doomed {
+            realms.extend(self.worlds.release_frame(frame.id()));
+        }
+        // Pass 2: the realms, once nothing holds a `Persistent` any more.
+        drop(realms);
+        for frame in &doomed {
+            let document = frame.document();
+            let mut dom = self.state.dom.borrow_mut();
+            dom.remove_rendered_root(document);
+            // Never an unconditional free: the embedding document may hold a
+            // wrapper for this document, and a pinned node pins its node
+            // document (ADR-0017 D3).
+            if !self.state.parsing() && !dom.observers().has_pending_records() {
+                dom.free_detached_tree_if_unpinned(document);
+            }
+        }
+    }
+
     fn drain_image_updates(&self) {
         let updates = self.state.dom.borrow_mut().take_image_updates();
         for node in updates {

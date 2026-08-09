@@ -64,6 +64,31 @@ pub enum StyleUpdate {
     LinkElementRemoved(NodeId),
 }
 
+/// An `<iframe>` whose nested browsing context has to be created or discarded.
+///
+/// HTML creates the context when the element is inserted into a document that
+/// has one — *before* and independently of any `src` — and discards it when the
+/// element leaves. The DOM only reports the transition; the page owns the
+/// browsing context itself (ADR-0035 D2), because a context is a style engine,
+/// a layout engine and a realm, none of which `dom` can see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameUpdate {
+    /// The element is now in a rendered document: give it a context.
+    Connected(NodeId),
+    /// The element has left: discard its context.
+    Disconnected(NodeId),
+}
+
+impl FrameUpdate {
+    /// The `<iframe>` element. May be stale — the queue holds snapshots (L3).
+    #[must_use]
+    pub fn node(self) -> NodeId {
+        match self {
+            Self::Connected(node) | Self::Disconnected(node) => node,
+        }
+    }
+}
+
 impl StyleUpdate {
     /// The element this update is about. May be stale — the queue holds
     /// snapshots (L3).
@@ -216,6 +241,10 @@ pub struct DomTree {
     /// Queue of `<script>` elements that became eligible for preparation after
     /// connection or a relevant pre-start mutation. Page owns execution/fetch.
     script_updates: Vec<NodeId>,
+    /// Queue of `<iframe>` elements entering or leaving a rendered document,
+    /// drained by the page to create or discard nested browsing contexts
+    /// (ADR-0035). Entries **pin** their node, like `image_updates`.
+    frame_updates: Vec<FrameUpdate>,
     /// Monotonic counter bumped on every style-relevant DOM mutation (all funnel
     /// through `note_children_changed`/`note_subtree_mutation`). Lets CSSOM views
     /// cache resolved values and invalidate them exactly when the DOM changes.
@@ -331,6 +360,7 @@ impl DomTree {
             style_updates: Vec::new(),
             image_updates: Vec::new(),
             script_updates: Vec::new(),
+            frame_updates: Vec::new(),
             style_version: Cell::new(0),
             structure_version: Cell::new(0),
             base_url_cache: RefCell::new(None),
@@ -592,6 +622,44 @@ impl DomTree {
     pub fn push_image_update(&mut self, node: NodeId) {
         self.pin(node);
         self.image_updates.push(node);
+    }
+
+    /// Removes and returns the queued `<iframe>` context transitions. Each
+    /// entry carries one pin the caller must release, as
+    /// [`Self::take_image_updates`] does.
+    #[must_use]
+    pub fn take_frame_updates(&mut self) -> Vec<FrameUpdate> {
+        std::mem::take(&mut self.frame_updates)
+    }
+
+    /// Queues an `<iframe>` context transition, **pinning** the element until
+    /// the drain releases it.
+    ///
+    /// The pin matters most on the *disconnect* side: removing an `<iframe>`
+    /// can free it before the page's next turn, and the page has to reach the
+    /// element to find which browsing context to discard.
+    fn push_frame_update(&mut self, update: FrameUpdate) {
+        self.pin(update.node());
+        self.frame_updates.push(update);
+    }
+
+    /// Queues a context transition for every `<iframe>` in the subtree rooted
+    /// at `root` (mirrors [`Self::note_image_owners`]).
+    fn note_frame_owners(&mut self, root: NodeId, disconnected: bool) {
+        let ids: Vec<NodeId> = self.inclusive_descendants(root).collect();
+        for id in ids {
+            let is_iframe = self
+                .node(id)
+                .as_element()
+                .is_some_and(|el| el.is_html_element() && el.name.local == local_name!("iframe"));
+            if is_iframe {
+                self.push_frame_update(if disconnected {
+                    FrameUpdate::Disconnected(id)
+                } else {
+                    FrameUpdate::Connected(id)
+                });
+            }
+        }
     }
 
     // === Custom elements ===
@@ -2854,6 +2922,7 @@ impl DomTree {
                 self.note_stylesheet_owners(n, false);
                 self.note_image_owners(n);
                 self.note_script_owners(n);
+                self.note_frame_owners(n, false);
                 self.note_custom_element_connect(n);
             }
         }
@@ -2918,6 +2987,7 @@ impl DomTree {
         // elements — both must be captured while `is_connected` still holds.
         if self.node(node).is_connected() {
             self.note_stylesheet_owners(node, true);
+            self.note_frame_owners(node, true);
             self.note_custom_element_disconnect(node);
         }
         // A slot leaving a shadow tree re-assigns the host's slottables;

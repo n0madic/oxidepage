@@ -1160,6 +1160,14 @@ pub struct FrameShared {
     /// Which browsing context this is. Fixed for the state's whole life — a
     /// commit replaces the *document*, never the frame.
     frame: FrameId,
+    /// This frame's **default** world — its `window`, the one a driver sees as
+    /// `isDefault`.
+    ///
+    /// Not the `MAIN_WORLD` constant: world ids are unique page-wide because
+    /// the table is flat, so only the top-level frame's default world is id 0
+    /// (ADR-0035 D3). Reading the constant instead is how `customElements`
+    /// ends up installed in exactly one frame.
+    default_world: Cell<WorldId>,
     /// The document tree, shared with the parser during loads.
     ///
     /// The arena is shared by every browsing context of the page; **this**
@@ -1463,23 +1471,47 @@ pub struct WorldState {
 impl FrameShared {
     /// Builds the page-level half, including the engines every world shares.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         global: Rc<PageGlobal>,
         frame: FrameId,
+        document: NodeId,
         dom: Rc<RefCell<DomTree>>,
         hooks: Rc<dyn HostHooks>,
         viewport: Viewport,
         navigator: NavigatorData,
         screen: ScreenData,
     ) -> Rc<Self> {
-        let mut style_engine = StyleEngine::new(&dom.borrow(), viewport);
+        Self::from_parts(
+            global,
+            frame,
+            document,
+            dom,
+            hooks,
+            viewport,
+            Rc::new(navigator),
+            Rc::new(screen),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        global: Rc<PageGlobal>,
+        frame: FrameId,
+        document: NodeId,
+        dom: Rc<RefCell<DomTree>>,
+        hooks: Rc<dyn HostHooks>,
+        viewport: Viewport,
+        navigator: Rc<NavigatorData>,
+        screen: Rc<ScreenData>,
+    ) -> Rc<Self> {
+        let mut style_engine = StyleEngine::for_document(&dom.borrow(), document, viewport);
         let layout = Rc::new(RefCell::new(LayoutEngine::new(viewport)));
         // Wire real font metrics (parley/skrifa) into the cascade so
         // `ex`/`ch`/`ic` units resolve against actual fonts (WP-H).
         style_engine.set_font_metrics_provider(layout.borrow().font_metrics_factory());
         let style = Rc::new(RefCell::new(style_engine));
-        let document = dom.borrow().document();
-        let initial_url = dom.borrow().document_url().to_owned();
+        let initial_url = dom.borrow().document_url_of(document).to_owned();
         let start = std::time::Instant::now();
         let time_origin_epoch_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1489,13 +1521,14 @@ impl FrameShared {
         Rc::new(Self {
             global,
             frame,
+            default_world: Cell::new(MAIN_WORLD),
             dom,
             document: Cell::new(document),
             style,
             layout,
             hooks,
-            navigator: Rc::new(navigator),
-            screen: Rc::new(screen),
+            navigator,
+            screen,
             storage_subscriber: crate::storage::StorageSubscriber::next(),
             pending_scroll_targets: RefCell::new(Vec::new()),
             pending_navigation: RefCell::new(VecDeque::new()),
@@ -1525,6 +1558,38 @@ impl FrameShared {
     #[must_use]
     pub fn frame(&self) -> FrameId {
         self.frame
+    }
+
+    /// This frame's default world — its `window`.
+    #[must_use]
+    pub fn default_world(&self) -> WorldId {
+        self.default_world.get()
+    }
+
+    /// Names this frame's default world. Called once, when the frame's own
+    /// realm is installed.
+    pub fn set_default_world(&self, world: WorldId) {
+        self.default_world.set(world);
+    }
+
+    /// State for a browsing context nested in this one.
+    ///
+    /// Shares the page-wide state, the arena, the hooks and the immutable
+    /// `Navigator`/`Screen` profiles — a nested context is the same
+    /// environment, one document down — and builds its own engine pair over
+    /// `document`.
+    #[must_use]
+    pub fn new_child(&self, frame: FrameId, document: NodeId, viewport: Viewport) -> Rc<Self> {
+        Self::from_parts(
+            Rc::clone(&self.global),
+            frame,
+            document,
+            Rc::clone(&self.dom),
+            Rc::clone(&self.hooks),
+            viewport,
+            Rc::clone(&self.navigator),
+            Rc::clone(&self.screen),
+        )
     }
 
     /// The rendered document of this browsing context.

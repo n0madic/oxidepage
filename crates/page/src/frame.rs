@@ -17,9 +17,9 @@
 //! state and in the CDP frame registry, so a detached frame whose slot was
 //! reused would silently make a stale id name an unrelated browsing context.
 //!
-//! Only the top-level context exists so far. Attaching and detaching nested
-//! ones — with the frame caps, the owner-element mapping and the per-frame
-//! loading state — arrives with `<iframe>` loading.
+//! A nested context is created when its `<iframe>` enters a rendered document
+//! and discarded when it leaves — HTML does this independently of `src`, so an
+//! `<iframe>` with no `src` still owns a real `about:blank` document.
 
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
@@ -30,17 +30,40 @@ use oxidepage_base::{FrameId, NodeId};
 use oxidepage_bindings::FrameShared;
 use oxidepage_dom::DomTree;
 
+/// Deepest nesting of browsing contexts.
+///
+/// HTML sets no limit; every browser imposes one. Ours bounds a *page* rather
+/// than a driver: unlike a world, page script creates frames freely, so this
+/// and [`MAX_FRAMES_PER_PAGE`] are what keep `<iframe src>` recursion from
+/// being a host-exhaustion primitive (ADR-0035 D3).
+pub(crate) const MAX_FRAME_DEPTH: usize = 10;
+
+/// Most live browsing contexts one page may hold, the top-level one included.
+///
+/// Each costs a style engine, a layout engine and at least one whole
+/// `rquickjs::Runtime`, so the JS memory ceiling is `frames × worlds ×
+/// memory_limit` — the same reasoning as ADR-0027's `max_pages_per_context`,
+/// one level down.
+pub(crate) const MAX_FRAMES_PER_PAGE: usize = 64;
+
 /// One browsing context.
 pub(crate) struct Frame {
     id: FrameId,
     /// The embedding context, or `None` for the top-level frame.
     parent: Option<FrameId>,
+    /// The `<iframe>` element that owns this context, in the *parent's*
+    /// document. `None` only for the top-level frame.
+    owner: Option<NodeId>,
     /// This context's bindings state, which carries its rendered document and
     /// its style and layout engines.
     shared: Rc<FrameShared>,
 }
 
 impl Frame {
+    pub(crate) fn id(&self) -> FrameId {
+        self.id
+    }
+
     pub(crate) fn shared(&self) -> &Rc<FrameShared> {
         &self.shared
     }
@@ -57,6 +80,10 @@ struct Slot {
     /// so an id naming the previous occupant fails its check rather than
     /// addressing the new one.
     generation: NonZeroU32,
+    /// The slot's generation has run out and it will never be reused: reusing
+    /// it would re-issue an id its last occupant already handed out. The node
+    /// arena retires slots for exactly this reason.
+    retired: bool,
     frame: Option<Rc<Frame>>,
 }
 
@@ -74,11 +101,13 @@ impl FrameTree {
         let main = Frame {
             id,
             parent: None,
+            owner: None,
             shared,
         };
         Self {
             slots: RefCell::new(vec![Slot {
                 generation: FIRST_GENERATION,
+                retired: false,
                 frame: Some(Rc::new(main)),
             }]),
             main: Cell::new(id),
@@ -131,6 +160,115 @@ impl FrameTree {
             .iter()
             .filter_map(|slot| slot.frame.clone())
             .find(|frame| frame.document() == doc)
+    }
+
+    /// The frame the `<iframe>` element `owner` embeds.
+    pub(crate) fn of_owner(&self, owner: NodeId) -> Option<Rc<Frame>> {
+        self.slots
+            .borrow()
+            .iter()
+            .filter_map(|slot| slot.frame.clone())
+            .find(|frame| frame.owner == Some(owner))
+    }
+
+    /// How deep `id` sits, the top-level context being 0.
+    fn depth(&self, id: FrameId) -> usize {
+        let mut depth = 0;
+        let mut current = self.get(id).and_then(|frame| frame.parent);
+        while let Some(parent) = current {
+            depth += 1;
+            if depth > MAX_FRAME_DEPTH {
+                break;
+            }
+            current = self.get(parent).and_then(|frame| frame.parent);
+        }
+        depth
+    }
+
+    /// Live frame count, the top-level context included.
+    pub(crate) fn len(&self) -> usize {
+        self.slots
+            .borrow()
+            .iter()
+            .filter(|slot| slot.frame.is_some())
+            .count()
+    }
+
+    /// Whether a context nested in `parent` would fit under both caps.
+    ///
+    /// Asked *before* the caller builds the engines and the realm, so a refusal
+    /// costs nothing.
+    pub(crate) fn has_room_under(&self, parent: FrameId) -> bool {
+        self.len() < MAX_FRAMES_PER_PAGE && self.depth(parent) < MAX_FRAME_DEPTH
+    }
+
+    /// Registers a nested browsing context owned by `owner` in `parent`.
+    ///
+    /// `build` receives the id the slot allocated, because a `FrameShared`
+    /// carries its own frame id: minting the id outside and trusting the two to
+    /// agree is a silent mismatch waiting to happen.
+    pub(crate) fn attach(
+        &self,
+        parent: FrameId,
+        owner: NodeId,
+        build: impl FnOnce(FrameId) -> Rc<FrameShared>,
+    ) -> Rc<Frame> {
+        let mut slots = self.slots.borrow_mut();
+        let free = slots
+            .iter()
+            .position(|slot| slot.frame.is_none() && !slot.retired);
+        let (index, generation) = match free {
+            Some(index) => (index, slots[index].generation),
+            None => {
+                slots.push(Slot {
+                    generation: FIRST_GENERATION,
+                    retired: false,
+                    frame: None,
+                });
+                (slots.len() - 1, FIRST_GENERATION)
+            }
+        };
+        let id = FrameId::from_parts(
+            u32::try_from(index).expect("frame count is capped far below u32::MAX"),
+            generation,
+        );
+        let frame = Rc::new(Frame {
+            id,
+            parent: Some(parent),
+            owner: Some(owner),
+            shared: build(id),
+        });
+        slots[index].frame = Some(Rc::clone(&frame));
+        frame
+    }
+
+    /// Retires a nested context and every context beneath it, **deepest
+    /// first**, and reports them so the caller can tear each one down.
+    ///
+    /// Deepest first because teardown is ordered: a child's realm and document
+    /// must go before its parent's, exactly as `WorldTable::teardown` releases
+    /// the newest world first.
+    ///
+    /// The top-level frame is never detached: it *is* the page.
+    pub(crate) fn detach(&self, id: FrameId) -> Vec<Rc<Frame>> {
+        if id == self.main.get() {
+            return Vec::new();
+        }
+        let mut doomed = Vec::new();
+        self.walk_from(id, &mut doomed);
+        doomed.reverse();
+        let mut slots = self.slots.borrow_mut();
+        for frame in &doomed {
+            let Some(slot) = slots.get_mut(frame.id.index() as usize) else {
+                continue;
+            };
+            slot.frame = None;
+            match slot.generation.checked_add(1) {
+                Some(next) => slot.generation = next,
+                None => slot.retired = true,
+            }
+        }
+        doomed
     }
 
     /// The frame `node` belongs to, via its node document.

@@ -41,7 +41,7 @@ pub use parser::{ParseOptions, ParseSignal, Parser, parse_document, parse_fragme
 pub use select::{CompiledSelectorList, parse_selector_list};
 pub use shadow::ShadowMode;
 pub use sink::ParsedDocument;
-pub use tree::{DomTree, StyleUpdate};
+pub use tree::{DomTree, FrameUpdate, StyleUpdate};
 
 // Re-export the vocabulary types the DOM API surface speaks.
 pub use html5ever::interface::QuirksMode;

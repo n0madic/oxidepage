@@ -210,6 +210,28 @@ impl WorldTable {
         }
     }
 
+    /// Releases every world of `frame` and hands back their realms, still
+    /// alive, for the caller to drop.
+    ///
+    /// The realms come back rather than being dropped here because a page
+    /// detaching a subtree of frames must release **all** their values before
+    /// freeing **any** runtime — the same two-pass rule [`Self::teardown`]
+    /// documents, and the same process abort if it is collapsed into one.
+    #[must_use]
+    pub(crate) fn release_frame(&self, frame: FrameId) -> Vec<Rc<World>> {
+        let doomed: Vec<Rc<World>> = {
+            let mut slots = self.slots.borrow_mut();
+            let (doomed, kept) = slots.drain(..).partition(|w| w.frame == frame);
+            *slots = kept;
+            doomed
+        };
+        // Newest world first, mirroring `teardown`.
+        for world in doomed.iter().rev() {
+            Self::destroy(world);
+        }
+        doomed
+    }
+
     /// Destroys every world.
     ///
     /// **Two passes, and the split is load-bearing.** Every world's JS values

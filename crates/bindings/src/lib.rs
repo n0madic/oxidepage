@@ -129,9 +129,11 @@ pub fn install_with_profiles<R: JsRealm>(
     navigator: NavigatorData,
     screen: ScreenData,
 ) -> Result<Rc<WorldState>, JsError> {
+    let document = dom.borrow().document();
     let page = install_frame(
         crate::state::PageGlobal::new(),
         oxidepage_base::MAIN_FRAME,
+        document,
         dom,
         hooks,
         viewport,
@@ -147,16 +149,20 @@ pub fn install_with_profiles<R: JsRealm>(
 /// [`install_world`], which is what gives N globals one shared DOM, style
 /// engine and layout tree.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn install_frame(
     global: Rc<crate::state::PageGlobal>,
     frame: oxidepage_base::FrameId,
+    document: oxidepage_base::NodeId,
     dom: Rc<std::cell::RefCell<oxidepage_dom::DomTree>>,
     hooks: Rc<dyn HostHooks>,
     viewport: Viewport,
     navigator: NavigatorData,
     screen: ScreenData,
 ) -> Rc<crate::state::FrameShared> {
-    crate::state::FrameShared::new(global, frame, dom, hooks, viewport, navigator, screen)
+    crate::state::FrameShared::new(
+        global, frame, document, dom, hooks, viewport, navigator, screen,
+    )
 }
 
 /// Installs one world's globals into `realm` over shared page state.
