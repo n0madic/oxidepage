@@ -1082,6 +1082,103 @@ fn a_named_init_script_world_reaches_every_frame() {
     assert_eq!(evaluated["result"]["value"], json!(1));
 }
 
+/// A `loaderId` identifies one **document load**, and a nested frame commits
+/// its own — so it must not be its embedder's.
+///
+/// Sharing one makes a frame's navigation indistinguishable from the page's:
+/// Puppeteer's `isNavigationRequest` is `requestId === loaderId`, and both
+/// drivers tell a fresh document from a same-document change by the pair.
+#[test]
+fn each_frame_reports_a_loader_of_its_own() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title>\
+         <iframe srcdoc='<p>one</p>'></iframe>\
+         <iframe srcdoc='<p>two</p>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+    client.forget_events(Duration::from_millis(300));
+
+    let tree = client.call_on(&session, "Page.getFrameTree", json!({}));
+    let root = &tree["frameTree"];
+    let top = root["frame"]["loaderId"].as_str().expect("a loader");
+    let children = root["childFrames"].as_array().expect("childFrames");
+    assert_eq!(children.len(), 2);
+    let mut loaders: Vec<&str> = Vec::new();
+    for child in children {
+        let loader = child["frame"]["loaderId"].as_str().expect("a loader");
+        assert_ne!(loader, top, "a frame must not report its embedder's loader");
+        loaders.push(loader);
+    }
+    assert_ne!(loaders[0], loaders[1], "two frames, two documents");
+}
+
+/// A detached frame's execution contexts are announced dead, and **before** the
+/// frame is.
+///
+/// A driver drops an event naming a frame it has already retired, so the other
+/// order leaves ids in its context map that address a realm that is gone.
+#[test]
+fn a_detached_frame_retires_its_execution_contexts() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title><iframe id='f' srcdoc='<p>one</p>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(&session, "Runtime.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+    let live: Vec<i64> = client
+        .drain_events(Duration::from_millis(400))
+        .into_iter()
+        .filter(|e| e["method"] == "Runtime.executionContextCreated")
+        .map(|e| e["params"]["context"].clone())
+        .filter(|c| c["auxData"]["frameId"] != json!(target))
+        .filter_map(|c| c["id"].as_i64())
+        .collect();
+    assert!(!live.is_empty(), "the frame announced no context");
+
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.getElementById('f').remove()" }),
+    );
+    let events = client.drain_events(Duration::from_millis(400));
+    let methods: Vec<&str> = events
+        .iter()
+        .filter_map(|e| e["method"].as_str())
+        .filter(|m| *m == "Runtime.executionContextDestroyed" || *m == "Page.frameDetached")
+        .collect();
+    assert_eq!(
+        methods.last(),
+        Some(&"Page.frameDetached"),
+        "the frame must be retired last: {methods:?}"
+    );
+    let destroyed: Vec<i64> = events
+        .iter()
+        .filter(|e| e["method"] == "Runtime.executionContextDestroyed")
+        .filter_map(|e| e["params"]["executionContextId"].as_i64())
+        .collect();
+    // The frame's *last* context is the one the driver still holds; the earlier
+    // ones died at its own commits and were reported then.
+    assert!(
+        destroyed.contains(live.last().expect("a context")),
+        "the frame's live context was not retired: {destroyed:?} vs {live:?}"
+    );
+}
+
 /// A page with no `<iframe>` still answers with the shape a driver iterates:
 /// one frame, an empty `childFrames`.
 #[test]

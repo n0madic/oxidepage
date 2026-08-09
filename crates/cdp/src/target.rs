@@ -67,10 +67,24 @@ struct TargetEntry {
     info: TargetInfo,
     page: PageHandle,
     context: BrowserContext,
-    /// The one frame this target is, until stage 11 gives it a tree of them —
-    /// the loader bookkeeping and the frame's URL live there (see
-    /// [`crate::frame`]).
+    /// The target's **top-level** frame — the loader bookkeeping of the
+    /// document a `Page.navigate` produces, and that frame's URL, live there
+    /// (see [`crate::frame`]).
     frame: Frame,
+    /// The committed loader of each *nested* frame, by its CDP `frameId`.
+    ///
+    /// A loader identifies one **document load**, and a nested frame commits
+    /// its own — so reporting the top frame's, as this did while frames were
+    /// new, tells a driver that every frame of the page is showing the same
+    /// document. Puppeteer's `isNavigationRequest` and Playwright's document
+    /// bookkeeping both key on the pair, and a shared id makes a child frame's
+    /// navigation indistinguishable from its embedder's.
+    ///
+    /// A plain map rather than a tree of [`Frame`]s: the engine owns the frame
+    /// tree and answers `Page.getFrameTree` from it, so the only thing missing
+    /// on this side is the one string the protocol invented. Entries go when
+    /// the frame does.
+    child_loaders: HashMap<String, String>,
 }
 
 struct Registry {
@@ -321,6 +335,7 @@ impl TargetRegistry {
                     page: page.clone(),
                     context,
                     frame: Frame::new(target_id.clone(), info.url.clone()),
+                    child_loaders: HashMap::new(),
                 },
             );
             Self::publish(&mut inner, TargetSignal::Created(info));
@@ -479,6 +494,40 @@ impl TargetRegistry {
     #[must_use]
     pub fn frame(&self, target_id: &str) -> Option<Frame> {
         self.lock().targets.get(target_id).map(|t| t.frame.clone())
+    }
+
+    /// Mints and records the loader of a nested frame's fresh document.
+    ///
+    /// Called once per frame event, **outside** the per-session fan-out: two
+    /// sessions watching one page must be told the same loader, and minting
+    /// inside the loop would give each its own.
+    pub fn commit_child_loader(&self, target_id: &str, frame_id: &str) -> String {
+        let loader = crate::token::random_hex();
+        let mut inner = self.lock();
+        if let Some(entry) = inner.targets.get_mut(target_id) {
+            entry
+                .child_loaders
+                .insert(frame_id.to_owned(), loader.clone());
+        }
+        loader
+    }
+
+    /// The committed loader of a nested frame, if it has one.
+    #[must_use]
+    pub fn child_loader(&self, target_id: &str, frame_id: &str) -> Option<String> {
+        self.lock()
+            .targets
+            .get(target_id)?
+            .child_loaders
+            .get(frame_id)
+            .cloned()
+    }
+
+    /// Forgets a nested frame's loader once the frame is gone.
+    pub fn forget_child_loader(&self, target_id: &str, frame_id: &str) {
+        if let Some(entry) = self.lock().targets.get_mut(target_id) {
+            entry.child_loaders.remove(frame_id);
+        }
     }
 
     /// The id of the document currently **committed** in `target_id`

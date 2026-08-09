@@ -167,17 +167,17 @@ fn get_frame_tree(connection: &Arc<Connection>, request: &Request) -> CommandRes
         .registry
         .frame(&session.target_id)
         .ok_or_else(|| ProtocolError::no_target(&session.target_id))?;
-    // The engine's own view of the page's browsing contexts (ADR-0035). The
-    // top-level entry keeps the loader the registry tracks — that is a protocol
-    // fact the engine knows nothing about — while a nested frame reports the
-    // top frame's, since per-frame loaders are not tracked yet.
+    // The engine's own view of the page's browsing contexts (ADR-0035). Every
+    // frame's loader is a protocol fact the engine knows nothing about, so both
+    // the top-level entry and each nested one read it from the registry.
     let contexts = session.page.frame_tree().unwrap_or_default();
-    let tree = build_frame_tree(&session.target_id, &frame, &contexts);
+    let tree = build_frame_tree(connection, &session.target_id, &frame, &contexts);
     Ok(serde_json::json!({ "frameTree": tree }))
 }
 
 /// Assembles `Page.FrameTree` from the engine's flat, parent-first list.
 fn build_frame_tree(
+    connection: &Arc<Connection>,
     target_id: &str,
     top: &crate::frame::Frame,
     contexts: &[oxidepage_engine::page_api::FrameInfo],
@@ -190,10 +190,11 @@ fn build_frame_tree(
             "childFrames": [],
         });
     };
-    frame_subtree(target_id, top, contexts, root)
+    frame_subtree(connection, target_id, top, contexts, root)
 }
 
 fn frame_subtree(
+    connection: &Arc<Connection>,
     target_id: &str,
     top: &crate::frame::Frame,
     contexts: &[oxidepage_engine::page_api::FrameInfo],
@@ -206,7 +207,14 @@ fn frame_subtree(
     } else {
         serde_json::json!({
             "id": id,
-            "loaderId": top.loader_id(),
+            // Its own document's loader. The top frame's is the fallback for a
+            // frame this connection has not seen an event for — a session that
+            // enabled nothing and asked straight away — where a made-up id would
+            // be worse than a stale one.
+            "loaderId": connection
+                .registry
+                .child_loader(target_id, &id)
+                .unwrap_or_else(|| top.loader_id().to_owned()),
             "url": node.url,
             "securityOrigin": crate::frame::security_origin(&node.url),
             "mimeType": "text/html",
@@ -231,7 +239,7 @@ fn frame_subtree(
     let children: Vec<serde_json::Value> = contexts
         .iter()
         .filter(|c| c.parent == Some(node.id))
-        .map(|child| frame_subtree(target_id, top, contexts, child))
+        .map(|child| frame_subtree(connection, target_id, top, contexts, child))
         .collect();
     serde_json::json!({ "frame": frame, "childFrames": children })
 }

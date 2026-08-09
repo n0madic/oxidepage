@@ -85,7 +85,8 @@ pub struct FrameEvent {
     /// A frame's realms are **rebuilt at each of its navigations** — `document`
     /// is a non-configurable data property and cannot be re-pointed — so these
     /// move with the document, and a driver that cached the old ids must be
-    /// told. Empty on detach, where there is nothing left to evaluate in.
+    /// told. On a detach these are the contexts that are *going away* — read
+    /// before the teardown, since afterwards nothing names them.
     ///
     /// The isolated worlds belong here rather than in the page-wide list a
     /// commit reports: a driver registers `addScriptToEvaluateOnNewDocument`
@@ -5159,12 +5160,13 @@ impl Page {
     }
 
     /// Reports a browsing context appearing or going away.
+    ///
+    /// The worlds are read here, **including on a detach**: `discard_frames`
+    /// reports before it tears anything down precisely so the ids of the
+    /// contexts that are about to die can be named. A driver told nothing keeps
+    /// them in its map forever and routes later work at a realm that is gone.
     fn record_frame(&self, kind: FrameEventKind, frame: &Rc<frame::Frame>) {
-        let contexts = if kind == FrameEventKind::Detached {
-            Vec::new()
-        } else {
-            self.worlds_in(frame.shared().frame())
-        };
+        let contexts = self.worlds_in(frame.shared().frame());
         let event = FrameEvent {
             kind,
             frame: frame.shared().frame(),

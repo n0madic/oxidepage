@@ -83,6 +83,26 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
             Frame::new(target_id.to_owned(), url.clone())
         })
     });
+    // A nested frame's loader, settled once per event for the same reason the
+    // frame above is: it is minted, and two sessions must be told the same id.
+    let child_frame = match event {
+        PageEvent::Frame(frame_event) => frame_event
+            .parent
+            .map(|_| crate::frame::frame_id_for(target_id, frame_event.frame, false))
+            .map(|id| {
+                let loader = match frame_event.kind {
+                    // Attach and commit each produce a document; a detach names
+                    // the one the frame had.
+                    oxidepage_engine::page_api::FrameEventKind::Detached => connection
+                        .registry
+                        .child_loader(target_id, &id)
+                        .unwrap_or_else(|| loader_id.clone()),
+                    _ => connection.registry.commit_child_loader(target_id, &id),
+                };
+                (id, loader)
+            }),
+        _ => None,
+    };
 
     for session in &sessions {
         match event {
@@ -92,7 +112,9 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
                 }
             }
             PageEvent::Frame(frame_event) => {
-                frame_lifecycle_events(connection, session, target_id, &loader_id, frame_event);
+                if let Some((id, loader)) = &child_frame {
+                    frame_lifecycle_events(connection, session, target_id, id, loader, frame_event);
+                }
             }
             PageEvent::DialogOpening(request) if session.flags.page.load(Ordering::Relaxed) => {
                 {
@@ -254,6 +276,13 @@ pub fn dispatch_page_event(connection: &Arc<Connection>, target_id: &str, event:
             // rest have no protocol counterpart.
             _ => {}
         }
+    }
+
+    // After the fan-out, so every session saw the loader the frame died with.
+    if let (PageEvent::Frame(frame_event), Some((id, _))) = (event, &child_frame)
+        && frame_event.kind == oxidepage_engine::page_api::FrameEventKind::Detached
+    {
+        connection.registry.forget_child_loader(target_id, id);
     }
 }
 
@@ -633,16 +662,17 @@ fn frame_lifecycle_events(
     connection: &Arc<Connection>,
     session: &Arc<SessionState>,
     target_id: &str,
+    id: &str,
     loader_id: &str,
     event: &oxidepage_engine::page_api::FrameEvent,
 ) {
-    if !session.flags.page.load(Ordering::Relaxed) {
-        return;
-    }
+    // The context events belong to `Runtime`, which a session may have enabled
+    // without `Page` — and a driver that never hears a context died goes on
+    // addressing it.
+    let page_on = session.flags.page.load(Ordering::Relaxed);
     let Some(parent) = event.parent else {
         return; // the top-level frame is never attached or detached
     };
-    let id = crate::frame::frame_id_for(target_id, event.frame, false);
     let parent_is_main = connection
         .registry
         .frame(target_id)
@@ -693,40 +723,59 @@ fn frame_lifecycle_events(
 
     match event.kind {
         oxidepage_engine::page_api::FrameEventKind::Attached => {
-            connection.emit(Event::session(
-                &session.id,
-                "Page.frameAttached",
-                json!({
-                    "frameId": id,
-                    "parentFrameId": parent_id,
-                    // Chrome carries the stack that created the frame; there is
-                    // no capture for it here and an empty one would be a lie.
-                }),
-            ));
-            // The frame is showing `about:blank` at this point, which is what
-            // HTML gives a fresh context. A driver wants a `frameNavigated`
-            // before it will treat the frame as usable.
-            connection.emit(Event::session(
-                &session.id,
-                "Page.frameNavigated",
-                json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
-            ));
+            if page_on {
+                connection.emit(Event::session(
+                    &session.id,
+                    "Page.frameAttached",
+                    json!({
+                        "frameId": id,
+                        "parentFrameId": parent_id,
+                        // Chrome carries the stack that created the frame; there
+                        // is no capture for it here and an empty one is a lie.
+                    }),
+                ));
+                // The frame is showing `about:blank` at this point, which is
+                // what HTML gives a fresh context. A driver wants a
+                // `frameNavigated` before it will treat the frame as usable.
+                connection.emit(Event::session(
+                    &session.id,
+                    "Page.frameNavigated",
+                    json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
+                ));
+            }
             announce_contexts();
         }
         oxidepage_engine::page_api::FrameEventKind::Navigated => {
-            connection.emit(Event::session(
-                &session.id,
-                "Page.frameNavigated",
-                json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
-            ));
+            if page_on {
+                connection.emit(Event::session(
+                    &session.id,
+                    "Page.frameNavigated",
+                    json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
+                ));
+            }
             announce_contexts();
         }
         oxidepage_engine::page_api::FrameEventKind::Detached => {
-            connection.emit(Event::session(
-                &session.id,
-                "Page.frameDetached",
-                json!({ "frameId": id, "reason": "remove" }),
-            ));
+            // The contexts first, then the frame: a driver drops an event whose
+            // `frameId` it has already retired, so a `executionContextDestroyed`
+            // arriving after `frameDetached` can be discarded before the context
+            // map is cleaned — leaving ids that address a realm that is gone.
+            if session.flags.runtime.load(Ordering::Relaxed) {
+                for world in &event.contexts {
+                    connection.emit(Event::session(
+                        &session.id,
+                        "Runtime.executionContextDestroyed",
+                        json!({ "executionContextId": world.context_id }),
+                    ));
+                }
+            }
+            if page_on {
+                connection.emit(Event::session(
+                    &session.id,
+                    "Page.frameDetached",
+                    json!({ "frameId": id, "reason": "remove" }),
+                ));
+            }
         }
     }
 }
