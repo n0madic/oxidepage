@@ -92,10 +92,23 @@ pub enum WindowOp {
 
 /// State behind one `WindowProxy` wrapper.
 ///
+/// Two very different browsing contexts wear the same interface, and the split
+/// is what decides how much a member can do:
+///
+/// * a **sibling** from `window.open` lives on another OS thread with its own
+///   realm, so every member here is an atomic read or a fire-and-forget
+///   message — a getter that blocked on a round trip would deadlock the first
+///   time two pages opened each other (ADR-0027 D12);
+/// * a **frame** of this page lives on *this* thread, so its members are real
+///   and synchronous. No `JsValue` crosses even so: the proxy is an object of
+///   the accessing realm and the child's globals stay unreachable
+///   (ADR-0035 D4).
+///
 /// Deliberately holds no base URL. A `location` write resolves against the
-/// opener's *current* document, read at write time: the realm outlives a
-/// navigation, so a URL captured when `window.open` returned would send the
-/// sibling somewhere the calling script never named.
-pub(crate) struct WindowProxyData {
-    pub(crate) window: OpenedWindow,
+/// accessing document's *current* URL, read at write time: the realm outlives
+/// a navigation, so a URL captured when the proxy was made would send the
+/// target somewhere the calling script never named.
+pub(crate) enum WindowProxyData {
+    Sibling(OpenedWindow),
+    Frame(oxidepage_base::FrameId),
 }

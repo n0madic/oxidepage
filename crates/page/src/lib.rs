@@ -4364,6 +4364,11 @@ impl Page {
             // what makes an injected `MutationObserver` work at all — which is
             // what a driver's waiting is built on.
             progressed |= self.deliver_mutation_records();
+            // `postMessage` payloads queued by another frame's script. A task
+            // source, not a synchronous hop: a listener that answers with a
+            // `postMessage` back would otherwise ride the native stack
+            // (ADR-0035 D4).
+            progressed |= self.deliver_messages();
             // Newly connected `<img>` elements (or `src` changes) start loads.
             self.drain_image_updates();
             // Deferred `<img>` elements that have reached the viewport (lazy mode).
@@ -4765,6 +4770,31 @@ impl Page {
             }
             oxidepage_bindings::microtask_checkpoint(cx);
         });
+    }
+
+    /// Delivers every queued `postMessage` into its target frame's world.
+    ///
+    /// Entered per target rather than dispatched from the sender's realm: the
+    /// body is deserialized in the *receiver's* realm, which is what keeps each
+    /// `JsValue` inside its own runtime (ADR-0035 D4).
+    fn deliver_messages(&self) -> bool {
+        let messages = self.shared.global.take_messages();
+        let mut delivered = false;
+        for message in messages {
+            let Some(state) = self.shared.global.frame_state(message.target) else {
+                continue; // the target context went away between queue and drain
+            };
+            let world = state.default_world();
+            if self
+                .with_cx_in(world, |cx| {
+                    oxidepage_bindings::deliver_message(cx, &message);
+                })
+                .is_some()
+            {
+                delivered = true;
+            }
+        }
+        delivered
     }
 
     /// Creates and discards nested browsing contexts for the `<iframe>`

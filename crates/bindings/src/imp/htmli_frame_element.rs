@@ -8,7 +8,7 @@
 //! (ADR-0035 D5).
 
 use oxidepage_base::NodeId;
-use oxidepage_js::JsThrow;
+use oxidepage_js::{JsThrow, JsValue};
 
 use crate::cx::BindCx;
 use crate::imp::reflect::{string_reflector, url_reflector};
@@ -37,6 +37,22 @@ pub(crate) fn content_document(cx: &BindCx<'_>, this: NodeId) -> Result<Option<N
     Ok(same_origin(here, there).then_some(document))
 }
 
+/// The frame's `WindowProxy`, or `null` when there is no browsing context.
+///
+/// Available cross-origin, exactly as in a browser: a `WindowProxy` is the one
+/// object HTML lets you hold across an origin boundary — its *members* are what
+/// the origin check gates, not the handle itself.
+pub(crate) fn content_window(cx: &BindCx<'_>, this: NodeId) -> Result<JsValue, JsThrow> {
+    let document = cx.state.dom.borrow().content_document(this);
+    let Some(document) = document else {
+        return Ok(JsValue::Null);
+    };
+    match cx.state.frame.global.frame_of_document(document) {
+        Some(state) => cx.new_frame_proxy(state.frame()),
+        None => Ok(JsValue::Null),
+    }
+}
+
 /// Whether two document URLs share an origin, compared as
 /// `(scheme, host, port)`.
 ///
@@ -47,7 +63,7 @@ pub(crate) fn content_document(cx: &BindCx<'_>, this: NodeId) -> Result<Option<N
 ///
 /// `about:blank` and `srcdoc` frames inherit the embedder's origin at load, so
 /// by the time this runs their URL is already the right one to compare.
-fn same_origin(a: &str, b: &str) -> bool {
+pub(crate) fn same_origin(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
@@ -57,4 +73,20 @@ fn same_origin(a: &str, b: &str) -> bool {
     a.scheme() == b.scheme()
         && a.host_str() == b.host_str()
         && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// A document URL reduced to `scheme://host[:port]`, which is what
+/// `MessageEvent.origin` reports. `"null"` for anything without a host —
+/// `about:blank` inherits its embedder's URL at load, so it never lands here.
+pub(crate) fn origin_of(url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return "null".to_owned();
+    };
+    match parsed.host_str() {
+        Some(host) => match parsed.port() {
+            Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+            None => format!("{}://{host}", parsed.scheme()),
+        },
+        None => "null".to_owned(),
+    }
 }

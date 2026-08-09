@@ -203,6 +203,7 @@ interface HTMLIFrameElement : HTMLElement {
   [CEReactions] attribute DOMString height;
   [CEReactions] attribute DOMString referrerPolicy;
   readonly attribute Document? contentDocument;
+  readonly attribute WindowProxy? contentWindow;
 };
 interface HTMLCanvasElement : HTMLElement {};
 interface HTMLPictureElement : HTMLElement {};
@@ -619,6 +620,21 @@ interface WindowProxy {
   undefined close();
   undefined focus();
   attribute any location;
+  undefined postMessage(any message, optional any targetOrigin);
+};
+
+dictionary MessageEventInit : EventInit {
+  any data = null;
+  DOMString origin = "";
+  DOMString lastEventId = "";
+};
+
+interface MessageEvent : Event {
+  constructor(DOMString type, optional MessageEventInit eventInitDict = {});
+  readonly attribute any data;
+  readonly attribute DOMString origin;
+  readonly attribute DOMString lastEventId;
+  readonly attribute any source;
 };
 
 interface MediaQueryList : EventTarget {

@@ -50,6 +50,31 @@
     const objectKeys = Object.keys;
     const defineProp = Object.defineProperty;
     const getOwnPropDesc = Object.getOwnPropertyDescriptor;
+    const objectToString = Object.prototype.toString;
+
+    // `postMessage`'s clone step. `JSON.stringify` alone is not it: it turns a
+    // `Map` into `{}` and a `Date` into a string, so a page would be told its
+    // value travelled when it did not. This walks first and refuses anything
+    // outside the subset, which is what makes the limit a `DataCloneError` a
+    // page can see rather than a silent flattening (ADR-0035 D4).
+    const cloneForMessage = (value) => {
+        const seen = new SetCtor();
+        const walk = (v) => {
+            if (v === null) return;
+            const t = typeof v;
+            if (t === "boolean" || t === "number" || t === "string" || t === "undefined") return;
+            if (t === "function" || t === "symbol" || t === "bigint") throw new Error(t);
+            if (seen.has(v)) throw new Error("cyclic object value");
+            setAdd.call(seen, v);
+            const tag = objectToString.call(v);
+            if (tag !== "[object Object]" && tag !== "[object Array]") {
+                throw new Error(tag.slice(8, -1));
+            }
+            for (const key of objectKeys(v)) walk(v[key]);
+        };
+        walk(value);
+        return jsonStringify(value);
+    };
     const SetCtor = Set;
     const setAdd = Set.prototype.add;
     const setForEach = Set.prototype.forEach;
@@ -1513,7 +1538,7 @@
         newWrapperMap, cacheGet, cacheSet,
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
         setToStringTag, makeDomException, structuredClone,
-        jsonStringify, jsonParse,
+        jsonStringify, jsonParse, cloneForMessage,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
         freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,
         blobParts, blobPartBytes,

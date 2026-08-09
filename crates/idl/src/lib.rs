@@ -174,7 +174,7 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         // payload shape rather than on the brand.
         "Event" | "CustomEvent" | "PopStateEvent" | "SubmitEvent" | "UIEvent" | "MouseEvent"
         | "WheelEvent" | "PointerEvent" | "KeyboardEvent" | "FocusEvent" | "InputEvent"
-        | "CompositionEvent" | "ProgressEvent" => "this_event",
+        | "CompositionEvent" | "ProgressEvent" | "MessageEvent" => "this_event",
         // Brands with no state of their own: a Location *is* the document URL,
         // and the session history lives in `FrameShared::history`.
         "Location" => "this_location",
@@ -422,6 +422,11 @@ impl Universe {
                         || name == "Event"
                         || name == "CustomEvent"
                         || name == "EventTarget"
+                        // A `WindowProxy` is a slab object the implementation
+                        // mints itself, like the passthrough interfaces: the
+                        // glue hands the `JsValue` straight through, and the
+                        // `?` shows in the implementation's `Option`.
+                        || name == "WindowProxy"
                     {
                         RetKind::Raw
                     } else {

@@ -86,9 +86,23 @@ fn the_returned_proxy_exposes_only_what_works() {
 
     // P6: what is not implemented is not installed, so feature detection is
     // honest rather than being fooled by an always-failing stub.
-    assert_eq!(eval(&page, "'postMessage' in w"), "false");
     assert_eq!(eval(&page, "'opener' in w"), "false");
     assert_eq!(eval(&page, "'document' in w"), "false");
+
+    // `postMessage` *is* installed, because one `WindowProxy` interface serves
+    // two backings and a member cannot be installed per instance: it is real
+    // for a frame of this page (ADR-0035 D4) and refuses for a sibling, which
+    // lives on another OS thread with no channel for a message to travel. The
+    // same shape `location` already had — present, and loud about the case it
+    // cannot serve, rather than silently dropping the message.
+    assert_eq!(eval(&page, "typeof w.postMessage"), "function");
+    assert_eq!(
+        eval(
+            &page,
+            "(() => { try { return w.postMessage(1, '*'), 'no throw'; }               catch (e) { return e.name; } })()"
+        ),
+        "NotSupportedError"
+    );
 
     // Reading a sibling's location is what it is for a cross-origin
     // `WindowProxy` in a browser: a `SecurityError`.

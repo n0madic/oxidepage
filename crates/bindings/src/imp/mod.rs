@@ -74,6 +74,7 @@ pub(crate) mod keyboard_event;
 pub(crate) mod keys;
 pub(crate) mod location;
 pub(crate) mod media_query_list;
+pub(crate) mod message_event;
 pub(crate) mod mime_type_array;
 pub(crate) mod mouse_event;
 pub(crate) mod mutation_observer;

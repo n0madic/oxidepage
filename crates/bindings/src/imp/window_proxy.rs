@@ -1,9 +1,16 @@
-//! `WindowProxy`: the handle `window.open` returns (ADR-0027 D12).
+//! `WindowProxy`: the handle `window.open` returns (ADR-0027 D12), and the one
+//! `iframe.contentWindow` / `window.parent` / `window.top` return
+//! (ADR-0035 D4).
 //!
-//! Everything here is either an atomic read or a fire-and-forget message. The
-//! sibling lives on another thread with its own realm, and a getter that
-//! blocked on a round trip would be a deadlock the first time two pages opened
-//! each other — so nothing here waits for an answer.
+//! For a **sibling** everything is an atomic read or a fire-and-forget message:
+//! it lives on another thread with its own realm, and a getter that blocked on
+//! a round trip would deadlock the first time two pages opened each other.
+//!
+//! For a **frame** of this page the members are real and synchronous — same
+//! thread, same event loop. Even so no `JsValue` crosses: the proxy is an
+//! object of the *accessing* realm, and reaching the child's global would mean
+//! sharing a `Runtime`, which is what would make nested delivery a
+//! `BorrowMutError` (ADR-0033 D1).
 
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -14,16 +21,28 @@ use oxidepage_js::{JsThrow, JsValue};
 use crate::cx::BindCx;
 use crate::window_open::{WindowOp, WindowProxyData};
 
-pub(crate) fn closed(_cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<bool, JsThrow> {
-    Ok(this.window.closed.load(Ordering::Acquire))
+pub(crate) fn closed(cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<bool, JsThrow> {
+    match &*this {
+        WindowProxyData::Sibling(window) => Ok(window.closed.load(Ordering::Acquire)),
+        // A frame is "closed" once its context is gone — which is what a
+        // detached `<iframe>` leaves a script holding.
+        WindowProxyData::Frame(frame) => Ok(cx.frame_state(*frame).is_none()),
+    }
 }
 
 pub(crate) fn close(_cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<(), JsThrow> {
-    // Set the flag here as well as asking the sibling to go: a browser reports
-    // `w.closed === true` on the very next line, and waiting for the other
-    // thread to acknowledge would make that a race.
-    this.window.closed.store(true, Ordering::Release);
-    (this.window.ops)(WindowOp::Close);
+    match &*this {
+        WindowProxyData::Sibling(window) => {
+            // Set the flag here as well as asking the sibling to go: a browser
+            // reports `w.closed === true` on the very next line, and waiting
+            // for the other thread to acknowledge would make that a race.
+            window.closed.store(true, Ordering::Release);
+            (window.ops)(WindowOp::Close);
+        }
+        // Per HTML, `close()` only applies to a context script opened. A frame
+        // is closed by removing its element, not from inside.
+        WindowProxyData::Frame(_) => {}
+    }
     Ok(())
 }
 
@@ -31,14 +50,35 @@ pub(crate) fn close(_cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<(), J
 /// intrinsic effect. The embedder is *told* rather than obeyed — which is what
 /// keeps this from being the silent no-op P6 forbids.
 pub(crate) fn focus(_cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<(), JsThrow> {
-    (this.window.ops)(WindowOp::Focus);
+    match &*this {
+        WindowProxyData::Sibling(window) => (window.ops)(WindowOp::Focus),
+        // Focus is page-global here and there is no window manager, so focusing
+        // a frame changes nothing observable. Told rather than obeyed for a
+        // sibling; for a frame there is nobody to tell.
+        WindowProxyData::Frame(_) => {}
+    }
     Ok(())
 }
 
 /// Reading a sibling's `location` throws, exactly as it does for a cross-origin
 /// `WindowProxy` in a browser — which is what this *is*: a separate browsing
 /// context this realm cannot synchronously introspect.
-pub(crate) fn location(cx: &BindCx<'_>, _this: Rc<WindowProxyData>) -> Result<JsValue, JsThrow> {
+pub(crate) fn location(cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<JsValue, JsThrow> {
+    // A frame of this page *can* be introspected — same thread, one arena — so
+    // a same-origin read answers with its URL, as a browser does. Only the
+    // cross-origin and cross-thread cases throw.
+    if let WindowProxyData::Frame(frame) = &*this
+        && let Some(state) = cx.frame_state(*frame)
+        && cx.same_origin_frame(&state)
+    {
+        let url = cx
+            .state
+            .dom
+            .borrow()
+            .document_url_of(state.document())
+            .to_owned();
+        return Ok(JsValue::String(url));
+    }
     Err(cx.dom_throw(
         DomExceptionKind::SecurityError,
         "Failed to read the 'location' property from 'WindowProxy': \
@@ -53,10 +93,16 @@ pub(crate) fn set_location(
     this: Rc<WindowProxyData>,
     value: JsValue,
 ) -> Result<(), JsThrow> {
-    if this.window.closed.load(Ordering::Acquire) {
+    let url = cx.scope.coerce_string(&value)?;
+    let WindowProxyData::Sibling(window) = &*this else {
+        // Navigating a frame from its embedder is a frame navigation, not a
+        // sibling message: it goes through the element's `src`, which is the
+        // task source the event loop already drains (ADR-0035 D5).
+        return set_frame_location(cx, &this, &url);
+    };
+    if window.closed.load(Ordering::Acquire) {
         return Ok(());
     }
-    let url = cx.scope.coerce_string(&value)?;
     // Resolved against the opener's **current** document, read now — not
     // against a snapshot taken when `window.open` returned. The realm outlives
     // a navigation, so a proxy captured before one would otherwise keep
@@ -64,6 +110,119 @@ pub(crate) fn set_location(
     // different origin than the script asked for.
     let base = cx.state.dom.borrow().document_url().to_owned();
     let resolved = crate::window_open::resolve_against(&base, &url);
-    (this.window.ops)(WindowOp::Navigate(resolved));
+    (window.ops)(WindowOp::Navigate(resolved));
     Ok(())
+}
+
+/// `frame.location = url`: writes the owning `<iframe>`'s `src`, which the DOM
+/// queues and the event loop performs.
+///
+/// Same-origin only, as HTML says — and it is a *write*, which a cross-origin
+/// context is allowed to refuse loudly rather than silently.
+fn set_frame_location(
+    cx: &BindCx<'_>,
+    this: &Rc<WindowProxyData>,
+    url: &str,
+) -> Result<(), JsThrow> {
+    let WindowProxyData::Frame(frame) = &**this else {
+        return Ok(());
+    };
+    let Some(state) = cx.frame_state(*frame) else {
+        return Ok(()); // the context is gone
+    };
+    if !cx.same_origin_frame(&state) {
+        return Err(cx.dom_throw(
+            DomExceptionKind::SecurityError,
+            "cannot navigate a cross-origin browsing context",
+        ));
+    }
+    let Some(owner) = cx.frame_owner(*frame) else {
+        return Ok(()); // the top-level context has no `<iframe>` to write
+    };
+    let base = cx.state.dom.borrow().document_url().to_owned();
+    let resolved = crate::window_open::resolve_against(&base, url);
+    cx.state.dom.borrow_mut().set_attribute(
+        owner,
+        oxidepage_dom::node::attr_name("src".into()),
+        resolved.into(),
+    );
+    Ok(())
+}
+
+/// `postMessage`: hands a value to another browsing context.
+///
+/// **Delivered as a task, never synchronously.** A listener in the receiver
+/// commonly answers with a `postMessage` back, and a synchronous entry would
+/// ride the native stack until `MAX_WORLD_DEPTH` caught it (ADR-0035 D4).
+///
+/// The value is serialized here, in the *sender's* realm, and deserialized in
+/// the receiver's — which is what keeps every `JsValue` inside its own runtime.
+/// That serializer is a JSON subset, so `Map`, `Set`, `Date`, `ArrayBuffer`,
+/// typed arrays and cycles are refused rather than silently flattened.
+pub(crate) fn post_message(
+    cx: &BindCx<'_>,
+    this: Rc<WindowProxyData>,
+    message: JsValue,
+    _target_origin: JsValue,
+) -> Result<(), JsThrow> {
+    let target = match &*this {
+        WindowProxyData::Frame(frame) => *frame,
+        // A sibling page is another OS thread with its own event loop; there is
+        // no channel for a message to travel and inventing one that dropped it
+        // would be the silent no-op P6 forbids.
+        WindowProxyData::Sibling(_) => {
+            return Err(cx.dom_throw(
+                DomExceptionKind::NotSupportedError,
+                "postMessage to a window opened with window.open is not supported",
+            ));
+        }
+    };
+    if cx.frame_state(target).is_none() {
+        return Ok(()); // the context is gone; HTML drops the message
+    }
+    let serialized = clone_message(cx, &message)?;
+    let origin = crate::imp::htmli_frame_element::origin_of(
+        cx.state
+            .dom
+            .borrow()
+            .document_url_of(cx.state.frame.document()),
+    );
+    cx.state
+        .frame
+        .global
+        .queue_message(crate::state::PendingMessage {
+            target,
+            source: cx.state.frame.frame(),
+            origin,
+            data: serialized,
+        });
+    Ok(())
+}
+
+/// Serializes a message body, refusing what the subset cannot carry.
+///
+/// Not `serialize_for_event`: that is `JSON.stringify`, which turns a `Map`
+/// into `{}` and a `Date` into a string — a page would be told its value
+/// travelled when it did not. The bootstrap's `cloneForMessage` walks first and
+/// throws, which is what turns the limit into a `DataCloneError` the page can
+/// see (ADR-0035 D4).
+fn clone_message(cx: &BindCx<'_>, message: &JsValue) -> Result<String, JsThrow> {
+    let clone = cx.with_js(|js| js.clone_for_message.clone())?;
+    let refused = |cx: &BindCx<'_>| {
+        cx.dom_throw(
+            DomExceptionKind::DataCloneError,
+            "the message could not be cloned: postMessage carries a JSON subset \
+             (no Map, Set, Date, ArrayBuffer, typed arrays, cycles or transferables)",
+        )
+    };
+    let text = cx
+        .scope
+        .call(&clone, &JsValue::Undefined, std::slice::from_ref(message))
+        .map_err(|_| refused(cx))?;
+    match text {
+        JsValue::String(text) => Ok(text),
+        // `undefined` in, `undefined` out: JSON has no representation for it,
+        // and HTML's clone of `undefined` is `undefined`.
+        _ => Ok("null".to_owned()),
+    }
 }

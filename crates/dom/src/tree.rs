@@ -1669,6 +1669,18 @@ impl DomTree {
             .content_document()
     }
 
+    /// The `<iframe>` whose `contentDocument` is `document`, if any.
+    ///
+    /// A scan rather than a reverse index: a page holds tens of frames at most,
+    /// and a second map is a second thing to keep in step.
+    #[must_use]
+    pub fn owner_of_content_document(&self, document: NodeId) -> Option<NodeId> {
+        self.rendered_roots
+            .iter()
+            .flat_map(|&root| self.inclusive_descendants(root))
+            .find(|&id| self.content_document(id) == Some(document))
+    }
+
     /// Points `owner` at the document of the browsing context it embeds, or
     /// clears it when the context is discarded.
     ///

@@ -284,6 +284,17 @@ impl EventDetail {
     }
 }
 
+/// What a `MessageEvent` carries beyond its body.
+#[derive(Clone, Debug)]
+pub struct MessagePayload {
+    /// The origin of the sending document, as `scheme://host[:port]`.
+    pub origin: String,
+    /// The sending browsing context, wrapped as a `WindowProxy` in whichever
+    /// realm reads `source` — never a value that crossed a runtime.
+    pub source: Option<oxidepage_base::FrameId>,
+    pub last_event_id: String,
+}
+
 pub struct EventData {
     /// The interface this event was created as (`"MouseEvent"`, `"CustomEvent"`,
     /// …), so a world that has no wrapper for it yet can mint one with the
@@ -314,6 +325,10 @@ pub struct EventData {
     /// every non-UI event — `DOMContentLoaded`, `load`, every mutation-driven
     /// dispatch — pays one null pointer and no allocation for it.
     pub ui: Option<Box<UiPayload>>,
+    /// `MessageEvent`'s own fields, boxed and optional for the same reason.
+    /// The message body itself rides in `detail` as `Serialized`, so every
+    /// world materializes its own copy (ADR-0035 D4).
+    pub message: Option<Box<MessagePayload>>,
     /// The propagation path of the current/last dispatch (for `composedPath`).
     pub path: Vec<EventTargetKey>,
     /// Spec "in passive listener flag" (§2.8): set for the duration of
@@ -357,6 +372,7 @@ impl EventData {
             time_stamp: 0.0,
             detail: EventDetail::None,
             ui: None,
+            message: None,
             path: Vec::new(),
             in_passive_listener: false,
         }
@@ -1166,6 +1182,31 @@ pub fn fire_pop_state(cx: &BindCx<'_>, state: Option<&str>) -> Result<(), JsThro
 
 /// Creates and dispatches a simple engine-generated event (`DOMContentLoaded`,
 /// `load`) with `isTrusted = true`.
+/// Delivers one queued `postMessage` into **this** realm.
+///
+/// Called from the page's event loop with the receiving frame's world entered,
+/// which is what makes delivery a task rather than a synchronous hop into
+/// another realm (ADR-0035 D4). The body is deserialized here, in the
+/// receiver's realm, so no `JsValue` ever crossed a runtime.
+pub fn deliver_message(cx: &crate::cx::BindCx<'_>, message: &crate::state::PendingMessage) {
+    let mut data = EventData::new("message".to_owned(), false, false, false);
+    data.is_trusted = true;
+    data.detail = EventDetail::Serialized(message.data.clone());
+    data.message = Some(Box::new(MessagePayload {
+        origin: message.origin.clone(),
+        source: Some(message.source),
+        last_event_id: String::new(),
+    }));
+    let data = cx.new_event_data("MessageEvent", data);
+    // `Window` needs no frame in the key: the listener registry is per *world*
+    // and a frame has its own worlds, so entering the target's world already
+    // disambiguates. ADR-0035 D8 predicted a `Window(FrameId)` variant; the
+    // per-world registry made it unnecessary.
+    if dispatch_event(cx, EventTargetKey::Window, &data).is_ok() {
+        crate::microtask_checkpoint(cx);
+    }
+}
+
 pub fn fire_simple_event(
     cx: &BindCx<'_>,
     target: EventTargetKey,

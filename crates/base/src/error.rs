@@ -49,6 +49,9 @@ pub enum DomExceptionKind {
     /// The input could not be read (the File API's read-failure reason, which
     /// is what `FileReader.error` reports).
     NotReadableError,
+    /// The value could not be cloned — what `postMessage` throws for something
+    /// outside the structured-clone subset it supports.
+    DataCloneError,
 }
 
 impl DomExceptionKind {
@@ -72,6 +75,7 @@ impl DomExceptionKind {
             Self::InvalidAccessError => "InvalidAccessError",
             Self::QuotaExceededError => "QuotaExceededError",
             Self::NotReadableError => "NotReadableError",
+            Self::DataCloneError => "DataCloneError",
         }
     }
 }

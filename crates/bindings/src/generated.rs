@@ -3499,6 +3499,11 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "contentDocument",
         gen_htmli_frame_element_get_content_document,
     )?;
+    cx.define_getter(
+        &proto_htmli_frame_element,
+        "contentWindow",
+        gen_htmli_frame_element_get_content_window,
+    )?;
     cx.finish_interface(
         "HTMLIFrameElement",
         &proto_htmli_frame_element,
@@ -5058,7 +5063,31 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         gen_window_proxy_get_location,
         gen_window_proxy_set_location,
     )?;
+    cx.define_method(
+        &proto_window_proxy,
+        "postMessage",
+        1,
+        gen_window_proxy_post_message,
+    )?;
     cx.finish_interface("WindowProxy", &proto_window_proxy, CtorSpec::Illegal)?;
+
+    let proto_message_event = cx.begin_interface("MessageEvent", Some("Event"))?;
+    cx.define_getter(&proto_message_event, "data", gen_message_event_get_data)?;
+    cx.define_getter(&proto_message_event, "origin", gen_message_event_get_origin)?;
+    cx.define_getter(
+        &proto_message_event,
+        "lastEventId",
+        gen_message_event_get_last_event_id,
+    )?;
+    cx.define_getter(&proto_message_event, "source", gen_message_event_get_source)?;
+    cx.finish_interface(
+        "MessageEvent",
+        &proto_message_event,
+        CtorSpec::Native {
+            length: 1,
+            construct: gen_message_event_constructor,
+        },
+    )?;
 
     let proto_media_query_list = cx.begin_interface("MediaQueryList", Some("EventTarget"))?;
     cx.define_getter(
@@ -12095,6 +12124,14 @@ fn gen_htmli_frame_element_get_content_document(
     cx.opt_node_to_js(ret)
 }
 
+fn gen_htmli_frame_element_get_content_window(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    imp::htmli_frame_element::content_window(cx, this)
+}
+
 fn gen_html_slot_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
     Ok(JsValue::String(imp::html_slot_element::name(cx, this)?))
@@ -15205,6 +15242,45 @@ fn gen_window_proxy_set_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
     let a0 = call.arg(0);
     imp::window_proxy::set_location(cx, this, a0)?;
     Ok(JsValue::Undefined)
+}
+
+fn gen_window_proxy_post_message(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    let a0 = call.arg(0);
+    let a1 = call.arg(1);
+    imp::window_proxy::post_message(cx, this, a0, a1)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_message_event_get_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    imp::message_event::data(cx, this)
+}
+
+fn gen_message_event_get_origin(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::message_event::origin(cx, this)?))
+}
+
+fn gen_message_event_get_last_event_id(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    Ok(JsValue::String(imp::message_event::last_event_id(
+        cx, this,
+    )?))
+}
+
+fn gen_message_event_get_source(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    imp::message_event::source(cx, this)
+}
+
+fn gen_message_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::message_event::constructor(cx, call, a0, a1)
 }
 
 fn gen_media_query_list_get_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

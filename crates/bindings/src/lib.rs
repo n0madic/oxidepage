@@ -39,8 +39,8 @@ pub use console::{ConsoleLevel, ConsoleMessage, ScriptError, ScriptErrorKind};
 pub use cx::BindCx;
 pub use dialog::{DialogEvent, DialogHandler, DialogKind, DialogRequest, DialogResponse};
 pub use events::{
-    EventTargetKey, Modifiers, dispatch_event, dispatch_event_in_this_world, dispatch_event_with,
-    fire_pop_state, fire_simple_event,
+    EventTargetKey, Modifiers, deliver_message, dispatch_event, dispatch_event_in_this_world,
+    dispatch_event_with, fire_pop_state, fire_simple_event,
 };
 pub use filedata::FileInput;
 pub use imp::input_synth::{
@@ -57,8 +57,8 @@ pub use preview::{
 pub use script::is_classic_script_type;
 pub use state::{
     BindingCall, FrameShared, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES,
-    NavigationBody, NavigatorData, PageGlobal, PendingNavigation, ReadyState, ScreenData,
-    SessionHistory, TimingMilestone, WorldEnter, WorldId, WorldState,
+    NavigationBody, NavigatorData, PageGlobal, PendingMessage, PendingNavigation, ReadyState,
+    ScreenData, SessionHistory, TimingMilestone, WorldEnter, WorldId, WorldState,
 };
 pub use storage::{
     MAX_STORAGE_ORIGINS, PrivateStorageAreas, QuotaExceeded, STORAGE_QUOTA_BYTES, SharedStorage,
@@ -263,6 +263,7 @@ fn install_bootstrap(scope: &dyn JsScope, state: &Rc<WorldState>) -> Result<(), 
         make_dom_exception: get("makeDomException")?,
         structured_clone: get("structuredClone")?,
         json_stringify: get("jsonStringify")?,
+        clone_for_message: get("cloneForMessage")?,
         json_parse: get("jsonParse")?,
         make_promise: get("makePromise")?,
         resolved_promise: get("resolvedPromise")?,
@@ -592,11 +593,19 @@ fn install_window(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.scope
         .set(&global, "self", &global_value)
         .map_err(JsThrow::from)?;
-    for name in ["frames", "parent", "top"] {
-        cx.scope
-            .set(&global, name, &global_value)
-            .map_err(JsThrow::from)?;
-    }
+    // `window.frames` is this context's own proxy, per HTML — it is the
+    // *indexed* access on it that reaches children.
+    cx.scope
+        .set(&global, "frames", &global_value)
+        .map_err(JsThrow::from)?;
+    // `parent` and `top` walk the frame tree, so they are getters rather than
+    // aliases for `window`: for the top-level context they still answer with
+    // it, which is why the old aliasing was right while a page had one
+    // context (ADR-0035 D4).
+    cx.define_getter(&global, "parent", window_parent)?;
+    cx.define_getter(&global, "top", window_top)?;
+    cx.define_getter(&global, "length", window_length)?;
+    cx.define_getter(&global, "frameElement", window_frame_element)?;
 
     let navigator = cx.new_navigator()?;
     *cx.state.navigator_js.borrow_mut() = Some(navigator);
@@ -896,6 +905,63 @@ fn window_device_pixel_ratio(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValu
     Ok(JsValue::Number(f64::from(
         cx.state.layout.borrow().viewport().dpr,
     )))
+}
+
+/// `window.parent`: the embedding context's proxy, or this window for the
+/// top-level one (HTML: a context with no parent is its own parent).
+fn window_parent(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    match cx.state.frame.parent_frame() {
+        Some(parent) => cx.new_frame_proxy(parent),
+        None => cx.global_value(),
+    }
+}
+
+/// `window.top`: the outermost context's proxy. Walks rather than assuming one
+/// hop — a frame nested three deep still reports the page.
+fn window_top(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    let mut current = cx.state.frame.parent_frame();
+    let mut top = None;
+    // Bounded by the frame-depth cap; a cycle is impossible by construction but
+    // the loop is finite either way.
+    for _ in 0..64 {
+        let Some(frame) = current else { break };
+        top = Some(frame);
+        current = cx.frame_state(frame).and_then(|state| state.parent_frame());
+    }
+    match top {
+        Some(frame) => cx.new_frame_proxy(frame),
+        None => cx.global_value(),
+    }
+}
+
+/// `window.length`: how many contexts are nested directly in this one.
+fn window_length(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    let count = cx
+        .state
+        .frame
+        .global
+        .child_frames(cx.state.frame.frame())
+        .len();
+    Ok(JsValue::Number(count as f64))
+}
+
+/// `window.frameElement`: the `<iframe>` embedding this context, or `null` for
+/// the top-level one and for a cross-origin embedder (HTML returns null there
+/// rather than throwing).
+fn window_frame_element(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    let Some(parent) = cx.state.frame.parent_frame() else {
+        return Ok(JsValue::Null);
+    };
+    let Some(parent_state) = cx.frame_state(parent) else {
+        return Ok(JsValue::Null);
+    };
+    if !cx.same_origin_frame(&parent_state) {
+        return Ok(JsValue::Null);
+    }
+    match cx.frame_owner(cx.state.frame.frame()) {
+        Some(owner) => cx.node_to_js(owner),
+        None => Ok(JsValue::Null),
+    }
 }
 
 fn window_scroll_x(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {

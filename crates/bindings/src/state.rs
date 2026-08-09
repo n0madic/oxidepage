@@ -679,6 +679,9 @@ pub(crate) struct JsRefs {
     /// Pristine `JSON.stringify` / `JSON.parse`, for the serialized
     /// `history.state` round trip (ADR-0033 D3).
     pub json_stringify: JsValue,
+    /// `postMessage`'s clone step: refuses anything outside the JSON subset
+    /// instead of flattening it (ADR-0035 D4).
+    pub clone_for_message: JsValue,
     pub json_parse: JsValue,
     /// `() => {promise, resolve, reject}` (deferred-promise construction).
     pub make_promise: JsValue,
@@ -1000,6 +1003,27 @@ pub struct PageGlobal {
     /// edge here would close the cycle and leak every frame, and with it every
     /// runtime.
     frames: RefCell<HashMap<NodeId, Weak<FrameShared>>>,
+    /// The same contexts by id, for the members that name a *frame* rather than
+    /// a node — `parent`, `top`, `contentWindow`.
+    frames_by_id: RefCell<HashMap<FrameId, Weak<FrameShared>>>,
+    /// `postMessage` payloads waiting to be delivered.
+    ///
+    /// A queue rather than a direct call, because delivery must be a **task**:
+    /// a listener that answers with a `postMessage` back would otherwise ride
+    /// the native stack until `MAX_WORLD_DEPTH` caught it (ADR-0035 D4).
+    messages: RefCell<VecDeque<PendingMessage>>,
+}
+
+/// One `postMessage` in flight, already serialized in the sender's realm.
+#[derive(Clone, Debug)]
+pub struct PendingMessage {
+    pub target: FrameId,
+    pub source: FrameId,
+    /// The sender's origin, as `MessageEvent.origin` reports it.
+    pub origin: String,
+    /// The body, as the JSON subset `history` serializes to — deserialized in
+    /// the *receiver's* realm, so no `JsValue` crosses a runtime.
+    pub data: String,
 }
 
 impl PageGlobal {
@@ -1021,6 +1045,8 @@ impl PageGlobal {
             object_worlds: RefCell::new(HashMap::new()),
             enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
             frames: RefCell::new(HashMap::new()),
+            frames_by_id: RefCell::new(HashMap::new()),
+            messages: RefCell::new(VecDeque::new()),
         })
     }
 
@@ -1029,6 +1055,43 @@ impl PageGlobal {
         self.frames
             .borrow_mut()
             .insert(document, Rc::downgrade(frame));
+        self.frames_by_id
+            .borrow_mut()
+            .insert(frame.frame(), Rc::downgrade(frame));
+    }
+
+    /// Forgets a browsing context entirely (not merely a document it left).
+    pub fn forget_frame(&self, frame: FrameId) {
+        self.frames_by_id.borrow_mut().remove(&frame);
+    }
+
+    /// One of this page's browsing contexts by id.
+    #[must_use]
+    pub fn frame_state(&self, frame: FrameId) -> Option<Rc<FrameShared>> {
+        self.frames_by_id.borrow().get(&frame)?.upgrade()
+    }
+
+    /// Queues a `postMessage` for delivery at the next task boundary.
+    pub(crate) fn queue_message(&self, message: PendingMessage) {
+        self.messages.borrow_mut().push_back(message);
+    }
+
+    /// Takes every queued `postMessage`. The page drains this as a task source.
+    #[must_use]
+    pub fn take_messages(&self) -> Vec<PendingMessage> {
+        self.messages.borrow_mut().drain(..).collect()
+    }
+
+    /// The contexts nested directly in `frame`, in unspecified order.
+    #[must_use]
+    pub fn child_frames(&self, frame: FrameId) -> Vec<FrameId> {
+        self.frames_by_id
+            .borrow()
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|state| state.parent_frame() == Some(frame))
+            .map(|state| state.frame())
+            .collect()
     }
 
     /// Forgets a browsing context, or a document it no longer renders.
@@ -1190,6 +1253,9 @@ pub struct FrameShared {
     /// Which browsing context this is. Fixed for the state's whole life — a
     /// commit replaces the *document*, never the frame.
     frame: FrameId,
+    /// The embedding context, or `None` for the top-level one. What
+    /// `window.parent` and `window.top` walk.
+    parent_frame: Option<FrameId>,
     /// This frame's **default** world — its `window`, the one a driver sees as
     /// `isDefault`.
     ///
@@ -1522,6 +1588,7 @@ impl FrameShared {
             Rc::new(navigator),
             Rc::new(screen),
             None,
+            None,
         )
     }
 
@@ -1536,6 +1603,7 @@ impl FrameShared {
         navigator: Rc<NavigatorData>,
         screen: Rc<ScreenData>,
         images: Option<Rc<RefCell<oxidepage_layout::images::ImageStore>>>,
+        parent_frame: Option<FrameId>,
     ) -> Rc<Self> {
         let mut style_engine = StyleEngine::for_document(&dom.borrow(), document, viewport);
         let layout = Rc::new(RefCell::new(LayoutEngine::with_image_store(
@@ -1555,6 +1623,7 @@ impl FrameShared {
         Rc::new(Self {
             global,
             frame,
+            parent_frame,
             default_world: Cell::new(MAIN_WORLD),
             dom,
             document: Cell::new(document),
@@ -1594,6 +1663,12 @@ impl FrameShared {
         self.frame
     }
 
+    /// The embedding browsing context, or `None` for the top-level one.
+    #[must_use]
+    pub fn parent_frame(&self) -> Option<FrameId> {
+        self.parent_frame
+    }
+
     /// This frame's default world — its `window`.
     #[must_use]
     pub fn default_world(&self) -> WorldId {
@@ -1625,6 +1700,7 @@ impl FrameShared {
             Rc::clone(&self.screen),
             // One image store for the whole page (ADR-0035 D7).
             Some(self.layout.borrow().image_store()),
+            Some(self.frame),
         )
     }
 

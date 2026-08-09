@@ -239,6 +239,43 @@ fn latin1_bytes(s: &str) -> Vec<u8> {
 }
 
 impl BindCx<'_> {
+    /// This realm's `window` as a value.
+    pub(crate) fn global_value(&self) -> Result<JsValue, JsThrow> {
+        Ok(JsValue::Object(self.scope.global()))
+    }
+
+    /// The state of one of this page's browsing contexts, or `None` once it has
+    /// been discarded.
+    pub(crate) fn frame_state(
+        &self,
+        frame: oxidepage_base::FrameId,
+    ) -> Option<std::rc::Rc<crate::state::FrameShared>> {
+        self.state.frame.global.frame_state(frame)
+    }
+
+    /// The `<iframe>` element embedding `frame`, in its parent's document.
+    pub(crate) fn frame_owner(&self, frame: oxidepage_base::FrameId) -> Option<NodeId> {
+        let state = self.frame_state(frame)?;
+        let dom = self.state.dom.borrow();
+        // The owner is the element whose `contentDocument` points here — the
+        // pointer the page maintains, so no frame table is needed in `bindings`.
+        dom.owner_of_content_document(state.document())
+    }
+
+    /// Whether `other` is same-origin with this realm's own document.
+    ///
+    /// Compared as `(scheme, host, port)` rather than through `Url::origin()`,
+    /// which hands `file:` an opaque origin and would make two files of one
+    /// directory cross-origin — the same reason `pushState` compares by parts
+    /// (ADR-0022 §4). `srcdoc` and `about:blank` frames inherit the embedder's
+    /// URL at load, so by the time this runs their URL already compares right.
+    pub(crate) fn same_origin_frame(&self, other: &crate::state::FrameShared) -> bool {
+        let dom = self.state.dom.borrow();
+        let here = dom.document_url_of(self.state.frame.document()).to_owned();
+        let there = dom.document_url_of(other.document()).to_owned();
+        crate::imp::htmli_frame_element::same_origin(&here, &there)
+    }
+
     /// The browsing context `node` belongs to — **this** realm's frame unless
     /// the node lives in another one.
     ///
@@ -1557,7 +1594,20 @@ impl BindCx<'_> {
         &self,
         window: crate::window_open::OpenedWindow,
     ) -> Result<JsValue, JsThrow> {
-        let data = Rc::new(WindowProxyData { window });
+        let data = Rc::new(WindowProxyData::Sibling(window));
+        self.new_slab_object("WindowProxy", HostData::WindowProxy(data))
+    }
+
+    /// Wraps one of this page's browsing contexts.
+    ///
+    /// Minted in the **accessing** realm, so what comes back is this realm's
+    /// object over another frame's context — never the child's global, which
+    /// could not cross a runtime boundary at all (ADR-0035 D4).
+    pub(crate) fn new_frame_proxy(
+        &self,
+        frame: oxidepage_base::FrameId,
+    ) -> Result<JsValue, JsThrow> {
+        let data = Rc::new(WindowProxyData::Frame(frame));
         self.new_slab_object("WindowProxy", HostData::WindowProxy(data))
     }
 
