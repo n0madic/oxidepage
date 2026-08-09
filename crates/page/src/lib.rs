@@ -4499,7 +4499,11 @@ impl Page {
         // *minimum* live cursor: the log then grows by one entry per pinned-node
         // connect/disconnect for the whole life of the document.
         for world in self.worlds.all() {
-            if world.id == oxidepage_bindings::MAIN_WORLD {
+            // The one already drained just above — the top-level frame's main
+            // world. Every other world needs pumping here, and that now
+            // includes a *child frame's* default world: it has no host calls
+            // of its own while it is idle either (ADR-0035 D3).
+            if world.id == self.state.id {
                 continue;
             }
             self.with_cx_in(world.id, oxidepage_bindings::drain_pinned_connectivity);
@@ -6000,7 +6004,9 @@ impl Page {
                 Some(WorldInfo {
                     name: w.name.borrow().clone(),
                     context_id: state.context_id.get(),
-                    is_default: w.id == oxidepage_bindings::MAIN_WORLD,
+                    // Per frame: every browsing context has a default world,
+                    // and only the top-level one's is `MAIN_WORLD`.
+                    is_default: state.is_main(),
                 })
             })
             .collect()
@@ -6114,7 +6120,11 @@ impl Page {
     fn pump_non_main_jobs(&self) -> bool {
         let mut progressed = false;
         for world in self.worlds.all() {
-            if world.id == oxidepage_bindings::MAIN_WORLD || !world.realm().has_pending_jobs() {
+            // Only the top-level frame's main world drains itself, through
+            // `with_cx`'s checkpoints. A child frame's default world is pumped
+            // here like any other, or a promise made in an iframe never
+            // settles unless something happens to run script in it.
+            if world.id == self.state.id || !world.realm().has_pending_jobs() {
                 continue;
             }
             progressed = true;
@@ -6135,7 +6145,8 @@ impl Page {
         let preserving = self.preserving_contexts.get();
         let mut ids = self.state.reset_for_navigation_with(!preserving);
         for world in self.worlds.all() {
-            if world.id == oxidepage_bindings::MAIN_WORLD {
+            // `self.state` is the one handled on the line above.
+            if world.id == self.state.id {
                 continue;
             }
             let Some(state) = world.state() else { continue };
@@ -6221,8 +6232,9 @@ impl Page {
             .map(|w| w.id)
     }
 
-    /// The main world's realm. Every world is a whole realm (ADR-0033 D1); this
-    /// is the one page script runs in.
+    /// The **top-level** frame's main world realm. Every world is a whole realm
+    /// (ADR-0033 D1); this is the one the page's own script runs in. A nested
+    /// context's default world is reached through its frame.
     fn main_realm(&self) -> Rc<worlds::World> {
         self.worlds
             .get(oxidepage_bindings::MAIN_WORLD)

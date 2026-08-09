@@ -1629,7 +1629,11 @@ impl FrameShared {
     /// goes through `install_world`, which re-appends, and an entry left behind
     /// would keep a torn-down world in `world_ids`' no-table fallback.
     pub fn forget_isolated_worlds(&self) {
-        self.worlds.borrow_mut().retain(|id| *id == MAIN_WORLD);
+        // *This frame's* default world, not the `MAIN_WORLD` constant: a child
+        // frame's is a fresh id, and comparing against the constant would drop
+        // the world it is trying to keep (ADR-0035 D3).
+        let default = self.default_world.get();
+        self.worlds.borrow_mut().retain(|id| *id == default);
     }
 }
 
@@ -1720,12 +1724,17 @@ impl WorldState {
         self.frame.storage_subscriber
     }
 
-    /// True for the page's own world. Custom elements, inline event handlers,
-    /// activation behaviour and the DOM-driven task sources are main-world
-    /// only (ADR-0033 D8).
+    /// True for **this frame's** default world — its `window`. Custom elements,
+    /// inline event handlers, activation behaviour and the DOM-driven task
+    /// sources are default-world only (ADR-0033 D8).
+    ///
+    /// Every browsing context has one, and only the top-level frame's is the
+    /// `MAIN_WORLD` constant (ADR-0035 D3) — so a child frame reading the
+    /// constant would answer `false` for its own `window`, and a page with
+    /// frames would upgrade custom elements in exactly one of them.
     #[must_use]
     pub fn is_main(&self) -> bool {
-        self.id == MAIN_WORLD
+        self.id == self.frame.default_world()
     }
 
     /// Whether this world has any listener (or `on*` handler) for `event_type`
