@@ -64,6 +64,7 @@ pub(crate) mod html_select_element;
 pub(crate) mod html_slot_element;
 pub(crate) mod html_template_element;
 pub(crate) mod html_text_area_element;
+pub(crate) mod htmli_frame_element;
 pub(crate) mod input_event;
 pub mod input_synth;
 pub(crate) mod interaction;

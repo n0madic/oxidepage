@@ -1638,6 +1638,28 @@ impl DomTree {
         self.get(host).and_then(Node::as_element)?.shadow_root()
     }
 
+    /// The document of the nested browsing context `owner` embeds, if it has
+    /// one. `None` for any element that is not an `<iframe>` in a rendered
+    /// document.
+    #[must_use]
+    pub fn content_document(&self, owner: NodeId) -> Option<NodeId> {
+        self.get(owner)
+            .and_then(Node::as_element)?
+            .content_document()
+    }
+
+    /// Points `owner` at the document of the browsing context it embeds, or
+    /// clears it when the context is discarded.
+    ///
+    /// Only the page calls this: it owns browsing contexts, and a pointer set
+    /// here with no context behind it would make `contentDocument` name a
+    /// document nothing renders.
+    pub fn set_content_document(&mut self, owner: NodeId, document: Option<NodeId>) {
+        if let Some(el) = self.arena.node_mut(owner).as_element_mut() {
+            el.content_document = document;
+        }
+    }
+
     /// The host element of `fragment`, if it is a shadow root.
     #[must_use]
     pub fn shadow_host(&self, fragment: NodeId) -> Option<NodeId> {

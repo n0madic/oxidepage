@@ -159,3 +159,77 @@ fn a_fresh_context_starts_empty() {
     assert!(dom.element_by_id(dom.document(), "inside").is_none());
     assert!(dom.element_by_id(child, "inside").is_none());
 }
+
+/// `iframe.contentDocument` is the frame's real `Document` — the arena is
+/// shared, so the parent realm wraps it with no value crossing a runtime
+/// boundary (ADR-0035 D4).
+#[test]
+fn content_document_is_the_frames_own_document() {
+    let page = page("<!DOCTYPE html><body><iframe id='f'></iframe></body>");
+    let child = rendered_roots(&page)[1];
+
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument === document"
+        ),
+        "false"
+    );
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument.nodeType"
+        ),
+        "9"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.URL"),
+        "about:blank"
+    );
+    // The wrapper names the very node the frame renders.
+    assert_eq!(
+        s(
+            &page,
+            "document.getElementById('f').contentDocument.documentElement"
+        ),
+        "null"
+    );
+    assert!(page.dom().is_rendered_root(child));
+}
+
+/// A detached `<iframe>` has no context, so `contentDocument` is null — and
+/// removing a frame clears the pointer rather than leaving it naming a
+/// document nothing renders.
+#[test]
+fn content_document_is_null_without_a_context() {
+    let page = page(
+        "<!DOCTYPE html><body><iframe id='f'></iframe>\
+         <script>window.detached = document.createElement('iframe');</script>\
+         </body>",
+    );
+    assert_eq!(s(&page, "window.detached.contentDocument"), "null");
+
+    page.eval_to_string("document.getElementById('f').remove(); 0")
+        .unwrap();
+    page.settle(std::time::Duration::from_millis(200));
+    assert_eq!(rendered_roots(&page).len(), 1);
+}
+
+/// The frame element reflects the attributes that describe it. `src` and
+/// `srcdoc` are deliberately **not installed** until they navigate: a setter
+/// that reflects and loads nothing is the silent no-op P6 forbids, and this
+/// pins that so the absence stays deliberate.
+#[test]
+fn iframe_reflects_its_attributes() {
+    let page = page("<!DOCTYPE html><body><iframe id='f' name='side' width='300'></iframe></body>");
+    assert_eq!(s(&page, "document.getElementById('f').name"), "side");
+    assert_eq!(s(&page, "document.getElementById('f').width"), "300");
+    assert_eq!(s(&page, "document.getElementById('f').height"), "");
+
+    assert_eq!(s(&page, "'name' in document.getElementById('f')"), "true");
+    assert_eq!(s(&page, "'src' in document.getElementById('f')"), "false");
+    assert_eq!(
+        s(&page, "'srcdoc' in document.getElementById('f')"),
+        "false"
+    );
+}

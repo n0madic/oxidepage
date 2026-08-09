@@ -4579,6 +4579,14 @@ impl Page {
         let frame = self.frames.attach(parent.id(), owner, |id| {
             parent_shared.new_child(id, document, viewport)
         });
+        // What `iframe.contentDocument` reads. Recorded on the element rather
+        // than looked up through the frame table, because `bindings` cannot see
+        // the table and this is a plain structural fact — the mirror of an
+        // element's `shadow_root`.
+        self.state
+            .dom
+            .borrow_mut()
+            .set_content_document(owner, Some(document));
         if let Err(error) = self.install_frame_main_world(&frame) {
             // Roll the half-built context back rather than leave a frame whose
             // document is rendered but which can never run a script.
@@ -4654,6 +4662,9 @@ impl Page {
         for frame in &doomed {
             let document = frame.document();
             let mut dom = self.state.dom.borrow_mut();
+            if let Some(owner) = frame.owner() {
+                dom.set_content_document(owner, None);
+            }
             dom.remove_rendered_root(document);
             // Never an unconditional free: the embedding document may hold a
             // wrapper for this document, and a pinned node pins its node

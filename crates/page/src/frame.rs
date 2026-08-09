@@ -64,6 +64,11 @@ impl Frame {
         self.id
     }
 
+    /// The `<iframe>` element embedding this context, in its parent's document.
+    pub(crate) fn owner(&self) -> Option<NodeId> {
+        self.owner
+    }
+
     pub(crate) fn shared(&self) -> &Rc<FrameShared> {
         &self.shared
     }

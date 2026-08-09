@@ -449,6 +449,14 @@ pub struct ElementData {
     /// Shadow root fragment attached via `attachShadow`; a distinct tree
     /// that participates in connectedness, style, and layout (flat tree).
     pub(crate) shadow_root: Option<NodeId>,
+    /// The Document of the nested browsing context an `<iframe>` embeds
+    /// (ADR-0035). Structurally the mirror of `shadow_root`: an element
+    /// pointing at a subtree that is *not* its child.
+    ///
+    /// Set and cleared by the page, which owns browsing contexts; the tree
+    /// records it because `iframe.contentDocument` is a plain DOM question and
+    /// `bindings` cannot see the frame table.
+    pub(crate) content_document: Option<NodeId>,
     /// Set by the parser for `annotation-xml` HTML integration points.
     pub(crate) mathml_annotation_xml_integration_point: bool,
     /// HTML `<script>` "already started" flag (parser bookkeeping).
@@ -477,6 +485,7 @@ impl ElementData {
             stylo: StyloElementState::default(),
             template_contents: None,
             shadow_root: None,
+            content_document: None,
             mathml_annotation_xml_integration_point: false,
             script_already_started: false,
             script_force_async: false,
@@ -524,6 +533,11 @@ impl ElementData {
     }
 
     /// The shadow root attached to this element, regardless of mode.
+    #[must_use]
+    pub fn content_document(&self) -> Option<NodeId> {
+        self.content_document
+    }
+
     #[must_use]
     pub fn shadow_root(&self) -> Option<NodeId> {
         self.shadow_root

@@ -3458,6 +3458,35 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
 
     let proto_htmli_frame_element = cx.begin_interface("HTMLIFrameElement", Some("HTMLElement"))?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
+        "name",
+        gen_htmli_frame_element_get_name,
+        gen_htmli_frame_element_set_name,
+    )?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
+        "width",
+        gen_htmli_frame_element_get_width,
+        gen_htmli_frame_element_set_width,
+    )?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
+        "height",
+        gen_htmli_frame_element_get_height,
+        gen_htmli_frame_element_set_height,
+    )?;
+    cx.define_accessor_ce(
+        &proto_htmli_frame_element,
+        "referrerPolicy",
+        gen_htmli_frame_element_get_referrer_policy,
+        gen_htmli_frame_element_set_referrer_policy,
+    )?;
+    cx.define_getter(
+        &proto_htmli_frame_element,
+        "contentDocument",
+        gen_htmli_frame_element_get_content_document,
+    )?;
     cx.finish_interface(
         "HTMLIFrameElement",
         &proto_htmli_frame_element,
@@ -11951,6 +11980,77 @@ fn gen_html_template_element_get_content(
     let this = cx.this_element(&call.this)?;
     let ret = imp::html_template_element::content(cx, this)?;
     cx.node_to_js(ret)
+}
+
+fn gen_htmli_frame_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::name(cx, this)?))
+}
+
+fn gen_htmli_frame_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_name(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_htmli_frame_element_get_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::width(cx, this)?))
+}
+
+fn gen_htmli_frame_element_set_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_width(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_htmli_frame_element_get_height(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::height(cx, this)?))
+}
+
+fn gen_htmli_frame_element_set_height(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_height(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_htmli_frame_element_get_referrer_policy(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::htmli_frame_element::referrer_policy(
+        cx, this,
+    )?))
+}
+
+fn gen_htmli_frame_element_set_referrer_policy(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::htmli_frame_element::set_referrer_policy(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_htmli_frame_element_get_content_document(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let ret = imp::htmli_frame_element::content_document(cx, this)?;
+    cx.opt_node_to_js(ret)
 }
 
 fn gen_html_slot_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
