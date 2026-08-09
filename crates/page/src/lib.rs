@@ -93,6 +93,13 @@ pub struct FrameEvent {
     /// with a `worldName` once and expects that world to appear in *every*
     /// frame, and it addresses each one by the frame it is in.
     pub contexts: Vec<WorldInfo>,
+    /// `Runtime.ExecutionContextId`s this event **retires**.
+    ///
+    /// A frame's realms are torn down and rebuilt at each of its navigations,
+    /// so a `Navigated` event kills contexts as surely as a `Detached` one
+    /// does — and a driver keeps addressing an id nobody told it about.
+    /// Captured before the rebuild, since afterwards nothing names them.
+    pub retired: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3785,7 +3792,14 @@ impl Page {
             Ok(out) if out.head.status < 400 => {
                 let ct = header_content_type(&out.head.headers);
                 let source = decode_charset(&out.body, ct.as_deref());
-                let _ = self.eval_classic(&source, url, node);
+                match node {
+                    Some(node) => {
+                        let _ = self.eval_classic_for(node, &source, url);
+                    }
+                    None => {
+                        let _ = self.eval_classic(&source, url, None);
+                    }
+                }
             }
             Ok(out) => self
                 .hooks
@@ -3794,6 +3808,33 @@ impl Page {
                 .hooks
                 .report_resource_error(format!("script `{url}`: {e}")),
         }
+    }
+
+    /// Evaluates a classic script **in the browsing context its element belongs
+    /// to**, refusing it when that context is sandboxed without
+    /// `allow-scripts`.
+    ///
+    /// Every path that runs author script from an element goes through here.
+    /// The parser's own path (`execute_frame_script`) already resolved the
+    /// frame; these are the ones that arrive with only a node: a dynamically
+    /// inserted `<script>`, a deferred one, and an external one completing.
+    /// They evaluated in the page's main world with the page's document URL —
+    /// so a loader inside an iframe saw the embedder's globals, and appending a
+    /// `<script>` into a sandboxed frame's document ran it despite the missing
+    /// `allow-scripts` (ADR-0035 D11).
+    fn eval_classic_for(&self, node: NodeId, source: &str, url: &str) -> bool {
+        let Some(frame) = self.frame_of(node) else {
+            // No rendered context — an inert document. Nothing runs there.
+            return false;
+        };
+        if !frame.shared().sandbox().scripts {
+            self.hooks.report_resource_error(
+                "a sandboxed iframe without `allow-scripts` runs no script".to_owned(),
+            );
+            return false;
+        }
+        let world = frame.shared().default_world();
+        self.eval_classic_in(frame.shared(), world, source, url, Some(node))
     }
 
     fn eval_classic(&self, source: &str, url: &str, node: Option<NodeId>) -> bool {
@@ -3999,8 +4040,8 @@ impl Page {
 
         let Some(src) = src else {
             if !source.is_empty() {
-                let url = self.state.dom.borrow().document_url().to_owned();
-                let _ = self.eval_classic(&source, &url, Some(node));
+                let url = self.document_url_for(node);
+                let _ = self.eval_classic_for(node, &source, &url);
             }
             return;
         };
@@ -4059,7 +4100,7 @@ impl Page {
     fn finish_dynamic_script(&self, completed: CompletedDynamicScript) {
         match completed.result {
             Ok(source) => {
-                if self.eval_classic(&source, &completed.url, Some(completed.node)) {
+                if self.eval_classic_for(completed.node, &source, &completed.url) {
                     self.fire_element_event(completed.node, "load");
                 } else {
                     self.fire_element_event(completed.node, "error");
@@ -5023,6 +5064,11 @@ impl Page {
         // HTML applies `sandbox` **at load**, so a later attribute change
         // affects the next document rather than this one.
         frame.shared().set_sandbox(self.sandbox_of(owner));
+        // The outgoing document's own nested contexts go with it. A commit
+        // replaces the document rather than mutating it, so nothing queues a
+        // disconnection for the `<iframe>`s it held — exactly the case
+        // `reset_document_state` handles for the page (ADR-0035 D1).
+        self.discard_frames(self.frames.detach_below(frame.id()));
         let previous = frame.document();
         let document = {
             let mut dom = self.state.dom.borrow_mut();
@@ -5052,6 +5098,11 @@ impl Page {
         // instead. Two passes, as always: every doomed world's values are
         // released while its runtime is alive, and only then is the realm
         // dropped.
+        let retired: Vec<u64> = self
+            .worlds_in(frame.id())
+            .into_iter()
+            .map(|world| world.context_id)
+            .collect();
         let realms = self.worlds.release_frame(frame.id());
         drop(realms);
         if let Err(error) = self.install_frame_main_world(frame) {
@@ -5093,7 +5144,7 @@ impl Page {
         // The realm was rebuilt, so the frame's execution context id moved.
         // A driver that cached the old one would evaluate into a context that
         // no longer exists (ADR-0035 D9).
-        self.record_frame(FrameEventKind::Navigated, frame);
+        self.record_frame_retiring(FrameEventKind::Navigated, frame, retired);
         self.fire_frame_event(owner, "load");
     }
 
@@ -5329,6 +5380,13 @@ impl Page {
         // HTML seeds a fresh context's name from the attribute; `window.name`
         // may then change it from inside.
         frame.shared().set_name(&self.frame_name_attr(owner));
+        // And its sandboxing flags, which apply from the moment the context
+        // exists — not from its first *load*. The initial `about:blank`
+        // document is scriptable and reachable (`contentDocument`), so an
+        // unrestricted window between attach and the `srcdoc`/`src` commit is
+        // long enough for an embedder to append a `<script>` into a frame it
+        // declared `sandbox` without `allow-scripts` (ADR-0035 D11).
+        frame.shared().set_sandbox(self.sandbox_of(owner));
         self.ensure_init_script_worlds(frame.id());
         self.run_init_scripts_in(frame.id());
         // Reported only once every world exists: the event carries them, and a
@@ -5418,6 +5476,16 @@ impl Page {
     /// contexts that are about to die can be named. A driver told nothing keeps
     /// them in its map forever and routes later work at a realm that is gone.
     fn record_frame(&self, kind: FrameEventKind, frame: &Rc<frame::Frame>) {
+        self.record_frame_retiring(kind, frame, Vec::new());
+    }
+
+    /// The same, naming contexts that died just before the event.
+    fn record_frame_retiring(
+        &self,
+        kind: FrameEventKind,
+        frame: &Rc<frame::Frame>,
+        retired: Vec<u64>,
+    ) {
         let contexts = self.worlds_in(frame.shared().frame());
         let event = FrameEvent {
             kind,
@@ -5430,6 +5498,7 @@ impl Page {
                 .document_url_of(frame.document())
                 .to_owned(),
             contexts,
+            retired,
         };
         self.hooks.emit_or_push(
             &self.frame_events,
@@ -5468,6 +5537,10 @@ impl Page {
                 dom.set_content_document(owner, None);
             }
             self.shared.global.unregister_frame(document);
+            // And the by-id entry, or `frames_by_id` grows for the life of the
+            // page: `frame_by_name`, `child_frames` and `window.length` all
+            // upgrade every `Weak` in it on each call.
+            self.shared.global.forget_frame(frame.id());
             dom.remove_rendered_root(document);
             // Never an unconditional free: the embedding document may hold a
             // wrapper for this document, and a pinned node pins its node
@@ -6330,7 +6403,7 @@ impl Page {
                     } else {
                         match result {
                             Ok(source) => {
-                                let _ = self.eval_classic(&source, &script.url, Some(script.node));
+                                let _ = self.eval_classic_for(script.node, &source, &script.url);
                             }
                             Err(message) => self.hooks.report_resource_error(message),
                         }

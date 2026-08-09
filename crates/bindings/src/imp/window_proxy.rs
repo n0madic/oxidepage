@@ -97,12 +97,19 @@ pub(crate) fn set_location(
     if window.closed.load(Ordering::Acquire) {
         return Ok(());
     }
-    // Resolved against the opener's **current** document, read now — not
-    // against a snapshot taken when `window.open` returned. The realm outlives
-    // a navigation, so a proxy captured before one would otherwise keep
-    // resolving against a URL this page has left, and send its sibling to a
-    // different origin than the script asked for.
-    let base = cx.state.dom.borrow().document_url().to_owned();
+    // Resolved against the accessing realm's **current** document, read now —
+    // not against a snapshot taken when `window.open` returned. The realm
+    // outlives a navigation, so a proxy captured before one would otherwise
+    // keep resolving against a URL this context has left, and send its sibling
+    // to a different origin than the script asked for. The realm's *own*
+    // document, not the page's: a frame that opened a window resolves against
+    // itself (ADR-0035 D1).
+    let base = cx
+        .state
+        .dom
+        .borrow()
+        .document_url_of(cx.state.frame.document())
+        .to_owned();
     let resolved = crate::window_open::resolve_against(&base, &url);
     (window.ops)(WindowOp::Navigate(resolved));
     Ok(())
@@ -133,7 +140,14 @@ fn set_frame_location(
     let Some(owner) = cx.frame_owner(*frame) else {
         return Ok(()); // the top-level context has no `<iframe>` to write
     };
-    let base = cx.state.dom.borrow().document_url().to_owned();
+    // The *accessing* document's URL: a relative target is relative to the
+    // realm doing the navigating, not to the page (ADR-0035 D1).
+    let base = cx
+        .state
+        .dom
+        .borrow()
+        .document_url_of(cx.state.frame.document())
+        .to_owned();
     let resolved = crate::window_open::resolve_against(&base, url);
     cx.state.dom.borrow_mut().set_attribute(
         owner,
@@ -157,7 +171,7 @@ pub(crate) fn post_message(
     cx: &BindCx<'_>,
     this: Rc<WindowProxyData>,
     message: JsValue,
-    _target_origin: JsValue,
+    target_origin: JsValue,
 ) -> Result<(), JsThrow> {
     let target = match &*this {
         WindowProxyData::Frame(frame) => *frame,
@@ -171,16 +185,52 @@ pub(crate) fn post_message(
             ));
         }
     };
-    if cx.frame_state(target).is_none() {
+    let Some(state) = cx.frame_state(target) else {
         return Ok(()); // the context is gone; HTML drops the message
-    }
-    let serialized = clone_message(cx, &message)?;
-    let origin = crate::imp::htmli_frame_element::origin_of(
+    };
+    // `targetOrigin` is the sender saying *who it believes it is talking to*.
+    // Accepting it and ignoring it — which this did — turns
+    // `child.postMessage(token, "https://trusted.example")` into a delivery to
+    // whatever the frame actually is, which is the exact confusion the argument
+    // exists to prevent.
+    //
+    // HTML: `*` matches anything, `/` matches the sender's own origin, anything
+    // else is parsed (a `SyntaxError` if it will not) and compared at delivery.
+    // A mismatch **drops the message silently** — telling the sender would leak
+    // the target's origin to a page not entitled to it.
+    let target_origin = cx.scope.coerce_string(&target_origin)?;
+    let sender_origin = crate::imp::htmli_frame_element::origin_of(
         cx.state
             .dom
             .borrow()
             .document_url_of(cx.state.frame.document()),
     );
+    if target_origin != "*" {
+        let wanted = if target_origin == "/" {
+            sender_origin.clone()
+        } else {
+            match url::Url::parse(&target_origin) {
+                Ok(url) => crate::imp::htmli_frame_element::origin_of(url.as_str()),
+                Err(_) => {
+                    return Err(cx.dom_throw(
+                        DomExceptionKind::SyntaxError,
+                        "postMessage: targetOrigin is not a valid origin",
+                    ));
+                }
+            }
+        };
+        let actual = crate::imp::htmli_frame_element::origin_of(
+            cx.state.dom.borrow().document_url_of(state.document()),
+        );
+        // An opaque origin (`origin_of` spells it `"null"`) matches nothing but
+        // `*` — it is not equal to itself, which is what makes a sandboxed
+        // frame unaddressable by name.
+        if wanted == "null" || actual == "null" || wanted != actual {
+            return Ok(());
+        }
+    }
+    let serialized = clone_message(cx, &message)?;
+    let origin = sender_origin;
     cx.state
         .frame
         .global

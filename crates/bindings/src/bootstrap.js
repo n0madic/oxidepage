@@ -58,25 +58,33 @@
     // outside the subset, which is what makes the limit a `DataCloneError` a
     // page can see rather than a silent flattening (ADR-0035 D4).
     const cloneForMessage = (value) => {
-        const seen = new SetCtor();
+        // The **path** currently being walked, not everything visited. A set of
+        // visited objects makes any second reference to one look like a cycle,
+        // so `postMessage({x: shared, y: shared})` — an ordinary DAG that both
+        // structured clone and `JSON.stringify` handle — was refused with
+        // `DataCloneError`. Removing `v` on the way back out is what makes this
+        // a cycle check.
+        const onPath = new SetCtor();
         const walk = (v) => {
             if (v === null) return;
             const t = typeof v;
             if (t === "boolean" || t === "number" || t === "string" || t === "undefined") return;
             if (t === "function" || t === "symbol" || t === "bigint") throw new Error(t);
-            if (seen.has(v)) throw new Error("cyclic object value");
-            setAdd.call(seen, v);
+            if (onPath.has(v)) throw new Error("cyclic object value");
             const tag = objectToString.call(v);
             if (tag !== "[object Object]" && tag !== "[object Array]") {
                 throw new Error(tag.slice(8, -1));
             }
+            setAdd.call(onPath, v);
             for (const key of objectKeys(v)) walk(v[key]);
+            setDelete.call(onPath, v);
         };
         walk(value);
         return jsonStringify(value);
     };
     const SetCtor = Set;
     const setAdd = Set.prototype.add;
+    const setDelete = Set.prototype.delete;
     const setForEach = Set.prototype.forEach;
     const mapForEach = Map.prototype.forEach;
     const DateCtor = Date;

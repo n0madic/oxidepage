@@ -465,9 +465,13 @@ produces — including that the clip holds content taller than the frame. `crate
 covers the window family, `postMessage` in both directions and its
 `DataCloneError` refusals, a child's globals staying unreachable, the
 `sandbox` slice, a frame navigating itself, a context being named and renamed,
-`_top` reaching out of a frame, and all three callers of the target
-resolution — a `target="<name>"` link, `<form target>` and
-`window.open(url, "<name>")` — driving the frame that answers to the name. `crates/page/tests/frame_input.rs` (7) covers a click landing
+`_top` reaching out of a frame, all three callers of the target resolution — a
+`target="<name>"` link, `<form target>` and `window.open(url, "<name>")` —
+driving the frame that answers to the name, a `<script>` appended into a
+sandboxed frame not running while one appended into an unsandboxed frame runs
+in *that* frame's realm, `postMessage` honouring `targetOrigin`, a repeated
+(non-cyclic) reference surviving the clone, and a frame's navigation discarding
+the contexts it embedded. `crates/page/tests/frame_input.rs` (7) covers a click landing
 inside a frame, the crossing accounting for the frame's position, the
 embedder's capturing listener seeing nothing, an `<iframe>` matching `:hover`
 while the pointer is inside it **and stopping when it leaves**,
@@ -478,8 +482,10 @@ never the embedder-relative one, plus an `<img>` firing `load` inside a frame
 and inside a shadow tree. `crates/cdp/tests/{page,dom}.rs`
 covers the frame tree and the `DOM` additions — including that each frame's
 execution context has an id of its own, that a `worldName` init script reaches
-every frame, that each frame reports a `loaderId` of its own, and that a
-detached frame's contexts are retired before the frame is.
+every frame, that each frame reports a `loaderId` of its own, that a detached
+frame's contexts are retired before the frame is, that a *navigating* frame's
+are retired too, and that `Page.frameAttached` names a nested frame's real
+parent rather than the page.
 `crates/cdp/tests/network.rs` pins that a request reports the frame that
 started it. Both driver runners grew iframe fixtures and checks, and
 both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`

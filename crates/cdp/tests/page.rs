@@ -1179,6 +1179,93 @@ fn a_detached_frame_retires_its_execution_contexts() {
     );
 }
 
+/// `Page.frameAttached` names the frame's **real** parent.
+///
+/// The check was tautological — it asked the registry for the target's frame
+/// and compared that frame's id to the target id, which it is by construction
+/// — so every nested frame reported the top-level one as its parent and a
+/// driver built a flat tree out of a nested one.
+#[test]
+fn frame_attached_names_the_real_parent() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title>\
+         <iframe srcdoc='<iframe srcdoc=\"<p>deep</p>\"></iframe>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+
+    let attached: Vec<Value> = client
+        .drain_events(Duration::from_millis(600))
+        .into_iter()
+        .filter(|e| e["method"] == "Page.frameAttached")
+        .map(|e| e["params"].clone())
+        .collect();
+    assert_eq!(attached.len(), 2, "two nested frames: {attached:?}");
+    let outer = attached
+        .iter()
+        .find(|p| p["parentFrameId"] == json!(target))
+        .unwrap_or_else(|| panic!("no frame attached to the page: {attached:?}"));
+    let inner = attached
+        .iter()
+        .find(|p| p["parentFrameId"] != json!(target))
+        .unwrap_or_else(|| panic!("the grandchild reported the page as parent: {attached:?}"));
+    assert_eq!(
+        inner["parentFrameId"], outer["frameId"],
+        "the grandchild's parent is the frame that embeds it"
+    );
+}
+
+/// A frame's *navigation* retires its execution contexts too, not only its
+/// detach — the realms are torn down and rebuilt either way.
+#[test]
+fn navigating_a_frame_retires_its_old_contexts() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title><iframe id='f' srcdoc='<p>one</p>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(&session, "Runtime.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+    let live: Vec<i64> = client
+        .drain_events(Duration::from_millis(500))
+        .into_iter()
+        .filter(|e| e["method"] == "Runtime.executionContextCreated")
+        .map(|e| e["params"]["context"].clone())
+        .filter(|c| c["auxData"]["frameId"] != json!(target))
+        .filter_map(|c| c["id"].as_i64())
+        .collect();
+    let before = *live.last().expect("the frame announced a context");
+
+    client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.getElementById('f').srcdoc = '<p>two</p>'" }),
+    );
+    let destroyed: Vec<i64> = client
+        .drain_events(Duration::from_millis(500))
+        .into_iter()
+        .filter(|e| e["method"] == "Runtime.executionContextDestroyed")
+        .filter_map(|e| e["params"]["executionContextId"].as_i64())
+        .collect();
+    assert!(
+        destroyed.contains(&before),
+        "the context the navigation replaced was not retired: {destroyed:?} vs {before}"
+    );
+}
+
 /// A page with no `<iframe>` still answers with the shape a driver iterates:
 /// one frame, an empty `childFrames`.
 #[test]

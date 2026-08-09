@@ -504,3 +504,151 @@ fn window_open_with_a_name_drives_that_frame() {
     drop(dom);
     assert_eq!(rendered_roots_count(&page), 2);
 }
+
+/// A `<script>` appended into a **sandboxed** frame's document does not run.
+///
+/// The synchronous script-inserted-inline path ran it in the *calling* realm,
+/// which both skipped the frame's `sandbox` and gave it the embedder's globals.
+/// `allow-same-origin` is granted so the embedder can reach in at all — the
+/// token being withheld is `allow-scripts`.
+#[test]
+fn a_script_appended_into_a_sandboxed_frame_does_not_run() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' sandbox='allow-same-origin' srcdoc='<p id=p>x</p>'></iframe>\
+         <script>\
+           const d = document.getElementById('f').contentDocument;\
+           const s = d.createElement('script');\
+           s.textContent = 'globalThis.__ran = true; document.title = \"ran\";';\
+           d.body.appendChild(s);\
+         </script></body>",
+    );
+    page.settle(Duration::from_millis(400));
+    assert_eq!(
+        s(&page, "String(globalThis.__ran)"),
+        "undefined",
+        "it must not have run in the embedder's realm"
+    );
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.title"),
+        "",
+        "nor in the frame's"
+    );
+}
+
+/// With `allow-scripts` it runs — **in the frame's own realm**, against the
+/// frame's document.
+#[test]
+fn a_script_appended_into_a_frame_runs_in_that_frame() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' sandbox='allow-scripts allow-same-origin' srcdoc='<p id=p>x</p>'></iframe>\
+         <script>\
+           const d = document.getElementById('f').contentDocument;\
+           const s = d.createElement('script');\
+           s.textContent = 'document.title = document.getElementById(\"p\") ? \"own\" : \"page\";';\
+           d.body.appendChild(s);\
+         </script></body>",
+    );
+    page.settle(Duration::from_millis(400));
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.title"),
+        "own",
+        "the script saw the frame's document, not the embedder's"
+    );
+    assert_eq!(s(&page, "document.title"), "");
+}
+
+/// `postMessage`'s `targetOrigin` is enforced: a message addressed to an origin
+/// the frame does not have is **not** delivered.
+#[test]
+fn post_message_honours_target_origin() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<script>\
+           window.addEventListener(\"message\", (e) => { document.title += e.data; });\
+         </script>'></iframe></body>",
+    );
+    let send = |origin: &str, body: &str| {
+        page.eval_to_string(&format!(
+            "document.getElementById('f').contentWindow.postMessage('{body}', '{origin}'); 0"
+        ))
+        .unwrap();
+        page.settle(Duration::from_millis(300));
+    };
+    send("https://nowhere.example", "no");
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.title"),
+        "",
+        "a mismatched targetOrigin drops the message"
+    );
+    send("*", "yes");
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.title"),
+        "yes",
+        "`*` still delivers"
+    );
+    // A malformed origin is a `SyntaxError`, not a silent drop.
+    assert_eq!(
+        s(
+            &page,
+            "(() => { try { document.getElementById('f').contentWindow\
+               .postMessage(1, 'not an origin'); return 'no throw'; } \
+             catch (e) { return e.name; } })()"
+        ),
+        "SyntaxError"
+    );
+}
+
+/// A value referenced twice is a DAG, not a cycle — structured clone carries
+/// it, and so must this. The `seen` set used to make any repeat look cyclic.
+#[test]
+fn post_message_accepts_a_repeated_reference() {
+    let page = page("<!DOCTYPE html><body><iframe id='f'></iframe></body>");
+    assert_eq!(
+        s(
+            &page,
+            "(() => { const shared = { a: 1 }; try { \
+               document.getElementById('f').contentWindow\
+                 .postMessage({ x: shared, y: shared }, '*'); \
+               return 'ok'; } catch (e) { return e.name; } })()"
+        ),
+        "ok"
+    );
+    // A real cycle is still refused.
+    assert_eq!(
+        s(
+            &page,
+            "(() => { const a = {}; a.self = a; try { \
+               document.getElementById('f').contentWindow.postMessage(a, '*'); \
+               return 'no throw'; } catch (e) { return e.name; } })()"
+        ),
+        "DataCloneError"
+    );
+}
+
+/// A frame's own navigation discards the contexts *it* embedded.
+///
+/// A commit replaces the document rather than mutating it, so nothing queues a
+/// disconnection for the `<iframe>`s the outgoing document held — without this
+/// a grandchild survives with a document id naming a freed slot.
+#[test]
+fn navigating_a_frame_discards_its_own_frames() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<iframe srcdoc=\"<p>deep</p>\"></iframe>'></iframe></body>",
+    );
+    assert_eq!(rendered_roots_count(&page), 3, "page, frame, grandchild");
+
+    // Replace the frame's document with one that embeds nothing. (`srcdoc`
+    // wins over `src`, so writing `src` here would re-parse the same markup and
+    // legitimately re-create the grandchild.)
+    page.eval_to_string("document.getElementById('f').srcdoc = '<p>flat</p>'; 0")
+        .unwrap();
+    page.settle(Duration::from_millis(600));
+    assert_eq!(
+        rendered_roots_count(&page),
+        2,
+        "the grandchild went with the document that embedded it"
+    );
+}

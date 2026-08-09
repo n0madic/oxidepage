@@ -691,10 +691,12 @@ fn frame_lifecycle_events(
     let Some(parent) = event.parent else {
         return; // the top-level frame is never attached or detached
     };
-    let parent_is_main = connection
-        .registry
-        .frame(target_id)
-        .is_some_and(|f| f.id() == target_id);
+    // The parent is the top-level frame iff it *is* `MAIN_FRAME`. Asking the
+    // registry for `frame(target_id)` and comparing its id to `target_id` was
+    // tautological — that frame's id is the target id by construction — so
+    // every nested frame reported the top frame as its parent and a driver
+    // built a flat tree out of a nested one.
+    let parent_is_main = parent == oxidepage_engine::page_api::MAIN_FRAME;
     let parent_id = crate::frame::frame_id_for(target_id, parent, parent_is_main);
     let frame_json = |url: &str| {
         json!({
@@ -705,6 +707,21 @@ fn frame_lifecycle_events(
             "securityOrigin": crate::frame::security_origin(url),
             "mimeType": "text/html",
         })
+    };
+    // Contexts this event kills, announced **before** the ones it creates: a
+    // driver keys its map by id, and a rebuild that reused an id would
+    // otherwise be created-then-destroyed.
+    let retire_contexts = || {
+        if !session.flags.runtime.load(Ordering::Relaxed) {
+            return;
+        }
+        for context_id in &event.retired {
+            connection.emit(Event::session(
+                &session.id,
+                "Runtime.executionContextDestroyed",
+                json!({ "executionContextId": context_id }),
+            ));
+        }
     };
     let announce_contexts = || {
         // The frame's realms are rebuilt at each of its navigations, so a
@@ -764,6 +781,10 @@ fn frame_lifecycle_events(
             announce_contexts();
         }
         oxidepage_engine::page_api::FrameEventKind::Navigated => {
+            // The frame's realms were torn down and rebuilt, so the ids a
+            // driver holds are dead — the same statement the `Detached` branch
+            // makes, and for the same reason.
+            retire_contexts();
             if page_on {
                 connection.emit(Event::session(
                     &session.id,

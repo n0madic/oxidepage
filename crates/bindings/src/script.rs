@@ -62,6 +62,18 @@ fn claim_next_inline_script(cx: &BindCx<'_>) -> Option<(NodeId, String)> {
             {
                 return false;
             }
+            // **This realm's own browsing context only** (ADR-0035 D4). A
+            // script appended into *another* frame's document must run in that
+            // frame's realm, with that frame's `document` and under that
+            // frame's `sandbox`; entering another realm from here is not even
+            // possible (`Context::with` is a `borrow_mut`, ADR-0033 D4). So it
+            // is left queued, and the page's own drain runs it correctly —
+            // claiming it here would both run it in the wrong realm and mark it
+            // started, which is how an embedder appending a `<script>` into a
+            // frame it declared `sandbox` without `allow-scripts` got it run.
+            if dom.containing_document(node) != Some(cx.state.frame.document()) {
+                return false;
+            }
             let attr = |name: &str| {
                 el.attrs()
                     .iter()
@@ -96,7 +108,12 @@ fn claim_next_inline_script(cx: &BindCx<'_>) -> Option<(NodeId, String)> {
 /// left. No microtask checkpoint runs: the JS stack is not empty.
 pub(crate) fn run_pending_inline_scripts(cx: &BindCx<'_>) {
     while let Some((node, source)) = claim_next_inline_script(cx) {
-        let url = cx.state.dom.borrow().document_url().to_owned();
+        let url = cx
+            .state
+            .dom
+            .borrow()
+            .document_url_of(cx.state.frame.document())
+            .to_owned();
         let previous = cx.state.frame.current_script.replace(Some(node));
         let result = cx.scope.eval(&source, &url);
         cx.state.frame.current_script.set(previous);

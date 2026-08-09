@@ -286,14 +286,29 @@ impl FrameTree {
     /// a document id naming a freed slot, and the next whole-page walk would
     /// panic on it.
     pub(crate) fn detach_nested(&self) -> Vec<Rc<Frame>> {
-        let children: Vec<FrameId> = self
-            .pre_order()
-            .into_iter()
-            .filter(|frame| frame.id() != self.main.get())
-            .map(|frame| frame.id())
-            .collect();
+        self.detach_below(self.main.get())
+    }
+
+    /// Retires every context nested **inside** `parent`, leaving `parent`
+    /// itself alone.
+    ///
+    /// What a *frame's* own navigation does, for the same reason
+    /// [`Self::detach_nested`] serves the page's: the outgoing document's
+    /// `<iframe>` elements go with it and no disconnection is ever queued for
+    /// them, so without this a grandchild survives with a document id naming a
+    /// freed slot — a frame the protocol still reports, whose realm and engines
+    /// leak, and which the next whole-page walk trips over.
+    pub(crate) fn detach_below(&self, parent: FrameId) -> Vec<Rc<Frame>> {
+        let descendants: Vec<FrameId> = {
+            let mut out = Vec::new();
+            self.walk_from(parent, &mut out);
+            out.into_iter()
+                .map(|frame| frame.id())
+                .filter(|&id| id != parent)
+                .collect()
+        };
         let mut doomed = Vec::new();
-        for id in children {
+        for id in descendants {
             // Each call takes the subtree beneath it too, so a frame already
             // retired by an earlier one answers with nothing.
             doomed.extend(self.detach(id));
