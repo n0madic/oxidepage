@@ -35,7 +35,7 @@ use crossbeam_channel::{Receiver, Sender};
 // Geometry is part of this crate's own public surface (`layout_rect`,
 // `content_quads`, `ScreenshotOptions::clip`), so an embedder needs no
 // `oxidepage_base` dependency of its own.
-pub use oxidepage_base::{FrameId, NodeId, Point, Rect, RequestId, Size};
+pub use oxidepage_base::{FrameId, MAIN_FRAME, NodeId, Point, Rect, RequestId, Size};
 /// The remote object model (ADR-0030): CDP's `Runtime` vocabulary as plain,
 /// `Send` Rust data. The live values stay in `WorldState`.
 pub use oxidepage_bindings::remote::{
@@ -79,14 +79,19 @@ pub struct FrameEvent {
     pub parent: Option<oxidepage_base::FrameId>,
     /// The URL the context is showing at the moment of the event.
     pub url: String,
-    /// The `Runtime.ExecutionContextId` of the frame's default world, when the
-    /// event is about a context that now exists.
+    /// Every execution world the frame holds at the moment of the event: its
+    /// default one first, then any the driver asked for by name.
     ///
-    /// A frame's realm is **rebuilt at each of its navigations** — `document`
-    /// is a non-configurable data property and cannot be re-pointed — so this
-    /// moves with the document, and a driver that cached the old id must be
-    /// told. `None` on detach, where there is nothing left to evaluate in.
-    pub context_id: Option<u64>,
+    /// A frame's realms are **rebuilt at each of its navigations** — `document`
+    /// is a non-configurable data property and cannot be re-pointed — so these
+    /// move with the document, and a driver that cached the old ids must be
+    /// told. Empty on detach, where there is nothing left to evaluate in.
+    ///
+    /// The isolated worlds belong here rather than in the page-wide list a
+    /// commit reports: a driver registers `addScriptToEvaluateOnNewDocument`
+    /// with a `worldName` once and expects that world to appear in *every*
+    /// frame, and it addresses each one by the frame it is in.
+    pub contexts: Vec<WorldInfo>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1799,6 +1804,12 @@ pub struct WorldInfo {
     pub context_id: u64,
     /// True for the page's own world (CDP's `auxData.isDefault`).
     pub is_default: bool,
+    /// The browsing context this world belongs to. A world is per (frame, name)
+    /// — the same `worldName` in two frames is two realms (ADR-0035 D3) — so a
+    /// consumer announcing a context has to say *which* frame it is in, or a
+    /// driver files a child frame's utility world under the top frame and then
+    /// waits forever for the one it asked for.
+    pub frame: oxidepage_base::FrameId,
 }
 
 impl Drop for Page {
@@ -2201,20 +2212,64 @@ impl Page {
         scripts.len() != before
     }
 
-    /// Runs every registered init script against the current document.
+    /// Runs every registered init script against the top-level frame's fresh
+    /// document.
+    fn run_init_scripts(&self) {
+        self.ensure_init_script_worlds(oxidepage_base::MAIN_FRAME);
+        self.run_init_scripts_in(oxidepage_base::MAIN_FRAME);
+    }
+
+    /// Creates the worlds the registered init scripts name, in `frame`.
+    ///
+    /// **Every frame, not only the top one.** `Page.addScriptToEvaluateOnNewDocument`
+    /// with a `worldName` is a standing order: the world it names must exist in
+    /// each frame at each of that frame's commits, because a driver evaluates a
+    /// locator in a utility world *of the frame the locator is in*. Playwright
+    /// creates the top frame's world explicitly (its document predates the
+    /// registration) and then waits for every other frame's to be announced —
+    /// so a child frame that never gets one leaves `frameLocator()` hanging
+    /// until its own timeout, with every other frame API working.
+    ///
+    /// Idempotent: `create_isolated_world_in` returns the existing world.
+    fn ensure_init_script_worlds(&self, frame: oxidepage_base::FrameId) {
+        let names: Vec<String> = {
+            let scripts = self.state.frame.global.init_scripts.borrow();
+            let mut names: Vec<String> = scripts
+                .iter()
+                .filter_map(|script| script.world.clone())
+                .filter(|name| !name.is_empty())
+                .collect();
+            names.dedup();
+            names
+        };
+        for name in names {
+            if let Err(error) = self.create_isolated_world_in(frame, &name) {
+                self.hooks
+                    .report_resource_error(format!("init script world {name:?}: {error}"));
+            }
+        }
+    }
+
+    /// Runs every registered init script against one frame's current document.
     ///
     /// A script that throws is *reported and skipped*, not propagated: one bad
     /// init script must not stop the document from loading, and it must not
     /// stop the others from running either.
-    fn run_init_scripts(&self) {
+    fn run_init_scripts_in(&self, frame: oxidepage_base::FrameId) {
+        let default_world = match self.frames.get(frame) {
+            Some(frame) => frame.shared().default_world(),
+            None => return,
+        };
         let scripts: Vec<oxidepage_bindings::InitScript> =
             self.state.frame.global.init_scripts.borrow().clone();
         for script in scripts {
             // Routed to its own world: a `worldName` init script is the
-            // driver's own code and must not run against page globals.
+            // driver's own code and must not run against page globals. The
+            // lookup is scoped to `frame`, because the same name in two frames
+            // is two realms (ADR-0035 D3).
             let world = match script.world.as_deref() {
-                None | Some("") => Some(oxidepage_bindings::MAIN_WORLD),
-                Some(name) => self.world_id_by_name(name),
+                None | Some("") => Some(default_world),
+                Some(name) => self.worlds.by_name(frame, name).map(|world| world.id),
             };
             let Some(world) = world else {
                 self.hooks.report_resource_error(format!(
@@ -4784,6 +4839,10 @@ impl Page {
                 .report_resource_error(format!("iframe realm: {error}"));
             return;
         }
+        // Before a byte of the document is parsed, exactly as for the top-level
+        // frame: that ordering is the whole contract of an init script.
+        self.ensure_init_script_worlds(frame.id());
+        self.run_init_scripts_in(frame.id());
 
         let mut parser = Parser::new_document_shared_at(
             Rc::clone(&self.state.dom),
@@ -5025,7 +5084,6 @@ impl Page {
         let frame = self.frames.attach(parent.id(), owner, |id| {
             parent_shared.new_child(id, document, viewport)
         });
-        self.record_frame(FrameEventKind::Attached, &frame);
         // What `iframe.contentDocument` reads. Recorded on the element rather
         // than looked up through the frame table, because `bindings` cannot see
         // the table and this is a plain structural fact — the mirror of an
@@ -5045,6 +5103,13 @@ impl Page {
                 .report_resource_error(format!("nested browsing context: {error}"));
             return false;
         }
+        self.ensure_init_script_worlds(frame.id());
+        self.run_init_scripts_in(frame.id());
+        // Reported only once every world exists: the event carries them, and a
+        // driver caching a context list that was still empty would never learn
+        // about the frame's utility world. Reporting it last also means a frame
+        // rolled back above was never announced at all.
+        self.record_frame(FrameEventKind::Attached, &frame);
         true
     }
 
@@ -5095,14 +5160,11 @@ impl Page {
 
     /// Reports a browsing context appearing or going away.
     fn record_frame(&self, kind: FrameEventKind, frame: &Rc<frame::Frame>) {
-        let context_id = (kind != FrameEventKind::Detached)
-            .then(|| {
-                self.worlds
-                    .get(frame.shared().default_world())
-                    .and_then(|world| world.state())
-                    .map(|state| state.context_id.get())
-            })
-            .flatten();
+        let contexts = if kind == FrameEventKind::Detached {
+            Vec::new()
+        } else {
+            self.worlds_in(frame.shared().frame())
+        };
         let event = FrameEvent {
             kind,
             frame: frame.shared().frame(),
@@ -5113,7 +5175,7 @@ impl Page {
                 .borrow()
                 .document_url_of(frame.document())
                 .to_owned(),
-            context_id,
+            contexts,
         };
         self.hooks.emit_or_push(
             &self.frame_events,
@@ -6505,9 +6567,26 @@ impl Page {
                     // Per frame: every browsing context has a default world,
                     // and only the top-level one's is `MAIN_WORLD`.
                     is_default: state.is_main(),
+                    frame: w.frame,
                 })
             })
             .collect()
+    }
+
+    /// Every live world of one browsing context, its default world first.
+    #[must_use]
+    pub fn worlds_in(&self, frame: oxidepage_base::FrameId) -> Vec<WorldInfo> {
+        let mut worlds: Vec<WorldInfo> = self
+            .worlds()
+            .into_iter()
+            .filter(|world| world.frame == frame)
+            .collect();
+        // The default world first, whatever order the table holds: a driver
+        // reads the frame's own context out of this list and an isolated world
+        // arriving first would have it evaluating the driver's code as the
+        // page's.
+        worlds.sort_by_key(|world| !world.name.is_empty());
+        worlds
     }
 
     /// Creates — or returns — the top-level frame's isolated world named
@@ -6550,6 +6629,7 @@ impl Page {
                 name: name.to_owned(),
                 context_id: state.context_id.get(),
                 is_default: false,
+                frame,
             });
         }
         // Per frame, not per page: each browsing context has its own set of
@@ -6609,6 +6689,7 @@ impl Page {
             name: name.to_owned(),
             context_id,
             is_default: false,
+            frame,
         })
     }
 

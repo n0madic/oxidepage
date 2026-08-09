@@ -74,7 +74,7 @@ pub mod page_api {
         EvaluateOutcome, EvaluationResult, ExceptionDetails, FileChooserEvent, FrameEvent,
         FrameEventKind, FrameId, FrameInfo, FulfilledResponse, HistoryEntryInfo, ImageFormat,
         InterceptCommand, InterceptControl, KeyEvent, KeyEventKind, KeyInput, LayoutMetrics,
-        LoopStats, Margins, Modifiers, MouseEventKind, MouseInput, NavigationEvent,
+        LoopStats, MAIN_FRAME, Margins, Modifiers, MouseEventKind, MouseInput, NavigationEvent,
         NavigationEventKind, NavigationHistory, NavigatorProfile, NetworkEvent, NodeDescription,
         NodeId, NodeRef, Page, PaintOptions, PaperSize, PdfOptions, Point, PropertyDescriptor,
         Rect, RemoteError, RemoteObject, RemoteSubtype, RemoteType, RequestId, RequestOverrides,

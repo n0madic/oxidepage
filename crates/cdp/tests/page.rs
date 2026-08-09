@@ -5,7 +5,7 @@ mod common;
 use std::time::Duration;
 
 use common::{Fixtures, Harness};
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn doc(title: &str, body: &str) -> String {
     format!("<!doctype html><meta charset=utf-8><title>{title}</title>{body}")
@@ -963,6 +963,123 @@ fn get_frame_tree_reports_nested_frames() {
     }
     // The two frames are distinct.
     assert_ne!(children[0]["frame"]["id"], children[1]["frame"]["id"]);
+}
+
+/// Every announced execution context has an id of its own.
+///
+/// A driver keys its context map by that id alone, so a nested frame reporting
+/// the *top* frame's id silently replaces the page's own entry — and the
+/// replacement is invisible until something evaluates in the wrong tree. The
+/// duplicate came from announcing the attach before the frame's realm existed,
+/// when the frame still pointed at the world it inherited.
+#[test]
+fn each_frames_execution_context_has_an_id_of_its_own() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title><iframe srcdoc='<p>one</p>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(&session, "Runtime.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+
+    let contexts: Vec<Value> = client
+        .drain_events(Duration::from_millis(400))
+        .into_iter()
+        .filter(|e| e["method"] == "Runtime.executionContextCreated")
+        .map(|e| e["params"]["context"].clone())
+        .collect();
+    let mut ids: Vec<i64> = contexts
+        .iter()
+        .map(|c| c["id"].as_i64().expect("context id"))
+        .collect();
+    let before = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), before, "duplicate context ids: {contexts:?}");
+
+    // And the nested frame's context names the nested frame.
+    let nested: Vec<&Value> = contexts
+        .iter()
+        .filter(|c| c["auxData"]["frameId"] != json!(target))
+        .collect();
+    assert!(!nested.is_empty(), "no context for the frame: {contexts:?}");
+    for context in nested {
+        assert_eq!(context["auxData"]["isDefault"], json!(true));
+    }
+}
+
+/// `Page.addScriptToEvaluateOnNewDocument { worldName }` is a **standing
+/// order**: the world it names must exist in every frame, not only the one the
+/// driver could create it in by hand.
+///
+/// Playwright creates the top frame's utility world explicitly — its document
+/// predates the registration — and then waits for each later frame's to be
+/// announced before it will resolve a locator inside it. Without this,
+/// `page.frames()`, `frame.evaluate()` and `DOM.describeNode`'s `frameId` all
+/// work and `frameLocator()` alone hangs until its own timeout.
+#[test]
+fn a_named_init_script_world_reaches_every_frame() {
+    let fixtures = Fixtures::start(vec![(
+        "/frames",
+        "<!doctype html><title>Frames</title><iframe srcdoc='<p>one</p>'></iframe>",
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, target) = harness.attached();
+    client.call_on(&session, "Page.enable", json!({}));
+    client.call_on(&session, "Runtime.enable", json!({}));
+    client.call_on(
+        &session,
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": "globalThis.__util = 1;", "worldName": "util" }),
+    );
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/frames") }),
+    );
+
+    let named: Vec<Value> = client
+        .drain_events(Duration::from_millis(400))
+        .into_iter()
+        .filter(|e| e["method"] == "Runtime.executionContextCreated")
+        .map(|e| e["params"]["context"].clone())
+        .filter(|c| c["name"] == json!("util"))
+        .collect();
+    assert!(
+        named
+            .iter()
+            .any(|c| c["auxData"]["frameId"] == json!(target)),
+        "the top frame has no utility world: {named:?}"
+    );
+    // The **last** one: a `srcdoc` frame commits a second document over its
+    // initial `about:blank`, and each commit rebuilds the frame's realms. An
+    // earlier id is a context that has legitimately died, which is exactly what
+    // the announcement exists to tell a driver.
+    let nested = named
+        .iter()
+        .rfind(|c| c["auxData"]["frameId"] != json!(target))
+        .unwrap_or_else(|| panic!("the nested frame has no utility world: {named:?}"));
+    assert_eq!(
+        nested["auxData"]["isDefault"],
+        json!(false),
+        "a named world is not the frame's default one"
+    );
+
+    // The script ran there, and only there: the frame's own document must not
+    // see the driver's global.
+    let world = nested["id"].as_i64().expect("context id");
+    let evaluated = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "globalThis.__util", "contextId": world }),
+    );
+    assert_eq!(evaluated["result"]["value"], json!(1));
 }
 
 /// A page with no `<iframe>` still answers with the shape a driver iterates:

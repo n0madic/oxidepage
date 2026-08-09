@@ -463,10 +463,11 @@ covers the window family, `postMessage` in both directions and its
 `sandbox` slice. `crates/page/tests/frame_input.rs` (4) covers a click landing
 inside a frame, the crossing accounting for the frame's position, and the
 embedder's capturing listener seeing nothing. `crates/cdp/tests/{page,dom}.rs`
-covers the frame tree and the `DOM` additions. Both driver runners grew iframe
-fixtures and checks: `cargo xtask puppeteer` is 50/50 and `cargo xtask
-playwright` 22/23, its one expected failure being `frameLocator` for a reason
-not yet identified. `tests/wpt/expectations.tsv` was rebaselined once, and the
+covers the frame tree and the `DOM` additions — including that each frame's
+execution context has an id of its own, and that a `worldName` init script
+reaches every frame. Both driver runners grew iframe fixtures and checks, and
+both are green: `cargo xtask puppeteer` 50/50 and `cargo xtask playwright`
+23/23. `tests/wpt/expectations.tsv` was rebaselined once, and the
 diff is dominated by suites whose `<iframe>` fixtures could not load before and
 now run — no line moved from PASS to a failure.
 

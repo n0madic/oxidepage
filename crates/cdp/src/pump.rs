@@ -513,7 +513,12 @@ fn navigation_events(
                 // registry is the page's, not the session's, which is what
                 // makes two sessions on one target see the same worlds.
                 for world in session.page.worlds().unwrap_or_default() {
-                    if world.is_default {
+                    // The **top** frame's, only. A nested frame's worlds are
+                    // announced by its own `Page.frameNavigated`, with that
+                    // frame's `auxData.frameId`; reporting them here would file
+                    // every frame's utility world under the top frame and leave
+                    // a driver waiting for one it has already been sent.
+                    if world.is_default || world.frame != oxidepage_engine::page_api::MAIN_FRAME {
                         continue;
                     }
                     connection.emit(crate::domains::runtime::execution_context_created_named(
@@ -653,24 +658,33 @@ fn frame_lifecycle_events(
             "mimeType": "text/html",
         })
     };
-    let announce_context = |context_id: Option<u64>| {
-        // The frame's realm is rebuilt at each of its navigations, so a driver
-        // caching the old id would evaluate into a context that is gone. This
-        // is also what makes `frame.evaluate()` work at all: both drivers wait
-        // for a context whose `auxData.frameId` is the frame's.
-        if let Some(context_id) = context_id
-            && session.flags.runtime.load(Ordering::Relaxed)
-        {
+    let announce_contexts = || {
+        // The frame's realms are rebuilt at each of its navigations, so a
+        // driver caching the old ids would evaluate into a context that is
+        // gone. This is also what makes `frame.evaluate()` work at all: both
+        // drivers wait for a context whose `auxData.frameId` is the frame's.
+        //
+        // **Every world, not only the default one.** A driver's utility world
+        // is where it runs locators, and it waits for that world to be
+        // announced *for this frame* before it will resolve one — which is what
+        // `frameLocator()` was hanging on while every other frame API worked.
+        if !session.flags.runtime.load(Ordering::Relaxed) {
+            return;
+        }
+        for world in &event.contexts {
             connection.emit(Event::session(
                 &session.id,
                 "Runtime.executionContextCreated",
                 json!({
                     "context": {
-                        "id": context_id,
+                        "id": world.context_id,
+                        // The frame's own origin, not the page's: this is the
+                        // one place a context's origin can differ from the
+                        // target's.
                         "origin": crate::frame::security_origin(&event.url),
-                        "name": "",
-                        "uniqueId": format!("{}.{}", session.target_id, context_id),
-                        "auxData": { "frameId": id, "isDefault": true },
+                        "name": world.name,
+                        "uniqueId": format!("{}.{}", session.target_id, world.context_id),
+                        "auxData": { "frameId": id, "isDefault": world.is_default },
                     }
                 }),
             ));
@@ -697,7 +711,7 @@ fn frame_lifecycle_events(
                 "Page.frameNavigated",
                 json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
             ));
-            announce_context(event.context_id);
+            announce_contexts();
         }
         oxidepage_engine::page_api::FrameEventKind::Navigated => {
             connection.emit(Event::session(
@@ -705,7 +719,7 @@ fn frame_lifecycle_events(
                 "Page.frameNavigated",
                 json!({ "frame": frame_json(&event.url), "type": "Navigation" }),
             ));
-            announce_context(event.context_id);
+            announce_contexts();
         }
         oxidepage_engine::page_api::FrameEventKind::Detached => {
             connection.emit(Event::session(
