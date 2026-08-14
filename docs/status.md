@@ -90,7 +90,15 @@ v1 limits.
   `oxidepage dump <file|url> [--viewport WxH]` prints the box tree.
   Gated by layout/geometry unit + page integration suites and the WPT
   `css/cssom-view` + `css/css-flexbox` testharness subsets, with a
-  read-modify-write reflow benchmark (numbers in ADR-0006). Implementation
+  read-modify-write reflow benchmark (numbers in ADR-0006). Grid carries a UA
+  limit of **1000 tracks per axis** (CSS Grid 2 §"Limiting Large Grids"): the
+  stylo→taffy conversion narrows `i32` line numbers and `repeat()` counts to
+  `i16`/`u16` and panicked or wrapped on the way, and taffy's occupancy matrix
+  is dense, so `repeat(70000, 1px)` crashed the page thread and
+  `grid-column: 1 / 32000` asked for a gigabyte. A grid at or under the limit
+  is unaffected. The limit covers **authored** counts only —
+  `repeat(auto-fill, …)` resolves at layout time from the container size and is
+  still unbounded (ADR-0036 D5). Implementation
   decisions (stack pins, deliberate deviations, v1 limits): ADR-0006.
 - **Phase 6 — Paint, raster & PDF**: done. A backend-neutral **display list**
   is built by walking the box tree in stacking-context order (backgrounds,

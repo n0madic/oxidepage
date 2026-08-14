@@ -30,14 +30,19 @@ use servo_arc::Arc as ServoArc;
 use style::computed_values::pointer_events::T as PointerEvents;
 use style::computed_values::position::T as Position;
 use style::properties::ComputedValues;
+use style::properties::style_structs::Position as StyloPosition;
 use style::selector_parser::PseudoElement as StyloPseudoElement;
 use style::values::computed::font::LineHeight;
 use style::values::computed::{
-    Clear, Content, ContentItem, Display, FlexBasis, Float, MaxSize as StyloMaxSize,
-    Size as StyloSize, TextIndent, TextTransform,
+    Clear, Content, ContentItem, Display, FlexBasis, Float, GridLine as StyloGridLine,
+    GridTemplateComponent as StyloGridTemplate, MaxSize as StyloMaxSize, Size as StyloSize,
+    TextIndent, TextTransform,
 };
+use style::values::generics::grid::{RepeatCount, TrackListValue};
+use style::values::specified::GenericGridTemplateComponent;
 use style::values::specified::align::AlignFlags;
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
+use style::values::specified::position::GridTemplateAreas as StyloGridAreas;
 
 use crate::fonts::FontSystem;
 use crate::marker::MarkerPosition;
@@ -1220,7 +1225,7 @@ fn flow_triple(style: Option<&ServoArc<ComputedValues>>) -> (Display, Position, 
 }
 
 pub(crate) fn taffy_style_for(style: &ComputedValues) -> taffy::Style<style::Atom> {
-    let mut converted = stylo_taffy::to_taffy_style(style);
+    let mut converted = to_taffy_style_guarded(style);
 
     // Taffy's experimental float fitter uses a strict `remaining >= 0`
     // comparison. Percentage columns that mathematically total 100% can
@@ -1335,7 +1340,481 @@ pub(crate) fn taffy_style_for(style: &ComputedValues) -> taffy::Style<style::Ato
         justify_content.safety = taffy::AlignmentSafety::Safe;
     }
 
+    clamp_grid_tracks(&mut converted);
+
     converted
+}
+
+/// The number of grid tracks one axis may generate, per side of the explicit
+/// grid. CSS Grid 2 [§Limiting Large Grids][spec] lets a UA cap implicit track
+/// generation, which is what makes this a conformant limit rather than a
+/// workaround.
+///
+/// The cap is load-bearing because taffy's occupancy matrix is dense — one byte
+/// per cell, `rows × cols` allocated up front in
+/// `taffy::compute::grid::types::cell_occupancy::CellOccupancyMatrix::with_track_counts`
+/// — so a single `grid-column: 1 / 32000` on both axes asks for a gigabyte
+/// before a track is sized. At this cap the worst case is 2000×2000 cells
+/// (both sides of both axes), about 4 MB.
+///
+/// It bounds *authored* track counts only. `repeat(auto-fill, …)` resolves at
+/// layout time from the container's size and is out of reach here — see
+/// ADR-0036 D5.
+///
+/// [spec]: https://drafts.csswg.org/css-grid-2/#overlarge-grids
+const MAX_GRID_TRACKS_PER_AXIS: u16 = 1000;
+
+/// The matching line-number cap. Grid lines are 1-based and may be negative
+/// (counted back from the end of the explicit grid), and 0 is not a valid
+/// line — so `MAX_GRID_TRACKS_PER_AXIS` tracks span lines `±(MAX + 1)`.
+const MAX_GRID_LINE: i16 = MAX_GRID_TRACKS_PER_AXIS as i16 + 1;
+
+/// How an element's grid values relate to the narrower integers taffy stores
+/// them in. Answered by one walk, because all three consumers — the decision to
+/// convert upstream, the decision to repair placements, and the saturating
+/// mirror — must agree on the same bounds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GridFit {
+    /// The element declares no grid value at all, so no narrowing site in
+    /// `stylo_taffy::convert` is reachable: every one of them sits inside a
+    /// `grid_*` converter.
+    Absent,
+    /// Every value narrows losslessly; the upstream conversion is exact.
+    Exact,
+    /// A line number is outside taffy's `i16`/`u16`. Upstream's `as` casts wrap
+    /// it to an unrelated line, so the placement is re-derived with saturation.
+    Wraps,
+    /// A value would panic the upstream conversion, which is monolithic and so
+    /// cannot be asked for the rest of the style; the whole conversion is
+    /// mirrored locally instead.
+    Refused,
+}
+
+/// Classifies one element's grid values against taffy's integer widths.
+///
+/// Stylo keeps grid line numbers and `repeat()` counts as `i32`; taffy keeps
+/// them as `i16`/`u16`. `stylo_taffy::convert` narrows between the two with
+/// `try_into().unwrap()` at two sites — a named span's count in `grid_line`, a
+/// repetition count in `track_repeat` — and with `as` everywhere else. Both
+/// panics are reachable from one declaration (`grid-column: span foo 70000`,
+/// `grid-template-columns: repeat(70000, 1px)`), and the unwind would cross
+/// `LayoutEngine::reflow`, which has no boundary, taking the page thread with
+/// it.
+fn classify_grid_values(pos: &StyloPosition) -> GridFit {
+    let lines = [
+        &pos.grid_row_start,
+        &pos.grid_row_end,
+        &pos.grid_column_start,
+        &pos.grid_column_end,
+    ];
+    let templates = [&pos.grid_template_rows, &pos.grid_template_columns];
+    let no_placement = lines
+        .iter()
+        .all(|line| !line.is_span && line.line_num == 0 && line.ident.0.is_empty());
+    let no_template = templates
+        .iter()
+        .all(|template| matches!(template, GenericGridTemplateComponent::None));
+    if no_placement && no_template && matches!(pos.grid_template_areas, StyloGridAreas::None) {
+        return GridFit::Absent;
+    }
+
+    let mut fit = GridFit::Exact;
+    for line in lines {
+        if line.is_span {
+            if u16::try_from(line.line_num).is_err() {
+                if !line.ident.0.is_empty() {
+                    // `convert::grid_line`'s `try_into().unwrap()`.
+                    return GridFit::Refused;
+                }
+                fit = GridFit::Wraps;
+            }
+        } else if i16::try_from(line.line_num).is_err() {
+            fit = GridFit::Wraps;
+        }
+    }
+    for template in templates {
+        // `convert::track_repeat`'s `try_into().unwrap()`.
+        if repeat_count_overflows(template) {
+            return GridFit::Refused;
+        }
+    }
+    fit
+}
+
+/// Whether any `repeat()` in one axis carries a count wider than the `u16`
+/// `stylo_taffy::convert::track_repeat` unwraps into.
+fn repeat_count_overflows(template: &StyloGridTemplate) -> bool {
+    // `None`, `subgrid` and `masonry` all convert to an empty track list.
+    let GenericGridTemplateComponent::TrackList(list) = template else {
+        return false;
+    };
+    list.values.iter().any(|value| match value {
+        TrackListValue::TrackRepeat(repeat) => {
+            matches!(repeat.count, RepeatCount::Number(count) if u16::try_from(count).is_err())
+        }
+        TrackListValue::TrackSize(_) => false,
+    })
+}
+
+/// [`stylo_taffy::to_taffy_style`], made total.
+///
+/// Known-unrepresentable values take the local mirror rather than raise and
+/// catch a panic, so a page full of them stays quiet on stderr;
+/// [`catch_unwind`](std::panic::catch_unwind) is the belt for the seven `as`
+/// narrowings the classification does not model, which wrap today but are one
+/// upstream edit away from unwrapping. Same trust-boundary shape as
+/// `webfont::decode_caught` (ADR-0008). An upstream `stylo_taffy` that clamps
+/// instead of unwrapping deletes all of this.
+fn to_taffy_style_guarded(style: &ComputedValues) -> taffy::Style<style::Atom> {
+    let pos = style.get_position();
+    let fit = classify_grid_values(pos);
+    if fit == GridFit::Absent {
+        // Nothing to guard and nothing to repair: no landing pad, no second
+        // walk. This is the overwhelming majority of elements.
+        return stylo_taffy::to_taffy_style(style);
+    }
+    if fit == GridFit::Refused {
+        return to_taffy_style_saturating(style);
+    }
+    // `AssertUnwindSafe` is sound here: the closure borrows `&ComputedValues`
+    // and `to_taffy_style` is a pure function of it, so an unwind can leave
+    // nothing observable half-written.
+    let mut converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stylo_taffy::to_taffy_style(style)
+    }))
+    .unwrap_or_else(|_| to_taffy_style_saturating(style));
+    if fit == GridFit::Wraps {
+        converted.grid_row = taffy::Line {
+            start: saturating_grid_line(&pos.grid_row_start),
+            end: saturating_grid_line(&pos.grid_row_end),
+        };
+        converted.grid_column = taffy::Line {
+            start: saturating_grid_line(&pos.grid_column_start),
+            end: saturating_grid_line(&pos.grid_column_end),
+        };
+    }
+    converted
+}
+
+/// `stylo_taffy::to_taffy_style` with the grid conversions saturated, for the
+/// values that make the upstream one panic.
+///
+/// It has to be a whole-style mirror because `to_taffy_style` is monolithic: it
+/// builds one struct literal, so a panic anywhere in it loses the *non*-grid
+/// fields too. Returning `Style::DEFAULT` with only `display` kept — the
+/// obvious cheap answer — silently unstyles the element: an
+/// `position: absolute; left: 50px; width: 100px` grid container laid out in
+/// flow at its parent's full width, because `LayoutBox::position` is captured
+/// from stylo separately and still says `Absolute`.
+///
+/// Every field is upstream's own public converter, so only the two grid
+/// conversions differ, and `..Style::DEFAULT` means a field added upstream
+/// takes its initial value here rather than failing to compile. `text_align` is
+/// the one deliberate omission — upstream's converter is `pub(crate)`, and it
+/// only maps the three `-moz-*` legacy keywords that block layout uses for
+/// centering.
+fn to_taffy_style_saturating(style: &ComputedValues) -> taffy::Style<style::Atom> {
+    use stylo_taffy::convert as up;
+
+    let display = style.clone_display();
+    let pos = style.get_position();
+    let margin = style.get_margin();
+    let padding = style.get_padding();
+    let border = style.get_border();
+
+    taffy::Style {
+        display: up::display(display),
+        box_sizing: up::box_sizing(style.clone_box_sizing()),
+        item_is_table: display.inside() == DisplayInside::Table,
+        position: up::position(style.clone_position()),
+        overflow: taffy::Point {
+            x: up::overflow(style.clone_overflow_x()),
+            y: up::overflow(style.clone_overflow_y()),
+        },
+        direction: up::direction(style.clone_direction()),
+        float: up::float(style.clone_float()),
+        clear: up::clear(style.clone_clear()),
+        size: taffy::Size {
+            width: up::dimension(&pos.width),
+            height: up::dimension(&pos.height),
+        },
+        min_size: taffy::Size {
+            width: up::dimension(&pos.min_width),
+            height: up::dimension(&pos.min_height),
+        },
+        max_size: taffy::Size {
+            width: up::max_size_dimension(&pos.max_width),
+            height: up::max_size_dimension(&pos.max_height),
+        },
+        aspect_ratio: up::aspect_ratio(pos.aspect_ratio),
+        inset: taffy::Rect {
+            left: up::inset(&pos.left),
+            right: up::inset(&pos.right),
+            top: up::inset(&pos.top),
+            bottom: up::inset(&pos.bottom),
+        },
+        margin: taffy::Rect {
+            left: up::margin(&margin.margin_left),
+            right: up::margin(&margin.margin_right),
+            top: up::margin(&margin.margin_top),
+            bottom: up::margin(&margin.margin_bottom),
+        },
+        padding: taffy::Rect {
+            left: up::length_percentage(&padding.padding_left.0),
+            right: up::length_percentage(&padding.padding_right.0),
+            top: up::length_percentage(&padding.padding_top.0),
+            bottom: up::length_percentage(&padding.padding_bottom.0),
+        },
+        border: taffy::Rect {
+            left: up::border(&border.border_left_width, border.border_left_style),
+            right: up::border(&border.border_right_width, border.border_right_style),
+            top: up::border(&border.border_top_width, border.border_top_style),
+            bottom: up::border(&border.border_bottom_width, border.border_bottom_style),
+        },
+        gap: taffy::Size {
+            width: up::gap(&pos.column_gap),
+            height: up::gap(&pos.row_gap),
+        },
+        align_content: up::content_alignment(pos.align_content),
+        justify_content: up::content_alignment(pos.justify_content),
+        align_items: up::item_alignment(pos.align_items.0),
+        align_self: up::item_alignment(pos.align_self.0),
+        justify_items: up::item_alignment((pos.justify_items.computed.0).0),
+        justify_self: up::item_alignment(pos.justify_self.0),
+        flex_direction: up::flex_direction(pos.flex_direction),
+        flex_wrap: up::flex_wrap(pos.flex_wrap),
+        flex_grow: pos.flex_grow.0,
+        flex_shrink: pos.flex_shrink.0,
+        flex_basis: up::flex_basis(&pos.flex_basis),
+        grid_auto_flow: up::grid_auto_flow(pos.grid_auto_flow),
+        grid_template_rows: saturating_grid_template_tracks(&pos.grid_template_rows),
+        grid_template_columns: saturating_grid_template_tracks(&pos.grid_template_columns),
+        grid_template_row_names: template_line_names(&pos.grid_template_rows),
+        grid_template_column_names: template_line_names(&pos.grid_template_columns),
+        grid_template_areas: template_areas(&pos.grid_template_areas),
+        grid_auto_rows: up::grid_auto_tracks(&pos.grid_auto_rows),
+        grid_auto_columns: up::grid_auto_tracks(&pos.grid_auto_columns),
+        grid_row: taffy::Line {
+            start: saturating_grid_line(&pos.grid_row_start),
+            end: saturating_grid_line(&pos.grid_row_end),
+        },
+        grid_column: taffy::Line {
+            start: saturating_grid_line(&pos.grid_column_start),
+            end: saturating_grid_line(&pos.grid_column_end),
+        },
+        ..taffy::Style::DEFAULT
+    }
+}
+
+/// `stylo_taffy::convert::grid_line`, with the narrowings saturated instead of
+/// wrapped. Branch for branch the same as upstream — only the `as` casts and
+/// the `try_into().unwrap()` change — so a value that fits converts identically
+/// either way, and only an out-of-range one differs: it lands at the far edge
+/// of the representable range, which [`clamp_grid_tracks`] then pulls down to
+/// the UA limit, instead of at an unrelated line of the opposite sign.
+fn saturating_grid_line(line: &StyloGridLine) -> taffy::GridPlacement<style::Atom> {
+    let saturate_span = || line.line_num.clamp(0, i32::from(u16::MAX)) as u16;
+    let saturate_line = || {
+        line.line_num
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+    };
+    if line.is_span {
+        if line.ident.0.is_empty() {
+            taffy::GridPlacement::Span(saturate_span())
+        } else {
+            taffy::GridPlacement::NamedSpan(line.ident.0.clone(), saturate_span())
+        }
+    } else if !line.ident.0.is_empty() {
+        taffy::GridPlacement::NamedLine(line.ident.0.clone(), saturate_line())
+    } else if line.line_num != 0 {
+        taffy::GridPlacement::Line(saturate_line().into())
+    } else {
+        taffy::GridPlacement::Auto
+    }
+}
+
+/// `stylo_taffy::convert::grid_template_tracks`, with `track_repeat`'s
+/// `try_into().unwrap()` saturated. [`clamp_grid_tracks`] applies the UA limit
+/// afterwards, so this only has to be representable, not small.
+fn saturating_grid_template_tracks(
+    template: &StyloGridTemplate,
+) -> Vec<taffy::GridTemplateComponent<style::Atom>> {
+    let GenericGridTemplateComponent::TrackList(list) = template else {
+        return Vec::new();
+    };
+    list.values
+        .iter()
+        .map(|value| match value {
+            TrackListValue::TrackSize(size) => {
+                taffy::GridTemplateComponent::Single(stylo_taffy::convert::track_size(size))
+            }
+            TrackListValue::TrackRepeat(repeat) => {
+                taffy::GridTemplateComponent::Repeat(taffy::GridTemplateRepetition {
+                    count: match repeat.count {
+                        RepeatCount::Number(count) => taffy::RepetitionCount::Count(
+                            count.clamp(0, i32::from(u16::MAX)) as u16,
+                        ),
+                        RepeatCount::AutoFill => taffy::RepetitionCount::AutoFill,
+                        RepeatCount::AutoFit => taffy::RepetitionCount::AutoFit,
+                    },
+                    tracks: repeat
+                        .track_sizes
+                        .iter()
+                        .map(stylo_taffy::convert::track_size)
+                        .collect(),
+                    line_names: repeat
+                        .line_names
+                        .iter()
+                        .map(|set| set.iter().map(|ident| ident.0.clone()).collect())
+                        .collect(),
+                })
+            }
+        })
+        .collect()
+}
+
+/// The line-name sets for one axis, exactly as upstream builds them.
+fn template_line_names(template: &StyloGridTemplate) -> Vec<Vec<style::Atom>> {
+    match stylo_taffy::convert::grid_template_line_names(template) {
+        Some(names) => names.map(|set| set.cloned().collect()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The named areas for one element, exactly as upstream builds them.
+fn template_areas(areas: &StyloGridAreas) -> Vec<taffy::GridTemplateArea<style::Atom>> {
+    match areas {
+        StyloGridAreas::None => Vec::new(),
+        StyloGridAreas::Areas(areas) => areas
+            .0
+            .areas
+            .iter()
+            .map(stylo_taffy::convert::grid_template_area)
+            .collect(),
+    }
+}
+
+/// Applies [`MAX_GRID_TRACKS_PER_AXIS`] to a converted style. A ceiling only:
+/// a grid at or under the limit is left exactly as the upstream conversion
+/// produced it.
+fn clamp_grid_tracks(converted: &mut taffy::Style<style::Atom>) {
+    clamp_grid_placement(&mut converted.grid_row);
+    clamp_grid_placement(&mut converted.grid_column);
+    clamp_template_tracks(
+        &mut converted.grid_template_rows,
+        &mut converted.grid_template_row_names,
+    );
+    clamp_template_tracks(
+        &mut converted.grid_template_columns,
+        &mut converted.grid_template_column_names,
+    );
+    clamp_grid_areas(&mut converted.grid_template_areas);
+}
+
+/// Clamps one item's placement on one axis. A placement is what generates
+/// implicit tracks, so this is the half of the limit that bounds an item in an
+/// otherwise unremarkable grid.
+fn clamp_grid_placement(placement: &mut taffy::Line<taffy::GridPlacement<style::Atom>>) {
+    for side in [&mut placement.start, &mut placement.end] {
+        match side {
+            taffy::GridPlacement::Line(index) => {
+                *index = index.as_i16().clamp(-MAX_GRID_LINE, MAX_GRID_LINE).into();
+            }
+            taffy::GridPlacement::NamedLine(_, index) => {
+                *index = (*index).clamp(-MAX_GRID_LINE, MAX_GRID_LINE);
+            }
+            taffy::GridPlacement::Span(span) | taffy::GridPlacement::NamedSpan(_, span) => {
+                *span = (*span).min(MAX_GRID_TRACKS_PER_AXIS);
+            }
+            taffy::GridPlacement::Auto => {}
+        }
+    }
+}
+
+/// Truncates one axis's explicit track list to [`MAX_GRID_TRACKS_PER_AXIS`].
+///
+/// The budget is spent across the whole axis, not per `repeat()`: a
+/// per-repetition cap is evaded by `repeat(600, 1px) repeat(600, 1px)` or by a
+/// long list of single tracks — both linear in stylesheet bytes but quadratic
+/// in occupancy-matrix cells.
+///
+/// `auto-fill`/`auto-fit` counts pass through, because taffy resolves those
+/// from the container size at layout time and a style-level cap cannot reach
+/// them (ADR-0036 D5); each is charged one repetition's worth of tracks here.
+fn clamp_template_tracks(
+    tracks: &mut Vec<taffy::GridTemplateComponent<style::Atom>>,
+    line_names: &mut Vec<Vec<style::Atom>>,
+) {
+    let budget = u64::from(MAX_GRID_TRACKS_PER_AXIS);
+    let mut used = 0_u64;
+    let mut kept = tracks.len();
+    for (index, component) in tracks.iter_mut().enumerate() {
+        let remaining = budget - used;
+        match component {
+            taffy::GridTemplateComponent::Single(_) => {
+                if remaining == 0 {
+                    kept = index;
+                    break;
+                }
+                used += 1;
+            }
+            taffy::GridTemplateComponent::Repeat(repetition) => {
+                // A `repeat()` with no track sizes generates nothing and cannot
+                // be divided by; CSS has no syntax for one, but the arithmetic
+                // below must not depend on that.
+                let per_repetition = repetition.tracks.len() as u64;
+                if per_repetition == 0 {
+                    continue;
+                }
+                match repetition.count {
+                    taffy::RepetitionCount::Count(count) => {
+                        let allowed = remaining / per_repetition;
+                        if allowed == 0 {
+                            kept = index;
+                            break;
+                        }
+                        let count = u64::from(count).min(allowed);
+                        repetition.count = taffy::RepetitionCount::Count(count as u16);
+                        used += count * per_repetition;
+                    }
+                    taffy::RepetitionCount::AutoFill | taffy::RepetitionCount::AutoFit => {
+                        if remaining < per_repetition {
+                            kept = index;
+                            break;
+                        }
+                        used += per_repetition;
+                    }
+                }
+            }
+        }
+    }
+    if kept < tracks.len() {
+        tracks.truncate(kept);
+        // Upstream emits one line-name set per line — N + 1 sets for N
+        // components — and taffy pairs set `i` with component `i` while
+        // walking both (`taffy::compute::grid::types::named`). Dropping tracks
+        // without dropping their names would shift that pairing.
+        line_names.truncate(kept + 1);
+    }
+}
+
+/// Clamps the explicit grid implied by `grid-template-areas` to the same limit.
+///
+/// Taffy sizes the explicit grid per axis as `max(template tracks, area
+/// extent)`, so an area count on one axis multiplies against the *clamped*
+/// track count on the other: 30 000 named columns (60 KB of CSS, all of it
+/// paid for) against one item's capped 1000 rows is 30 M occupancy cells. The
+/// cross-axis product is the amplification — within a single axis the names
+/// really are their own bound.
+fn clamp_grid_areas(areas: &mut Vec<taffy::GridTemplateArea<style::Atom>>) {
+    let max_line = MAX_GRID_LINE as u16;
+    // An area that starts past the capped grid has nowhere to land.
+    areas.retain(|area| area.row_start <= max_line && area.column_start <= max_line);
+    for area in areas.iter_mut() {
+        // `start <= max_line` above keeps each area non-empty.
+        area.row_end = area.row_end.min(max_line);
+        area.column_end = area.column_end.min(max_line);
+    }
 }
 
 /// Captures the text-related computed values the compute phase needs.
@@ -1684,5 +2163,118 @@ impl IfcWalker<'_> {
             }
             _ => {}
         }
+    }
+}
+
+/// Unit coverage for the two halves of the grid limit that layout geometry
+/// cannot observe. `grid-template-areas` sizes taffy's occupancy matrix but
+/// contributes no *tracks* to an axis, so an over-wide area shows up only as
+/// allocated memory; a truncated track list's trailing line names likewise
+/// change nothing a rect can report.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use taffy::style_helpers::TaffyAuto as _;
+
+    fn single() -> taffy::GridTemplateComponent<style::Atom> {
+        taffy::GridTemplateComponent::Single(taffy::TrackSizingFunction::AUTO)
+    }
+
+    fn repetition(
+        count: taffy::RepetitionCount,
+        tracks: usize,
+    ) -> taffy::GridTemplateComponent<style::Atom> {
+        taffy::GridTemplateComponent::Repeat(taffy::GridTemplateRepetition {
+            count,
+            tracks: vec![taffy::TrackSizingFunction::AUTO; tracks],
+            line_names: Vec::new(),
+        })
+    }
+
+    fn track_count(tracks: &[taffy::GridTemplateComponent<style::Atom>]) -> u64 {
+        tracks
+            .iter()
+            .map(|component| match component {
+                taffy::GridTemplateComponent::Single(_) => 1,
+                taffy::GridTemplateComponent::Repeat(repetition) => {
+                    let per_repetition = repetition.tracks.len() as u64;
+                    match repetition.count {
+                        taffy::RepetitionCount::Count(count) => u64::from(count) * per_repetition,
+                        // Resolved from the container size at layout time.
+                        _ => per_repetition,
+                    }
+                }
+            })
+            .sum()
+    }
+
+    fn area(
+        name: &str,
+        column_start: u16,
+        column_end: u16,
+    ) -> taffy::GridTemplateArea<style::Atom> {
+        taffy::GridTemplateArea {
+            name: style::Atom::from(name),
+            row_start: 1,
+            row_end: 2,
+            column_start,
+            column_end,
+        }
+    }
+
+    #[test]
+    fn a_partial_repetition_is_reduced_rather_than_dropped() {
+        let mut tracks = vec![single(), repetition(taffy::RepetitionCount::Count(3000), 2)];
+        let mut names = vec![Vec::new(); 3];
+        clamp_template_tracks(&mut tracks, &mut names);
+        assert_eq!(tracks.len(), 2, "the crossing repetition survives");
+        // One single, then as many whole 2-track repetitions as the budget fits.
+        assert_eq!(track_count(&tracks), 999);
+    }
+
+    #[test]
+    fn truncation_keeps_one_line_name_set_per_line() {
+        let mut tracks = vec![single(); 1200];
+        let mut names = vec![Vec::new(); 1201];
+        clamp_template_tracks(&mut tracks, &mut names);
+        assert_eq!(tracks.len(), usize::from(MAX_GRID_TRACKS_PER_AXIS));
+        assert_eq!(names.len(), tracks.len() + 1);
+    }
+
+    #[test]
+    fn an_auto_repetition_passes_through() {
+        let mut tracks = vec![repetition(taffy::RepetitionCount::AutoFill, 1)];
+        let mut names = vec![Vec::new(); 2];
+        clamp_template_tracks(&mut tracks, &mut names);
+        assert!(matches!(
+            &tracks[..],
+            [taffy::GridTemplateComponent::Repeat(repetition)]
+                if repetition.count == taffy::RepetitionCount::AutoFill
+        ));
+    }
+
+    #[test]
+    fn named_areas_are_clamped_to_the_track_limit() {
+        let max_line = MAX_GRID_LINE as u16;
+        let areas = vec![
+            area("wide", 1, 30_001),
+            area("far", 20_000, 20_001),
+            area("small", 2, 4),
+        ];
+        // Through `clamp_grid_tracks`, so the wiring is covered too: an area
+        // clamp that is never called is the same bug as one that is wrong.
+        let mut converted = taffy::Style {
+            grid_template_areas: areas,
+            ..taffy::Style::DEFAULT
+        };
+        clamp_grid_tracks(&mut converted);
+        let areas = converted.grid_template_areas;
+        assert_eq!(
+            areas.iter().map(|area| &*area.name).collect::<Vec<_>>(),
+            ["wide", "small"],
+            "an area starting past the capped grid has nowhere to land"
+        );
+        assert_eq!(areas[0].column_end, max_line);
+        assert_eq!((areas[1].column_start, areas[1].column_end), (2, 4));
     }
 }

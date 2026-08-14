@@ -178,11 +178,15 @@ strip = true
 # in bytes. The size therefore comes from fat LTO + one codegen unit, plus
 # `opt-level = "s"` on the few crates measured to be indifferent to it.
 #
-# `panic` deliberately stays `unwind`. `layout::webfont` is a trust boundary: it
+# `panic` deliberately stays `unwind`, for two trust boundaries. `layout::webfont`
 # contains panics from the `wuff` decompressor on attacker-controlled fonts with
-# `catch_unwind` and turns them into a clean `font-display` fallback. Under
-# `panic = "abort"` a hostile web font becomes a process kill — a remote DoS
-# against the very threat model in design §8. Those bytes are not for sale.
+# `catch_unwind` and turns them into a clean `font-display` fallback;
+# `layout::construct::to_taffy_style_guarded` does the same for the unsafe
+# narrowings in `stylo_taffy`'s grid conversion (ADR-0036 — its pre-check stops
+# the two known panics, but the `catch_unwind` behind it is what covers the rest).
+# Under `panic = "abort"` a hostile web font or a hostile grid declaration becomes
+# a process kill — a remote DoS against the very threat model in design §8. Those
+# bytes are not for sale.
 [profile.min-size]
 inherits = "release"
 opt-level = 3
