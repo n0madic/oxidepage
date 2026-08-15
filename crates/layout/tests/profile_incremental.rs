@@ -32,7 +32,9 @@ fn profile_phases() {
     let mut dom = parse_document(&html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     let probe = dom
         .inclusive_descendants(dom.document())
         .find(|&id| {
@@ -55,7 +57,9 @@ fn profile_phases() {
         style.resolve_styles(&mut dom);
         restyle += t0.elapsed();
         let t1 = std::time::Instant::now();
-        layout.reflow(&mut dom, &mut style);
+        layout
+            .reflow(&mut dom, &mut style)
+            .expect("layout completes");
         rest += t1.elapsed();
     }
     eprintln!(

@@ -60,7 +60,9 @@ fn bench_reflow(c: &mut Criterion) {
                 oxidepage_dom::node::attr_name(html5ever::LocalName::from("data-flip")),
                 if flip { "a".into() } else { "b".into() },
             );
-            layout.reflow(&mut dom, &mut style);
+            layout
+                .reflow(&mut dom, &mut style)
+                .expect("layout completes");
             std::hint::black_box(layout.tree().box_count())
         });
     });
@@ -72,7 +74,9 @@ fn bench_reflow(c: &mut Criterion) {
         let mut dom = parse(&html);
         let mut style = StyleEngine::new(&dom, Viewport::default());
         let mut layout = LayoutEngine::new(Viewport::default());
-        layout.reflow(&mut dom, &mut style);
+        layout
+            .reflow(&mut dom, &mut style)
+            .expect("layout completes");
         let probe = dom
             .inclusive_descendants(dom.document())
             .find(|&id| {
@@ -89,7 +93,9 @@ fn bench_reflow(c: &mut Criterion) {
                 oxidepage_dom::node::attr_name(html5ever::LocalName::from("style")),
                 format!("width: {width}px").into(),
             );
-            layout.reflow(&mut dom, &mut style);
+            layout
+                .reflow(&mut dom, &mut style)
+                .expect("layout completes");
             std::hint::black_box(layout.tree().box_count())
         });
     });
@@ -104,7 +110,9 @@ fn bench_reflow(c: &mut Criterion) {
                 (dom, style, LayoutEngine::new(Viewport::default()))
             },
             |(mut dom, mut style, mut layout)| {
-                layout.reflow(&mut dom, &mut style);
+                layout
+                    .reflow(&mut dom, &mut style)
+                    .expect("layout completes");
                 std::hint::black_box(layout.tree().box_count())
             },
             criterion::BatchSize::LargeInput,

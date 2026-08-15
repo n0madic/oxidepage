@@ -728,6 +728,13 @@ fn run_over_test_server(vendor: &Path, rel: &str) -> ExitCode {
     let page = match oxidepage_page::Page::new(oxidepage_page::PageOptions {
         // Loopback test server: keep HTTP(S)-only + budgets, allow 127.0.0.1.
         policy: Some(oxidepage_page::ResourcePolicy::permissive_localhost()),
+        // The runners must be deterministic, and a live layout deadline is
+        // not: a loaded CI machine (or a debug build, where layout is an order
+        // of magnitude slower) would abort a flush and produce a *blank*
+        // golden, reference or report — a confusing pixel diff rather than a
+        // timeout. `Page`'s 10 s default exists to bound a hostile document,
+        // which a committed fixture is not (ADR-0037 D8).
+        layout_budget: Some(std::time::Duration::MAX),
         ..Default::default()
     }) {
         Ok(page) => page,

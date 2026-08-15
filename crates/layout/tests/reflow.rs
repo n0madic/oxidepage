@@ -31,7 +31,9 @@ fn setup(html: &str) -> (DomTree, StyleEngine, LayoutEngine) {
     let mut dom = parse_document(html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     (dom, style, layout)
 }
 
@@ -150,7 +152,9 @@ fn clearfix_after_pseudo_contains_a_float() {
     let sheet = style.make_stylesheet(&css, dom.url_extra_data());
     style.add_sheet_for_node(&dom, style_el, sheet);
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let container_box = box_of(&layout, &dom, "container");
     let pseudo = layout
@@ -190,7 +194,9 @@ fn bootstrap_clearfix_preserves_float_order_and_height() {
     let sheet = style.make_stylesheet(&css, dom.url_extra_data());
     style.add_sheet_for_node(&dom, style_el, sheet);
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let a = layout.tree().box_(box_of(&layout, &dom, "a")).final_layout;
     let b = layout.tree().box_(box_of(&layout, &dom, "b")).final_layout;
@@ -222,7 +228,9 @@ fn clearfix_bfc_includes_bottom_padding_after_floats() {
     let sheet = style.make_stylesheet(&css, dom.url_extra_data());
     style.add_sheet_for_node(&dom, style_el, sheet);
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let row = layout
         .tree()
@@ -249,7 +257,9 @@ fn relative_offset_moves_a_float_without_affecting_flow_height() {
     let sheet = style.make_stylesheet(&css, dom.url_extra_data());
     style.add_sheet_for_node(&dom, style_el, sheet);
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let float = layout.tree().box_(box_of(&layout, &dom, "f")).final_layout;
     let row = layout
@@ -418,7 +428,9 @@ fn post_layout_offsets_do_not_accumulate_on_incremental_reflow() {
     assert_eq!(initial_float.location.y, 130.0);
 
     set_style_attr(&mut dom, trigger, "width: 11px; height: 1px");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts(), (1, 1));
     let updated_abs = layout
         .tree()
@@ -457,11 +469,15 @@ fn reflow_stamp_skips_clean_reflows() {
     let mut dom = parse_document("<div id=d>x</div>", ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     let count_before = layout.tree().box_count();
 
     // Clean reflow: no work, same tree object state.
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.tree().box_count(), count_before);
 
     // DOM mutation invalidates the stamp.
@@ -471,7 +487,9 @@ fn reflow_stamp_skips_clean_reflows() {
         oxidepage_dom::node::attr_name(html5ever::local_name!("style")),
         "height: 77px".into(),
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     let d_box = layout.tree().box_for_node(d).unwrap();
     assert_eq!(layout.tree().box_(d_box).final_layout.size.height, 77.0);
 }
@@ -500,7 +518,9 @@ fn before_pseudo_takes_space() {
     let sheet = style.make_stylesheet(&css, dom.url_extra_data());
     style.add_sheet_for_node(&dom, style_el, sheet);
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     // The ::before line (10px tall) pushes the child down.
     let child = box_of(&layout, &dom, "child");
@@ -601,7 +621,9 @@ fn incremental_patch_applies_inline_size_change() {
     // Style-only change: the box tree is patched, not rebuilt (box ids and
     // count survive), and the new size lands.
     set_style_attr(&mut dom, a, "width: 140px; height: 25px");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.tree().box_count(), boxes_before);
     assert_eq!(layout.reflow_counts(), (1, 1), "patch path must be taken");
     let a_box = layout.tree().box_for_node(a).unwrap();
@@ -622,7 +644,9 @@ fn incremental_patch_bails_on_display_change() {
     );
     let a = find_by_id(&dom, "a");
     set_style_attr(&mut dom, a, "display: none");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     // The box disappears — only a rebuild can do that.
     assert_eq!(
         layout.reflow_counts(),
@@ -646,7 +670,9 @@ fn structural_change_still_rebuilds() {
     );
     dom.append_child(host, child).unwrap();
     set_style_attr(&mut dom, child, "width: 30px; height: 40px");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     let child_box = layout.tree().box_for_node(child).expect("new box");
     let l = layout.tree().box_(child_box).final_layout;
     assert_eq!((l.size.width, l.size.height), (30.0, 40.0));
@@ -686,7 +712,9 @@ fn incremental_patch_only_visits_restyled_elements() {
     );
 
     // The patch still lands the new geometry without a rebuild.
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts(), (1, 1), "patch path must be taken");
     let target_box = layout.tree().box_for_node(target).unwrap();
     let l = layout.tree().box_(target_box).final_layout;
@@ -710,7 +738,9 @@ fn incremental_patch_relayouts_ifc_width() {
         t,
         "font-family: Ahem; font-size: 10px; line-height: 10px; width: 200px",
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts(), (1, 1), "width-only change patches");
     let t_box = layout.tree().box_for_node(t).unwrap();
     // Same shaped text now fits one line.
@@ -741,7 +771,9 @@ fn incremental_patch_reshapes_anonymous_block_text_on_font_size_change() {
         c,
         "font-family: Ahem; font-size: 40px; line-height: 1; width: 500px",
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     // The inherited font-size change reaches anonymous-block text, so the
     // container must rebuild rather than silently keep 16px lines.
     assert_eq!(
@@ -772,7 +804,9 @@ fn incremental_patch_reshapes_flex_text_run_on_font_size_change() {
         f,
         "display: flex; font-family: Ahem; font-size: 40px; line-height: 1; width: 500px",
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(
         layout.reflow_counts(),
         (2, 0),
@@ -1018,7 +1052,9 @@ fn deeply_nested_dom_construction_depth_is_capped() {
             let mut dom = parse_document(&html, ParseOptions::default()).tree;
             let mut style = StyleEngine::new(&dom, Viewport::default());
             let mut layout = LayoutEngine::new(Viewport::default());
-            layout.reflow(&mut dom, &mut style);
+            layout
+                .reflow(&mut dom, &mut style)
+                .expect("layout completes");
             layout.tree().box_count()
         })
         .unwrap()
@@ -1263,7 +1299,9 @@ fn column_property_changes_force_a_box_tree_rebuild() {
         "font-family: Ahem; font-size: 20px; line-height: 20px; width: 200px; \
          column-count: 4; column-gap: 0",
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts().0, rebuilds + 1);
 
     // So does `column-gap`, which lives on the multicol context, out of reach of
@@ -1274,7 +1312,9 @@ fn column_property_changes_force_a_box_tree_rebuild() {
         "font-family: Ahem; font-size: 20px; line-height: 20px; width: 200px; \
          column-count: 4; column-gap: 10px",
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts().0, rebuilds + 2);
     assert_eq!(columns_of(&layout, &dom, "m").1, 10.0);
 }
@@ -1293,7 +1333,9 @@ fn a_font_size_change_on_a_multicol_root_reshapes_its_flow() {
         "font-family: Ahem; font-size: 10px; line-height: 10px; width: 200px; \
          column-count: 2; column-gap: 0",
     );
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts().0, rebuilds + 1);
 
     // 10px Ahem: still four lines, but each is 10px, so the flow is 40px and the

@@ -8,6 +8,7 @@
 //! captured at box-tree construction time, so the taffy/parley passes never
 //! touch the DOM or stylo styles.
 
+pub mod budget;
 pub mod construct;
 pub mod engine;
 pub mod fonts;
@@ -30,6 +31,9 @@ pub mod transform;
 pub mod tree;
 pub mod webfont;
 
+pub use budget::{
+    LayoutAborted, LayoutBudgetGuard, arm as arm_layout_budget, catch as catch_layout_abort,
+};
 pub use engine::{LayoutEngine, PaintStamp};
 pub use fonts::{
     FontSystem, ParleyFontMetricsProvider, WebFontAttrs, WebFontOutcome, disable_system_fonts,

@@ -146,7 +146,7 @@ fn a_wheel_tick_scrolls_the_document() {
     .unwrap();
     assert_eq!(eval(&page, "String(window.scrollY)"), "240");
 
-    let metrics = page.layout_metrics().unwrap();
+    let metrics = page.layout_metrics().unwrap().expect("layout completes");
     assert_eq!(metrics.scroll_y, 240.0);
     assert!(metrics.content_height >= 4000.0, "{metrics:?}");
     assert_eq!(metrics.client_height, page.viewport().unwrap().height);

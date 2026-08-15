@@ -33,7 +33,12 @@ pub(crate) fn flush_layout<R>(
     let mut dom = cx.state.dom.borrow_mut();
     let mut style = frame.style.borrow_mut();
     let mut layout = frame.layout.borrow_mut();
-    layout.reflow(&mut dom, &mut style);
+    // A geometry getter has no error channel, and inventing half a rectangle
+    // from a tree that was thrown away would be exactly the fake P6 forbids.
+    // An aborted reflow leaves *no* boxes, so the query below answers what it
+    // answers for `display: none` — zeros, and an empty `getClientRects()`.
+    // The abort itself is reported through the page (ADR-0037 D6).
+    let _ = layout.reflow(&mut dom, &mut style);
     f(&dom, &layout)
 }
 
@@ -49,7 +54,8 @@ pub(crate) fn flush_layout_mut<R>(
     let mut dom = cx.state.dom.borrow_mut();
     let mut style = frame.style.borrow_mut();
     let mut layout = frame.layout.borrow_mut();
-    layout.reflow(&mut dom, &mut style);
+    // Zeros on an aborted reflow, as in `flush_layout` above.
+    let _ = layout.reflow(&mut dom, &mut style);
     f(&dom, &mut layout)
 }
 

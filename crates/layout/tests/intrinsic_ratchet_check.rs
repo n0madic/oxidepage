@@ -22,7 +22,9 @@ fn setup(html: &str) -> (DomTree, StyleEngine, LayoutEngine) {
     let mut dom = parse_document(html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     (dom, style, layout)
 }
 
@@ -49,7 +51,9 @@ fn min_width_min_content_shrinks_back_down() {
 
     set_style_attr(&mut dom, c, "width: 20px; height: 20px; flex-shrink: 0");
     style.resolve_styles(&mut dom);
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let p_box = layout.tree().box_for_node(p).unwrap();
     assert_eq!(

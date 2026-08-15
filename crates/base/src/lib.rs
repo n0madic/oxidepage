@@ -9,6 +9,6 @@ pub mod error;
 pub mod geometry;
 pub mod id;
 
-pub use error::{DomException, DomExceptionKind, EngineError, NetErrorKind};
+pub use error::{DomException, DomExceptionKind, EngineError, NetErrorKind, panic_message};
 pub use geometry::{Point, Rect, Size, Transform2D};
 pub use id::{FrameId, MAIN_FRAME, NodeId, RequestId, StyleSheetId};

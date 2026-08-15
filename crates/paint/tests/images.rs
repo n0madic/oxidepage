@@ -26,7 +26,9 @@ fn display_list(html: &str, image: Option<(u32, u32)>) -> DisplayList {
             Arc::new(vec![0u8; (w * h * 4) as usize]),
         );
     }
-    engine.reflow(&mut dom, &mut style);
+    engine
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     build_display_list(&dom, &engine, &PaintOptions::default())
 }
 

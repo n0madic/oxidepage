@@ -83,6 +83,7 @@ pub fn build_layout_tree(
     let sources = std::mem::take(&mut builder.ifc_sources);
     let mut tree = builder.tree;
     for (box_id, source) in sources {
+        crate::budget::checkpoint();
         build_ifc(dom, &mut tree, fonts, box_id, &source);
     }
     tree
@@ -230,6 +231,10 @@ impl Builder<'_> {
     /// Builds the principal box for element `node` (and its subtree).
     /// Returns `None` for `display: none` and unstyled elements.
     fn build_box(&mut self, node: NodeId) -> Option<BoxId> {
+        // One per box, before taffy ever runs: construction is what a deeply
+        // nested DOM makes expensive, and the compute pass it feeds never
+        // starts if the budget is already gone (ADR-0037 D2).
+        crate::budget::checkpoint();
         debug_assert_eq!(self.dom.node(node).data().kind(), NodeKind::Element);
         let style = self.primary_style(node)?;
         let display = style.clone_display();
@@ -1482,7 +1487,18 @@ fn to_taffy_style_guarded(style: &ComputedValues) -> taffy::Style<style::Atom> {
     let mut converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         stylo_taffy::to_taffy_style(style)
     }))
-    .unwrap_or_else(|_| to_taffy_style_saturating(style));
+    .unwrap_or_else(|payload| {
+        // A layout deadline is not a conversion failure and must not be
+        // repaired into one: this landing pad is inside the boundary that
+        // `reflow` puts around the whole pass (ADR-0037 D3), and swallowing
+        // the abort here would let a budgeted flush run on regardless. No
+        // checkpoint is reachable inside the closure today; this keeps that
+        // from being a load-bearing accident.
+        if payload.is::<crate::budget::LayoutAborted>() {
+            std::panic::resume_unwind(payload);
+        }
+        to_taffy_style_saturating(style)
+    });
     if fit == GridFit::Wraps {
         converted.grid_row = taffy::Line {
             start: saturating_grid_line(&pos.grid_row_start),

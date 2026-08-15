@@ -367,7 +367,13 @@ fn capture_screenshot(connection: &Arc<Connection>, request: &Request) -> Comman
         ..ScreenshotOptions::default()
     };
 
-    let bytes = session.page.screenshot(options)?;
+    // Two distinct failures, kept distinct: the layout abort carries its own
+    // cause, and reusing the encoder's message for it would say the wrong
+    // thing about why there is no picture (ADR-0037 D7).
+    let bytes = session
+        .page
+        .screenshot(options)?
+        .map_err(ProtocolError::server)?;
     if bytes.is_empty() {
         return Err(ProtocolError::server("Screenshot encoding failed"));
     }
@@ -450,7 +456,10 @@ fn print_to_pdf(connection: &Arc<Connection>, request: &Request) -> CommandResul
         ..PaintOptions::default()
     };
 
-    let bytes = session.page.pdf(options, paint)?;
+    let bytes = session
+        .page
+        .pdf(options, paint)?
+        .map_err(ProtocolError::server)?;
     if bytes.is_empty() {
         return Err(ProtocolError::server("PDF generation failed"));
     }

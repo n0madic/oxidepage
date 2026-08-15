@@ -20,7 +20,9 @@ fn width_of(family: &str, text: &str) -> f32 {
     let mut dom = parse_document(&html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let span = dom
         .inclusive_descendants(dom.document())

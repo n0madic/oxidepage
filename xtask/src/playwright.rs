@@ -68,6 +68,11 @@ pub fn run(workspace: &Path, update: bool, filter: Option<&str>) -> ExitCode {
             dialog_policy: DialogPolicy::Ask {
                 timeout: DEFAULT_DIALOG_TIMEOUT,
             },
+            // Deterministic like the golden and reftest runners: a fixture
+            // is not a hostile document, and a loaded CI machine tripping the
+            // 10 s layout deadline would fail a check with a blank capture
+            // rather than a real result (ADR-0037 D8).
+            layout_budget: Some(std::time::Duration::MAX),
             ..ContextOptions::default()
         },
         ..BrowserOptions::default()

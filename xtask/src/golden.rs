@@ -28,6 +28,13 @@ fn render(html: &str, doc_url: String) -> Result<String, String> {
     let page = Page::new(PageOptions {
         url: Some(doc_url),
         viewport: Some(VIEWPORT),
+        // The runners must be deterministic, and a live layout deadline is
+        // not: a loaded CI machine (or a debug build, where layout is an order
+        // of magnitude slower) would abort a flush and produce a *blank*
+        // golden, reference or report — a confusing pixel diff rather than a
+        // timeout. `Page`'s 10 s default exists to bound a hostile document,
+        // which a committed fixture is not (ADR-0037 D8).
+        layout_budget: Some(std::time::Duration::MAX),
         ..PageOptions::default()
     })
     .map_err(|e| format!("page setup: {e}"))?;

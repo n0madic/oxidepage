@@ -32,7 +32,9 @@ fn layout_with_image(html: &str, insert: Option<(u32, u32)>) -> (DomTree, Layout
             Arc::new(vec![0u8; (w * h * 4) as usize]),
         );
     }
-    engine.reflow(&mut dom, &mut style);
+    engine
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     (dom, engine)
 }
 
@@ -101,11 +103,15 @@ fn intrinsic_size_forces_relayout_not_patch() {
     .tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut engine = LayoutEngine::new(Viewport::default());
-    engine.reflow(&mut dom, &mut style);
+    engine
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     let (rebuilds_before, _) = engine.reflow_counts();
 
     engine.insert_raster_image(URL.to_string(), 40, 20, Arc::new(vec![0; 3200]));
-    engine.reflow(&mut dom, &mut style);
+    engine
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     let (rebuilds_after, _) = engine.reflow_counts();
     assert!(
         rebuilds_after > rebuilds_before,

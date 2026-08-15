@@ -227,6 +227,13 @@ impl Page {
     /// in half" rule multi-column uses (ADR-0016).
     #[must_use]
     pub fn pdf(&self, options: &PdfOptions, paint: &PaintOptions) -> Vec<u8> {
+        // One budget for the whole export, armed before the flush inside
+        // `full_page_display_list` and still owning the deadline when
+        // pagination runs under it. Two nested passes each arming their own
+        // would let one `printToPDF` spend twice the limit, which is the very
+        // thing D1 refused when it said fifty iframes must not buy fifty
+        // deadlines.
+        let _budget = oxidepage_layout::arm_layout_budget(self.layout_budget.get());
         let list = self.full_page_display_list(paint);
         if !options.paginate {
             return oxidepage_export_pdf::export(&list, options);
@@ -235,7 +242,7 @@ impl Page {
         // layout fills against is the one the pages are actually drawn at.
         let page_height =
             options.page_content_height(list.content_size.width.max(list.viewport.width));
-        let boundaries = self.state.layout.borrow().page_boundaries(page_height);
+        let boundaries = self.budgeted_page_boundaries(page_height);
         oxidepage_export_pdf::export_paginated(&list, options, &boundaries)
     }
 
@@ -245,8 +252,39 @@ impl Page {
     /// its own print preview wants the same numbers.
     #[must_use]
     pub fn page_boundaries(&self, page_height: f32) -> Vec<f32> {
+        // Armed here so the flush and the pagination pass share one deadline,
+        // exactly as in [`Page::pdf`].
+        let _budget = oxidepage_layout::arm_layout_budget(self.layout_budget.get());
         self.flush_layout();
-        self.state.layout.borrow().page_boundaries(page_height)
+        self.budgeted_page_boundaries(page_height)
+    }
+
+    /// [`layout::pagination`](oxidepage_layout::pagination)'s pass, under the
+    /// page's layout budget and its own landing pad.
+    ///
+    /// It needs one of each: the pass walks the box tree and checks the same
+    /// deadline every other loop in the crate does (ADR-0037 D2), and it runs
+    /// *outside* `reflow`, so nothing else would catch the abort — an
+    /// uncaught one would kill the page thread, the failure mode this whole
+    /// boundary exists to remove. Unwind safety: the pass only reads the tree
+    /// and builds a `Vec`, which is dropped, so an abort leaves nothing behind.
+    ///
+    /// Both callers above arm the budget first, so the `arm` here is a no-op
+    /// for them and the fallback for a future direct one.
+    fn budgeted_page_boundaries(&self, page_height: f32) -> Vec<f32> {
+        let _budget = oxidepage_layout::arm_layout_budget(self.layout_budget.get());
+        let layout = self.state.layout.borrow();
+        match oxidepage_layout::catch_layout_abort(|| layout.page_boundaries(page_height)) {
+            Ok(boundaries) => boundaries,
+            Err(reason) => {
+                self.note_layout_abort(reason);
+                // The document on one page — the same answer pagination itself
+                // gives for a degenerate `page_height`. The caller's artifact
+                // is failed by the recorded abort, not by these numbers.
+                let (_, extent) = layout.document_content_extent();
+                vec![0.0, extent.max(layout.viewport().height).max(0.0)]
+            }
+        }
     }
 
     /// Builds a display list covering the whole document (unscrolled), after
@@ -364,6 +402,16 @@ impl Page {
         // other order repainted every nested context on every rendering
         // opportunity and every screenshot, which is exactly the work the key
         // was introduced to skip.
+        // An aborted flush discarded the box tree, so painting now would put a
+        // blank picture in the cache and hand it to every later consumer. The
+        // previous list is stale but honest, and the abort travels to the
+        // caller separately (ADR-0037 D7); with no previous list there is
+        // nothing to keep and the empty document is the answer.
+        if self.layout_abort_pending()
+            && let Some(cached) = self.render.cache.borrow().clone()
+        {
+            return cached;
+        }
         let subframe_key = self.subframe_key();
         let stamp = self.state.layout.borrow().paint_stamp();
         if self.render.stamp.get() == Some(stamp)

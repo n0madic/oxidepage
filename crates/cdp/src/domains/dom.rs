@@ -364,7 +364,10 @@ fn set_file_input_files(connection: &Arc<Connection>, request: &Request) -> Comm
 /// layout read, and this is the module that owns the geometry vocabulary.
 pub fn get_layout_metrics(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let session = connection.require_session(request)?;
-    let m: LayoutMetrics = session.page.layout_metrics()?;
+    let m: LayoutMetrics = session
+        .page
+        .layout_metrics()?
+        .map_err(ProtocolError::server)?;
     let viewport = json!({
         "pageX": m.scroll_x,
         "pageY": m.scroll_y,

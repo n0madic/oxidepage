@@ -232,6 +232,12 @@ fn dump_command(args: &[String]) -> ExitCode {
         DumpFormat::DisplayList => page.display_list_json(),
     };
     flush_page_output(&page, quiet);
+    // As in `render`: an aborted flush makes both dumps a description of an
+    // empty document, which is worse than no dump at all (ADR-0037 D7).
+    if let Some(abort) = page.take_layout_abort() {
+        eprintln!("oxidepage dump: {abort}");
+        return ExitCode::FAILURE;
+    }
     match output {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &dump) {
@@ -452,6 +458,14 @@ fn render_command(args: &[String]) -> ExitCode {
         OutputFormat::Html => page.document_html().into_bytes(),
     };
     flush_page_output(&page, quiet);
+    // A flush that outran the layout budget left no box tree, so whatever was
+    // just encoded is a picture of an empty document. Reported rather than
+    // written: a blank PNG with exit 0 is the silent failure ADR-0015 removed
+    // everywhere else (ADR-0037 D7).
+    if let Some(abort) = page.take_layout_abort() {
+        eprintln!("oxidepage render: {abort}");
+        return ExitCode::FAILURE;
+    }
     // Empty output only signals failure for the two backends that actually
     // encode a binary format; `document_html()` always returns at least the
     // document element's markup.
@@ -770,6 +784,13 @@ fn eval_command(args: &[String]) -> ExitCode {
 
     let result = page.eval_to_string(expression);
     flush_page_output(&page, quiet);
+    // As in `render` and `dump`: a geometry expression evaluated against a
+    // discarded box tree prints zeros, and printing them with exit 0 is the
+    // silent failure ADR-0015 removed (ADR-0037 D7).
+    if let Some(abort) = page.take_layout_abort() {
+        eprintln!("oxidepage eval: {abort}");
+        return ExitCode::FAILURE;
+    }
     match result {
         Ok(value) => {
             println!("{value}");

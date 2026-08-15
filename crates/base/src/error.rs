@@ -168,3 +168,23 @@ pub enum EngineError {
     #[error("network error ({}): {detail}", kind.as_str())]
     Net { kind: NetErrorKind, detail: String },
 }
+
+/// The message a caught panic carried, or `fallback` when the payload is
+/// neither of the two shapes `panic!` produces.
+///
+/// Shared because the engine has several `catch_unwind` trust boundaries in
+/// different crates (a hostile web font, an overlarge grid, the layout
+/// deadline, the page thread's own landing pad) and each has to say *why* it
+/// caught something. Two private copies drift the first time either learns a
+/// new payload type; the fallback stays a parameter because "layout panicked"
+/// and "page thread panicked" are not interchangeable.
+#[must_use]
+pub fn panic_message(payload: &Box<dyn std::any::Any + Send>, fallback: &str) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        fallback.to_owned()
+    }
+}

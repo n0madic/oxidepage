@@ -79,6 +79,7 @@ impl LayoutEngine {
         let mut boundaries = vec![0.0f32];
         let mut start = 0.0f32;
         while start < doc_height - EPS && boundaries.len() <= MAX_PAGES {
+            crate::budget::checkpoint();
             let bottom = start + page_height;
             if bottom >= doc_height - EPS {
                 break;

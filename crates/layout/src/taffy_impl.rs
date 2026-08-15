@@ -340,6 +340,11 @@ impl LayoutTree {
         inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::LayoutOutput {
+        // The one funnel into taffy's recursion: `compute_child_layout` and
+        // `compute_block_child_layout` both land here, and `TableTreeWrapper`
+        // delegates to it, so one checkpoint budgets the whole compute pass
+        // (ADR-0037 D2).
+        crate::budget::checkpoint();
         let layout_box = self.layout_box_from_taffy(node_id);
         let kind = layout_box.kind;
         let has_ifc = layout_box.ifc.is_some();

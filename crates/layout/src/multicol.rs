@@ -454,6 +454,7 @@ pub(crate) fn unmap_content_point(mc: &MulticolContext, x: f32, y: f32) -> Optio
 /// is idempotent.
 pub(crate) fn resolve_columns(tree: &mut LayoutTree) {
     for index in 0..tree.box_count() {
+        crate::budget::checkpoint();
         let id = BoxId(index as u32);
         let Some(mc) = tree.box_(id).multicol.as_deref() else {
             continue;

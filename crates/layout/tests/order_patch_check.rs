@@ -22,7 +22,9 @@ fn setup(html: &str) -> (DomTree, StyleEngine, LayoutEngine) {
     let mut dom = parse_document(html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     (dom, style, layout)
 }
 
@@ -47,7 +49,9 @@ fn order_change_forces_rebuild_and_resorts_children() {
 
     set_style_attr(&mut dom, x, "order: 3; width: 20px; height: 20px");
     style.resolve_styles(&mut dom);
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     assert_eq!(
         layout.reflow_counts().0,

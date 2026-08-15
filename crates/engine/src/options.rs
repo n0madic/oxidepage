@@ -119,6 +119,9 @@ pub struct ContextOptions {
     pub screen: Option<ScreenProfile>,
     /// Per-task JavaScript budget for pages of this context.
     pub script_budget: Option<Duration>,
+    /// Per-flush layout budget for pages of this context (ADR-0037). `None`
+    /// uses the page default; `Duration::MAX` disables it.
+    pub layout_budget: Option<Duration>,
     /// Fetch `<img>` resources only once they reach the viewport.
     pub lazy_images: bool,
     /// Let a viewport-rooted `IntersectionObserver` see the whole document.
@@ -144,6 +147,7 @@ impl ContextOptions {
             navigator: self.navigator.clone(),
             screen: self.screen,
             script_budget: self.script_budget,
+            layout_budget: self.layout_budget,
             lazy_images: Some(self.lazy_images),
             whole_document_visible: Some(self.whole_document_visible),
             dialog_policy: Some(self.dialog_policy),
@@ -166,6 +170,7 @@ impl ContextOptions {
             navigator: options.navigator.clone().or(defaults.navigator),
             screen: options.screen.or(defaults.screen),
             script_budget: options.script_budget.or(defaults.script_budget),
+            layout_budget: options.layout_budget.or(defaults.layout_budget),
             lazy_images: options.lazy_images.or(defaults.lazy_images),
             whole_document_visible: options
                 .whole_document_visible
@@ -193,6 +198,10 @@ pub struct NewPageOptions {
     /// Per-task wall-clock budget for JavaScript. `None` uses the page
     /// default; `Duration::MAX` disables it.
     pub script_budget: Option<Duration>,
+    /// Per-flush wall-clock budget for layout (ADR-0037). Separate from
+    /// `script_budget` because the two bound different code with different
+    /// machinery. `None` uses the page default; `Duration::MAX` disables it.
+    pub layout_budget: Option<Duration>,
     /// Fetch `<img>` resources only once they reach the viewport. `None`
     /// inherits the context's [`ContextOptions::lazy_images`].
     pub lazy_images: Option<bool>,

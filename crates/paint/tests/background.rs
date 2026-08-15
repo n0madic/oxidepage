@@ -13,7 +13,9 @@ fn display_list(html: &str) -> DisplayList {
     let mut dom = parse_document(html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut engine = LayoutEngine::new(Viewport::default());
-    engine.reflow(&mut dom, &mut style);
+    engine
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     build_display_list(&dom, &engine, &PaintOptions::default())
 }
 

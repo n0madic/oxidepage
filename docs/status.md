@@ -97,9 +97,23 @@ v1 limits.
   is dense, so `repeat(70000, 1px)` crashed the page thread and
   `grid-column: 1 / 32000` asked for a gigabyte. A grid at or under the limit
   is unaffected. The limit covers **authored** counts only —
-  `repeat(auto-fill, …)` resolves at layout time from the container size and is
-  still unbounded (ADR-0036 D5). Implementation
-  decisions (stack pins, deliberate deviations, v1 limits): ADR-0006.
+  `repeat(auto-fill, …)` resolves at layout time from the container size, so no
+  style-level cap reaches it (ADR-0036 D5). What bounds the *pass* is a
+  **layout deadline** (ADR-0037): 10 s of wall clock, armed once per flush and
+  again by `reflow` itself for the geometry reads script triggers, polled on a
+  stride from taffy's compute funnel and from the crate's own loops
+  (construction, line breaking, multicol, transforms, pagination). Tripping it
+  — or any panic raised inside the pass, taffy's own `u16` overflow guards
+  included — discards the box tree wholesale and returns
+  `LayoutAborted`; the page stays alive and recovers on the next DOM or style
+  change. The abort reaches the embedder through `Page::take_layout_abort`,
+  `PageHandle::{screenshot, pdf, layout_metrics}` (nested `Result`) and CDP's
+  `-32000`, so a blank capture is never reported as a success. A geometry
+  getter answers zeros — the `display: none` answer — rather than inventing
+  half a rectangle. Peak *memory* is not bounded by any of this: the
+  `repeat(auto-fill, 1px)` reproduction still costs ~431 MB, and it completes
+  in about a second rather than timing out. Implementation
+  decisions (stack pins, deliberate deviations, v1 limits): ADR-0006, ADR-0037.
 - **Phase 6 — Paint, raster & PDF**: done. A backend-neutral **display list**
   is built by walking the box tree in stacking-context order (backgrounds,
   borders, rounded-corner clips, opacity layers, glyph runs, images), cached on
@@ -857,3 +871,25 @@ at the task boundary, for the legacy no-`close()` idiom), and scripts in it do
 not run before then. `document.write` **without** `open()` is still a
 warn-and-noop outside an active parser — the spec's implicit open is not
 implemented (ADR-0034 D2).
+
+**Layout bounds.** The layout deadline (ADR-0037) bounds *time*, on a stride,
+at taffy's compute funnel and at every unbounded loop `layout` owns — but it
+cannot interrupt the inner loop of a single taffy algorithm on a single node,
+because the crate is entered through `compute_root_layout`, which has no error
+channel, and stopping it there would need a taffy fork (ADR-0006 pins stylo ↔
+`stylo_taffy` ↔ taffy in lockstep). That case is caught only when it panics —
+`repeat(auto-fill, …)` past 65 535 repetitions overflows taffy's `u16` and now
+surfaces as `LayoutAborted::EnginePanic` on a live page. Below that threshold
+the same declaration is not slow but *large*: `width/height: 20000px` with
+`repeat(auto-fill, 1px)` completes in about a second and costs ~431 MB, and a
+wall-clock budget bounds no memory at all. Bounding peak memory (a box/track
+count cap, or an allocator limit) is a separate decision, not taken.
+`style.resolve_styles` sits inside the boundary, so a panic in stylo's
+traversal is reported rather than fatal, but nothing polls a deadline inside
+stylo and a slow *restyle* is still unbounded. The budget has no CLI flag and no
+CDP parameter yet — `PageOptions`/`ContextOptions` carry it, exactly as the
+script budget does, and the operator-facing knob arrives with the per-stage
+attribution work. An abort raised by a synchronous geometry read from script
+(`el.offsetWidth`) is recorded on the engine, not handed to the embedder: that
+turn measures zeros and the page recovers, the same trade a task killed by the
+script budget makes.

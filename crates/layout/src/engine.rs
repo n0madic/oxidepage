@@ -14,6 +14,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use oxidepage_base::NodeId;
 use oxidepage_dom::select::enter_active_tree;
@@ -126,6 +127,18 @@ pub struct LayoutEngine {
     fonts_version: u64,
     stamp: Option<ReflowStamp>,
     snapshot: Option<BuildSnapshot>,
+    /// The stamp of a flush that aborted, so retrying at the same one fails
+    /// fast instead of burning the whole budget again (ADR-0037 D5).
+    ///
+    /// The symmetric twin of [`Self::stamp`]: any version bump changes the
+    /// stamp and lifts the block, so recovery is automatic.
+    aborted_stamp: Option<ReflowStamp>,
+    /// Why the flush at [`Self::aborted_stamp`] ended, replayed to every
+    /// caller that arrives at the same stamp.
+    aborted_reason: Option<crate::budget::LayoutAborted>,
+    /// Wall-clock budget armed around one reflow. [`Duration::MAX`] — the
+    /// default — disables it, which is what every test and benchmark sees.
+    budget_limit: Duration,
     /// Counters for tests/diagnostics: how many reflows rebuilt the box tree
     /// vs. patched it in place.
     rebuild_count: u64,
@@ -155,9 +168,37 @@ impl LayoutEngine {
             fonts_version: 0,
             stamp: None,
             snapshot: None,
+            aborted_stamp: None,
+            aborted_reason: None,
+            budget_limit: Duration::MAX,
             rebuild_count: 0,
             patch_count: 0,
         }
+    }
+
+    /// Sets the wall-clock budget for one reflow. [`Duration::MAX`] disables
+    /// it.
+    ///
+    /// The engine arms the budget itself rather than trusting its caller,
+    /// because [`Self::reflow`] has a second production entry that never goes
+    /// through the page's flush: a synchronous geometry read from script
+    /// (`el.offsetWidth`). Arming only at the flush would leave that path
+    /// unbudgeted — the exact hole this exists to close. A budget already
+    /// armed by an outer caller wins, so a whole-page flush still spends one
+    /// budget across every frame (ADR-0037 D1).
+    /// A *change* of limit also lifts the fail-fast block, because the cached
+    /// abort was decided under the old one: without this, raising the budget —
+    /// or disabling it outright — could never recover a page that had aborted,
+    /// since the abort gate keys on the reflow stamp alone and a static
+    /// document never moves it. The condition is load-bearing: `flush_layout`
+    /// calls this for every frame on every flush, so clearing unconditionally
+    /// would reinstate exactly the retry storm the gate exists to prevent.
+    pub fn set_budget(&mut self, limit: Duration) {
+        if limit != self.budget_limit {
+            self.aborted_stamp = None;
+            self.aborted_reason = None;
+        }
+        self.budget_limit = limit;
     }
 
     /// `(full rebuilds, in-place patches)` performed so far.
@@ -298,7 +339,16 @@ impl LayoutEngine {
     ///
     /// Invariant: this may resolve styles and rebuild the whole box tree; it
     /// must never call back into JS bindings (callers hold the page borrow).
-    pub fn reflow(&mut self, dom: &mut DomTree, style: &mut StyleEngine) {
+    ///
+    /// Invariant: this may **fail**, and a failure discards the box tree
+    /// wholesale (ADR-0037). There is no half-laid-out state to inspect: after
+    /// an `Err` the tree is empty, so every geometry query answers as it would
+    /// for `display: none` until a later reflow succeeds.
+    pub fn reflow(
+        &mut self,
+        dom: &mut DomTree,
+        style: &mut StyleEngine,
+    ) -> Result<(), crate::budget::LayoutAborted> {
         let stamp = ReflowStamp {
             dom_version: dom.style_version(),
             style_version: style.version(),
@@ -307,9 +357,52 @@ impl LayoutEngine {
             fonts_version: self.fonts_version,
         };
         if self.stamp == Some(stamp) {
-            return;
+            return Ok(());
+        }
+        // Fail fast at a stamp already known to abort. Without this, each of
+        // the page's many flushes — and every `offsetWidth` between them —
+        // would burn the full budget again, since the abort leaves `stamp`
+        // untouched and so nothing short-circuits. Any version bump moves the
+        // stamp and lifts the block.
+        if self.aborted_stamp == Some(stamp)
+            && let Some(reason) = self.aborted_reason.clone()
+        {
+            return Err(reason);
         }
 
+        // A no-op unless an embedder set a budget, and a no-op again when the
+        // caller (`Page::flush_layout`) already armed one for the whole frame
+        // walk. Guards the two passes below alike.
+        let _budget = crate::budget::arm(self.budget_limit);
+
+        // The unwind-safety argument this boundary owns (ADR-0037 D3): the two
+        // that exist already (`webfont::decode_caught`,
+        // `construct::to_taffy_style_guarded`) wrap a *pure function of a
+        // borrowed input*, and this one plainly does not — it mutates the box
+        // tree, the build snapshot, and the style latches `taffy_impl` toggles
+        // around a child compute. The argument is instead that **every**
+        // mutated thing is discarded wholesale on the error path below, so
+        // there is nothing left through which a half-written state could be
+        // observed.
+        match crate::budget::catch(|| self.reflow_inner(dom, style)) {
+            Ok(()) => {
+                self.stamp = Some(stamp);
+                self.aborted_stamp = None;
+                self.aborted_reason = None;
+                Ok(())
+            }
+            Err(reason) => {
+                self.discard_tree();
+                self.aborted_stamp = Some(stamp);
+                self.aborted_reason = Some(reason.clone());
+                Err(reason)
+            }
+        }
+    }
+
+    /// The reflow proper, run inside the landing pad. Every mutation it makes
+    /// is either complete or discarded by [`Self::discard_tree`].
+    fn reflow_inner(&mut self, dom: &mut DomTree, style: &mut StyleEngine) {
         style.resolve_styles(dom);
 
         // Drains the set, which accumulates across every `resolve_styles` since
@@ -369,8 +462,25 @@ impl LayoutEngine {
             // (ADR-0026).
             crate::transform::resolve_transforms(&mut self.tree, dom);
         }
+    }
 
-        self.stamp = Some(stamp);
+    /// Throws away everything an aborted reflow touched.
+    ///
+    /// Not tidiness — correctness on three counts. The box tree was left
+    /// mid-compute, and `taffy_impl`'s style latches restore on the *return*
+    /// path an unwind skips, so individual boxes carry a `min_size` or
+    /// `flex_grow` that is not their style's. The build snapshot was written
+    /// *before* the compute pass, so it survives an abort looking fresh and
+    /// would let the next reflow patch a tree that was never laid out. And the
+    /// restyle set was already drained, so the patch path's input is gone —
+    /// a full rebuild is the only *correct* recovery, not merely the simplest.
+    fn discard_tree(&mut self) {
+        self.tree = LayoutTree::new(self.viewport);
+        self.snapshot = None;
+        // The stamp of the last *successful* layout goes too: it no longer
+        // describes the tree, and leaving it would let a reflow that arrives
+        // back at it short-circuit onto an empty one.
+        self.stamp = None;
     }
 
     /// Viewport overflow propagation (CSS Overflow §3.3): when the root element's

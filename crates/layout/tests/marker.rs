@@ -19,7 +19,9 @@ fn setup(html: &str) -> (DomTree, LayoutEngine) {
     let mut dom = parse_document(html, ParseOptions::default()).tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     (dom, layout)
 }
 
@@ -324,7 +326,9 @@ fn changing_list_style_rebuilds_the_marker() {
     .tree;
     let mut style = StyleEngine::new(&dom, Viewport::default());
     let mut layout = LayoutEngine::new(Viewport::default());
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
 
     let a = find_by_id(&dom, "a");
     let list = find_by_id(&dom, "list");
@@ -341,19 +345,25 @@ fn changing_list_style_rebuilds_the_marker() {
 
     // `list-style-type` inherits onto the item: its marker text changes.
     set_style(&mut dom, "list-style-type: upper-roman");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert_eq!(layout.reflow_counts().0, 2, "must rebuild, not patch");
     assert_eq!(marker_string(&layout, a).as_deref(), Some("I."));
 
     // `list-style-position` moves the marker from its own box into the item.
     set_style(&mut dom, "list-style-position: inside");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert!(marker_box(&layout, a).is_none());
     assert_eq!(item_text(&layout, a), "\u{2022} alpha");
 
     // …and `none` removes it entirely.
     set_style(&mut dom, "list-style-type: none");
-    layout.reflow(&mut dom, &mut style);
+    layout
+        .reflow(&mut dom, &mut style)
+        .expect("layout completes");
     assert!(marker_box(&layout, a).is_none());
     assert_eq!(item_text(&layout, a), "alpha");
 }

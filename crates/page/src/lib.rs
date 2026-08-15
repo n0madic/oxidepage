@@ -36,6 +36,10 @@ use crossbeam_channel::{Receiver, Sender};
 // `content_quads`, `ScreenshotOptions::clip`), so an embedder needs no
 // `oxidepage_base` dependency of its own.
 pub use oxidepage_base::{FrameId, MAIN_FRAME, NodeId, Point, Rect, RequestId, Size};
+// Re-exported for the same reason, one layer further up: `oxidepage-engine`
+// wraps its page thread in a landing pad and has to say what it caught, and a
+// crate edge straight to `base` for one helper is a worse trade than this line.
+pub use oxidepage_base::panic_message;
 /// The remote object model (ADR-0030): CDP's `Runtime` vocabulary as plain,
 /// `Send` Rust data. The live values stay in `WorldState`.
 pub use oxidepage_bindings::remote::{
@@ -679,6 +683,14 @@ pub struct PageOptions {
     /// Wall-clock budget for one task's stay in JavaScript. `None` uses
     /// [`DEFAULT_SCRIPT_BUDGET`]; [`Duration::MAX`] disables the budget.
     pub script_budget: Option<Duration>,
+    /// Wall-clock budget for one layout flush. `None` uses
+    /// [`DEFAULT_LAYOUT_BUDGET`]; [`Duration::MAX`] disables the budget.
+    ///
+    /// Separate from [`Self::script_budget`] because the two are enforced by
+    /// different machinery over different code: the script budget rides
+    /// QuickJS's interrupt callback and stops at the boundary of the engine,
+    /// while layout is Rust and polls its own deadline (ADR-0037).
+    pub layout_budget: Option<Duration>,
     /// Fetch `<img>` resources only once they reach the viewport (plus one
     /// viewport of margin), instead of eagerly on connect. Off by default: the
     /// whole document is what most embedders render.
@@ -814,6 +826,15 @@ impl DownloadState {
 /// otherwise wedges the event loop forever, since the loop only regains
 /// control when JS returns.
 pub const DEFAULT_SCRIPT_BUDGET: Duration = Duration::from_secs(10);
+
+/// Default wall-clock budget for one layout flush.
+///
+/// The same 10 s as [`DEFAULT_SCRIPT_BUDGET`], and for the same reason: a
+/// document can make the layout pass itself unbounded (an overlarge
+/// `repeat(auto-fill, …)` grid, pathological intrinsic sizing) and the script
+/// budget cannot see it, because the block is in Rust and nothing polls the
+/// engine's interrupt there (ADR-0037).
+pub const DEFAULT_LAYOUT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Wall-clock budget armed around each task that enters JavaScript, enforced
 /// through the engine's interrupt callback.
@@ -1744,6 +1765,15 @@ pub struct Page {
     next_render_at: Cell<Instant>,
     /// Per-task wall-clock budget enforced through the realm's interrupt.
     script_budget: Rc<ScriptBudget>,
+    /// Per-flush wall-clock budget for layout, the Rust-side twin of
+    /// [`Self::script_budget`] (ADR-0037). A `Cell` because a driver can
+    /// change it between flushes.
+    layout_budget: Cell<Duration>,
+    /// Why the last flush ended without a layout, until someone takes it.
+    ///
+    /// Overwritten in full by every flush — `None` on success — so a stale
+    /// abort can never fail an unrelated later capture (ADR-0037 D7).
+    layout_aborted: Cell<Option<oxidepage_layout::LayoutAborted>>,
     /// The realm limits every world of this page is built with.
     ///
     /// Kept because an isolated world is built *later*, from a driver command,
@@ -1910,6 +1940,7 @@ impl Page {
             navigator,
             screen,
             script_budget,
+            layout_budget,
             lazy_images,
             whole_document_visible,
             dialog_handler,
@@ -2057,6 +2088,8 @@ impl Page {
             start_time: Cell::new(Instant::now()),
             next_render_at: Cell::new(Instant::now()),
             script_budget,
+            layout_budget: Cell::new(layout_budget.unwrap_or(DEFAULT_LAYOUT_BUDGET)),
+            layout_aborted: Cell::new(None),
             realm_options,
             cmd_rx: RefCell::new(None),
             pending_jobs: RefCell::new(VecDeque::new()),
@@ -2076,6 +2109,12 @@ impl Page {
         // turn a sibling's write into a `storage` event here.
         *page.storage_origin_cache.borrow_mut() = page.storage_origin();
         page.resubscribe_storage();
+        // The top frame's engine was built by `bindings`, like every nested
+        // one; hand it the budget before any script can reach it.
+        page.state
+            .layout
+            .borrow_mut()
+            .set_budget(page.layout_budget.get());
         Ok(page)
     }
 
@@ -3504,7 +3543,8 @@ impl Page {
         // outgoing engine would leave `ex`/`ch`/`ic` and `font-size-adjust`
         // resolving against the previous document's fonts — where the new
         // document's `@font-face` faces are never registered.
-        let layout = LayoutEngine::new(viewport);
+        let mut layout = LayoutEngine::new(viewport);
+        layout.set_budget(self.layout_budget.get());
         let mut style = StyleEngine::new(&self.state.dom.borrow(), viewport);
         style.set_font_metrics_provider(layout.font_metrics_factory());
         *self.state.style.borrow_mut() = style;
@@ -5228,7 +5268,8 @@ impl Page {
         // one would resolve `ex`/`ch`/`ic` against the previous document's
         // fonts (the same ordering `reset_document_state` documents).
         let viewport = self.viewport.get();
-        let layout = LayoutEngine::new(viewport);
+        let mut layout = LayoutEngine::new(viewport);
+        layout.set_budget(self.layout_budget.get());
         let mut style = StyleEngine::for_document(&self.state.dom.borrow(), document, viewport);
         style.set_font_metrics_provider(layout.font_metrics_factory());
         *frame.shared().style.borrow_mut() = style;
@@ -5516,6 +5557,15 @@ impl Page {
         let frame = self.frames.attach(parent.id(), owner, |id| {
             parent_shared.new_child(id, document, viewport)
         });
+        // `bindings` builds the engine and knows nothing of the page's budget,
+        // so a nested context is bounded from the moment it exists rather than
+        // from its first flush — the window in between is where a script's
+        // `offsetWidth` reaches an unbudgeted reflow (ADR-0037 D1).
+        frame
+            .shared()
+            .layout
+            .borrow_mut()
+            .set_budget(self.layout_budget.get());
         // What `iframe.contentDocument` reads. Recorded on the element rather
         // than looked up through the frame table, because `bindings` cannot see
         // the table and this is a plain structural fact — the mirror of an
@@ -7834,13 +7884,79 @@ impl Page {
     /// held across the walk. Nesting it is how this becomes a `BorrowMutError`.
     fn flush_layout(&self) {
         self.drain_style_updates();
+        // One budget for the whole walk, not one per frame: fifty iframes must
+        // not buy fifty deadlines (ADR-0037 D1). Each engine's own limit,
+        // synced below, is the fallback for the reflow a geometry read from
+        // script triggers, which never comes through here.
+        let budget = self.layout_budget.get();
+        let _budget = oxidepage_layout::arm_layout_budget(budget);
+        let mut aborted = None;
         for frame in self.frames.pre_order() {
             self.size_frame_to_its_owner(&frame);
             let shared = frame.shared();
             let mut dom = shared.dom.borrow_mut();
             let mut style = shared.style.borrow_mut();
-            shared.layout.borrow_mut().reflow(&mut dom, &mut style);
+            let mut layout = shared.layout.borrow_mut();
+            // Frames are built by `bindings`, which knows nothing of the page's
+            // budget; this is where every one of them — including an iframe
+            // created a moment ago — learns the current limit.
+            layout.set_budget(budget);
+            // The walk continues past an abort, and reports the first cause.
+            // Stopping here looked right — the budget is shared, so a frame
+            // after a genuine trip dies at its first checkpoint anyway — but it
+            // is wrong for the *cached* abort a fail-fast stamp returns, which
+            // consumes no budget at all: one iframe that aborted once would
+            // then keep every later frame from being sized or laid out for as
+            // long as its own stamp stood still. Continuing costs a checkpoint
+            // per frame in the case that was already lost.
+            if let Err(reason) = layout.reflow(&mut dom, &mut style) {
+                aborted.get_or_insert(reason);
+            }
         }
+        // Written in full either way: a `None` left standing from an abort
+        // nobody collected would fail an unrelated later capture (D7).
+        self.layout_aborted.set(aborted);
+    }
+
+    /// Replaces the layout budget for subsequent flushes.
+    /// [`Duration::MAX`] disables it.
+    ///
+    /// Pushed into every existing frame's engine at once, not just recorded:
+    /// the reflow a geometry read triggers is armed by the engine itself, and
+    /// waiting for the next flush to sync it would leave that path on the old
+    /// limit for as long as script keeps measuring.
+    pub fn set_layout_budget(&self, limit: Duration) {
+        self.layout_budget.set(limit);
+        for frame in self.frames.pre_order() {
+            frame.shared().layout.borrow_mut().set_budget(limit);
+        }
+    }
+
+    /// Why the last layout flush ended without a layout, clearing it.
+    ///
+    /// `None` is the normal answer. `Some` means the page has **no** current
+    /// layout: the box tree was discarded, so anything measured or painted
+    /// since is the empty document, and a caller producing an artifact from it
+    /// (a screenshot, a PDF, layout metrics) must report the failure rather
+    /// than ship the blank result (ADR-0037 D7).
+    #[must_use]
+    pub fn take_layout_abort(&self) -> Option<oxidepage_layout::LayoutAborted> {
+        self.layout_aborted.take()
+    }
+
+    /// Whether an abort is waiting to be taken, without taking it — paint
+    /// reads this and must leave the flag for the artifact's caller.
+    pub(crate) fn layout_abort_pending(&self) -> bool {
+        let pending = self.layout_aborted.take();
+        let answer = pending.is_some();
+        self.layout_aborted.set(pending);
+        answer
+    }
+
+    /// Records an abort raised outside [`Self::flush_layout`] — today only
+    /// [`Page::page_boundaries`], which runs a budgeted layout pass of its own.
+    pub(crate) fn note_layout_abort(&self, reason: oxidepage_layout::LayoutAborted) {
+        self.layout_aborted.set(Some(reason));
     }
 
     /// Points a nested context's viewport at the content box of the `<iframe>`

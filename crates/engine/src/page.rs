@@ -615,13 +615,37 @@ impl PageHandle {
     }
 
     /// Encodes a screenshot to PNG.
-    pub fn screenshot(&self, options: ScreenshotOptions) -> EngineResult<Vec<u8>> {
-        self.with(move |page| page.screenshot_with(&options))
+    ///
+    /// Nested like [`PageHandle::set_content`], and for the same reason: the
+    /// outer `Err` is "there is no page to ask", the inner one "the page could
+    /// not answer". A layout that outran its budget (ADR-0037) produces the
+    /// inner one — the bytes would be a picture of an empty document, and
+    /// shipping them as a successful capture is the silent failure ADR-0015
+    /// set out to remove.
+    pub fn screenshot(&self, options: ScreenshotOptions) -> EngineResult<Result<Vec<u8>, String>> {
+        self.with(move |page| {
+            let bytes = page.screenshot_with(&options);
+            match page.take_layout_abort() {
+                Some(abort) => Err(abort.to_string()),
+                None => Ok(bytes),
+            }
+        })
     }
 
-    /// Renders the document to PDF.
-    pub fn pdf(&self, options: PdfOptions, paint: PaintOptions) -> EngineResult<Vec<u8>> {
-        self.with(move |page| page.pdf(&options, &paint))
+    /// Renders the document to PDF. Nested exactly as
+    /// [`PageHandle::screenshot`] is.
+    pub fn pdf(
+        &self,
+        options: PdfOptions,
+        paint: PaintOptions,
+    ) -> EngineResult<Result<Vec<u8>, String>> {
+        self.with(move |page| {
+            let bytes = page.pdf(&options, &paint);
+            match page.take_layout_abort() {
+                Some(abort) => Err(abort.to_string()),
+                None => Ok(bytes),
+            }
+        })
     }
 
     /// The document serialized back to HTML.
@@ -816,8 +840,17 @@ impl PageHandle {
     }
 
     /// The document's scroll position, viewport size and content extent.
-    pub fn layout_metrics(&self) -> EngineResult<LayoutMetrics> {
-        self.with(Page::layout_metrics)
+    pub fn layout_metrics(&self) -> EngineResult<Result<LayoutMetrics, String>> {
+        self.with(|page| {
+            let metrics = page.layout_metrics();
+            match page.take_layout_abort() {
+                // All-zero metrics off a discarded box tree read as a real
+                // measurement of a real page; a driver sizing a capture from
+                // them would silently get nothing (ADR-0037 D7).
+                Some(abort) => Err(abort.to_string()),
+                None => Ok(metrics),
+            }
+        })
     }
 
     /// Event-loop counters — the diagnostic that proves the loop parks rather
@@ -1183,6 +1216,7 @@ fn run_page_thread(
         navigator: options.navigator.unwrap_or_default(),
         screen: options.screen,
         script_budget: options.script_budget,
+        layout_budget: options.layout_budget,
         lazy_images: options.lazy_images.unwrap_or(false),
         whole_document_visible: options.whole_document_visible.unwrap_or(false),
         download_path: options.download_path,
@@ -1291,11 +1325,5 @@ fn run_page_thread(
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "page thread panicked".to_owned()
-    }
+    oxidepage_page::panic_message(payload, "page thread panicked")
 }

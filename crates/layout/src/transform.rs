@@ -153,6 +153,7 @@ fn style_for_box(dom: &DomTree, tree: &LayoutTree, id: BoxId) -> Option<ServoArc
 /// settles then — and because geometry and hit-testing read the rounded boxes.
 pub(crate) fn resolve_transforms(tree: &mut LayoutTree, dom: &DomTree) {
     for index in 0..tree.box_count() {
+        crate::budget::checkpoint();
         let id = BoxId(index as u32);
         if !tree.box_(id).has_transform {
             // Cheap reset: a patched reflow reuses boxes, so a box that lost its
