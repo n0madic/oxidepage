@@ -119,7 +119,9 @@ fn navigate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     // offers is a completed load. Answering earlier is not available — the
     // navigation is a blocking call on the page thread — and answering later is
     // what a driver waiting on `Page.lifecycleEvent` expects anyway.
-    let outcome = session.page.navigate(&params.url, WaitUntil::Load)?;
+    let (outcome, was_download) = session
+        .page
+        .navigate_with_download_flag(&params.url, WaitUntil::Load)?;
     let loader_id = connection
         .registry
         .loader_id(&session.target_id)
@@ -134,6 +136,10 @@ fn navigate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     // the command instead would lose the URL that was attempted.
     if let Err(message) = outcome {
         result["errorText"] = serde_json::json!(message);
+    } else if was_download {
+        // A download navigation does not commit a document, and Chrome reports
+        // that to `Page.navigate` callers as an aborted load.
+        result["errorText"] = serde_json::json!("net::ERR_ABORTED");
     }
     Ok(result)
 }

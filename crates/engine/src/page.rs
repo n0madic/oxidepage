@@ -366,6 +366,23 @@ impl PageHandle {
         self.with(move |page| page.navigate(&url, wait).map_err(|e| e.to_string()))
     }
 
+    /// [`PageHandle::navigate`], plus whether the navigation became a download.
+    ///
+    /// CDP needs this to surface `net::ERR_ABORTED` for download navigations:
+    /// drivers treat those as aborted loads rather than successful commits.
+    pub fn navigate_with_download_flag(
+        &self,
+        url: &str,
+        wait: WaitUntil,
+    ) -> EngineResult<(Result<(), String>, bool)> {
+        let url = url.to_owned();
+        self.with(move |page| {
+            let outcome = page.navigate(&url, wait).map_err(|e| e.to_string());
+            let was_download = page.take_embedder_navigation_was_download();
+            (outcome, was_download)
+        })
+    }
+
     /// Reloads the current document, bypassing the HTTP cache.
     pub fn reload(&self, wait: WaitUntil) -> EngineResult<Result<(), String>> {
         self.with(move |page| page.reload(wait).map_err(|e| e.to_string()))

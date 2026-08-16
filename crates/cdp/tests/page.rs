@@ -737,7 +737,11 @@ fn a_download_path_set_before_a_target_exists_reaches_it() {
             "body": oxidepage_cdp::base64::encode(b"late"),
         }),
     );
-    let _ = client.collect(navigate);
+    let outcome = client.collect(navigate).expect("navigate response");
+    assert_eq!(
+        outcome["errorText"], "net::ERR_ABORTED",
+        "downloads are aborted navigations, not committed documents"
+    );
 
     let done = client.await_event("Page.downloadProgress");
     assert_eq!(done["params"]["state"], "inProgress");
@@ -796,7 +800,11 @@ fn an_attachment_downloads_instead_of_committing() {
             "body": oxidepage_cdp::base64::encode(b"a,b\n1,2\n"),
         }),
     );
-    let _ = client.collect(navigate);
+    let outcome = client.collect(navigate).expect("navigate response");
+    assert_eq!(
+        outcome["errorText"], "net::ERR_ABORTED",
+        "downloads are aborted navigations, not committed documents"
+    );
 
     let begin = client.await_event("Page.downloadWillBegin");
     assert_eq!(begin["params"]["suggestedFilename"], "report.csv");

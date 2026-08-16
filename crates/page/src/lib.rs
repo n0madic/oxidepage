@@ -1672,6 +1672,12 @@ pub struct Page {
     /// A `RefCell` because `Browser.setDownloadBehavior` changes it at runtime;
     /// the default is [`DownloadBehavior::Deny`].
     download_behavior: RefCell<DownloadBehavior>,
+    /// Whether the last **embedder-driven** navigation ended as a download.
+    ///
+    /// Cleared and consumed by the embedder boundary (`engine`/CDP) so it can
+    /// surface Chrome's `net::ERR_ABORTED` without changing the page API's own
+    /// "navigation answered" contract for download tests.
+    embedder_navigation_was_download: Cell<bool>,
     in_flight: Cell<usize>,
     pending_async: RefCell<HashMap<RequestId, AsyncScript>>,
     ordered_dynamic_ready: RefCell<BTreeMap<u64, CompletedDynamicScript>>,
@@ -2057,6 +2063,7 @@ impl Page {
                 Some(path) => DownloadBehavior::Allow(path),
                 None => DownloadBehavior::Deny,
             }),
+            embedder_navigation_was_download: Cell::new(false),
             in_flight: Cell::new(0),
             pending_async: RefCell::new(HashMap::new()),
             ordered_dynamic_ready: RefCell::new(BTreeMap::new()),
@@ -2909,6 +2916,9 @@ impl Page {
         wait_until: WaitUntil,
         embedder: bool,
     ) -> Result<(), JsError> {
+        if embedder {
+            self.embedder_navigation_was_download.set(false);
+        }
         // A suspended page does not load (ADR-0034 D3). Running it here would
         // *look* like it worked and be hollow: `wait_until` returns instantly
         // while suspended, so `await_subresources` and `await_pending_stylesheets`
@@ -3199,6 +3209,9 @@ impl Page {
         // a subresource means nothing.
         if let Some(reason) = self.take_download(&final_url, &outcome, download.as_deref()) {
             self.record_navigation(NavigationEventKind::Failed, url, Some(reason));
+            if embedder {
+                self.embedder_navigation_was_download.set(true);
+            }
             return Ok(());
         }
 
@@ -7816,6 +7829,14 @@ impl Page {
     #[must_use]
     pub fn download_behavior(&self) -> DownloadBehavior {
         self.download_behavior.borrow().clone()
+    }
+
+    /// Whether the last embedder-driven navigation ended as a download.
+    ///
+    /// Consuming read so one navigation cannot taint the next.
+    #[must_use]
+    pub fn take_embedder_navigation_was_download(&self) -> bool {
+        self.embedder_navigation_was_download.replace(false)
     }
 
     /// A driver's handle on this page's request interception (ADR-0032 D2).
