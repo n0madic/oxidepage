@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use oxidepage_engine::NavigationOutcome;
 use oxidepage_engine::page_api::{
     ImageFormat, Margins, PaintOptions, PaperSize, PdfOptions, Point, Rect, ScreenshotOptions,
     Size, WaitUntil,
@@ -119,9 +120,9 @@ fn navigate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     // offers is a completed load. Answering earlier is not available — the
     // navigation is a blocking call on the page thread — and answering later is
     // what a driver waiting on `Page.lifecycleEvent` expects anyway.
-    let (outcome, was_download) = session
+    let outcome = session
         .page
-        .navigate_with_download_flag(&params.url, WaitUntil::Load)?;
+        .navigate_outcome(&params.url, WaitUntil::Load)?;
     let loader_id = connection
         .registry
         .loader_id(&session.target_id)
@@ -134,12 +135,20 @@ fn navigate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     // A navigation that failed is *not* a protocol error: Chrome answers with
     // `errorText` and Puppeteer turns that into a rejected `page.goto`. Failing
     // the command instead would lose the URL that was attempted.
-    if let Err(message) = outcome {
-        result["errorText"] = serde_json::json!(message);
-    } else if was_download {
-        // A download navigation does not commit a document, and Chrome reports
-        // that to `Page.navigate` callers as an aborted load.
-        result["errorText"] = serde_json::json!("net::ERR_ABORTED");
+    match outcome {
+        NavigationOutcome::Committed => {}
+        NavigationOutcome::Failed(message) => {
+            result["errorText"] = serde_json::json!(message);
+        }
+        // A download commits no document, so a driver that answered this
+        // command with success would then wait for a commit that never comes —
+        // Puppeteer's `goto` waits on `newDocumentNavigationPromise()` and
+        // hangs until its own navigation timeout. Chrome reports the aborted
+        // load instead, whatever the download behavior did with the bytes
+        // (ADR-0032 D13a).
+        NavigationOutcome::Download => {
+            result["errorText"] = serde_json::json!("net::ERR_ABORTED");
+        }
     }
     Ok(result)
 }

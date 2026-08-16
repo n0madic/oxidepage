@@ -828,6 +828,58 @@ fn an_attachment_downloads_instead_of_committing() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// `deny` is the default, and it aborts the navigation just the same.
+///
+/// What the bytes did — written, or refused for want of a directory — is not
+/// the navigation's business: either way no document committed, so a driver
+/// waiting for a commit has to be told. Chrome answers the same `ERR_ABORTED`
+/// for both, and only the `allow` path was pinned.
+#[test]
+fn a_denied_download_is_still_an_aborted_navigation() {
+    let fixtures = Fixtures::start(vec![("/index.html", "<title>doc</title>")]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/index.html") }),
+    );
+
+    // No `Browser.setDownloadBehavior`: the default is `deny`.
+    client.call_on(&session, "Network.enable", json!({}));
+    client.call_on(&session, "Fetch.enable", json!({}));
+    let navigate = client.dispatch(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/refused.csv") }),
+    );
+    let paused = client.await_event("Fetch.requestPaused");
+    client.call_on(
+        &session,
+        "Fetch.fulfillRequest",
+        json!({
+            "requestId": paused["params"]["requestId"],
+            "responseCode": 200,
+            "responseHeaders": [
+                { "name": "content-disposition", "value": "attachment; filename=\"refused.csv\"" },
+            ],
+            "body": oxidepage_cdp::base64::encode(b"a,b\n1,2\n"),
+        }),
+    );
+    let outcome = client.collect(navigate).expect("navigate response");
+    assert_eq!(
+        outcome["errorText"], "net::ERR_ABORTED",
+        "a refused download did not commit a document either"
+    );
+
+    let title = client.call_on(
+        &session,
+        "Runtime.evaluate",
+        json!({ "expression": "document.title", "returnByValue": true }),
+    );
+    assert_eq!(title["result"]["value"], "doc", "the document stayed");
+}
+
 /// A download navigation's `init` must carry the loader that navigation minted,
 /// not the loader of the document that stays.
 ///

@@ -48,6 +48,25 @@ struct PageControls {
 /// A type-erased unit of work, before it is tagged control or ordinary.
 type BoxedWork = Box<dyn FnOnce(&Page) + Send>;
 
+/// How an embedder-driven navigation ended (ADR-0032 D13a).
+///
+/// Three outcomes, not two: a navigation can fail, commit, or take the
+/// response as a **download** and leave the current document standing. The
+/// third is not an error — the page did what a browser does — but a driver
+/// waiting for a commit that will never come has to be told, which is what
+/// [`PageHandle::navigate_outcome`] is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationOutcome {
+    /// A new document committed.
+    Committed,
+    /// The response was an attachment: the bytes went to the download
+    /// directory (or were refused) and the current document stayed.
+    Download,
+    /// The navigation failed; the string is the page's own reason, phrased so
+    /// a driver can compare it against Chrome's `net::ERR_…` names.
+    Failed(String),
+}
+
 /// What an opener can ask of a page it opened: the sibling's command channel
 /// and its event bus, and nothing more (see [`PageHandle::window_ops`]).
 pub(crate) struct WindowOps {
@@ -366,20 +385,18 @@ impl PageHandle {
         self.with(move |page| page.navigate(&url, wait).map_err(|e| e.to_string()))
     }
 
-    /// [`PageHandle::navigate`], plus whether the navigation became a download.
+    /// [`PageHandle::navigate`], telling a download apart from a commit.
     ///
-    /// CDP needs this to surface `net::ERR_ABORTED` for download navigations:
-    /// drivers treat those as aborted loads rather than successful commits.
-    pub fn navigate_with_download_flag(
-        &self,
-        url: &str,
-        wait: WaitUntil,
-    ) -> EngineResult<(Result<(), String>, bool)> {
+    /// `navigate`'s `Ok` covers two outcomes a driver must not confuse: the
+    /// document moved, or the response was an attachment and the document
+    /// deliberately stayed (ADR-0032 D13). CDP needs the difference to answer
+    /// `net::ERR_ABORTED` for the second, as Chrome does.
+    pub fn navigate_outcome(&self, url: &str, wait: WaitUntil) -> EngineResult<NavigationOutcome> {
         let url = url.to_owned();
-        self.with(move |page| {
-            let outcome = page.navigate(&url, wait).map_err(|e| e.to_string());
-            let was_download = page.take_embedder_navigation_was_download();
-            (outcome, was_download)
+        self.with(move |page| match page.navigate(&url, wait) {
+            Err(error) => NavigationOutcome::Failed(error.to_string()),
+            Ok(()) if page.take_embedder_navigation_was_download() => NavigationOutcome::Download,
+            Ok(()) => NavigationOutcome::Committed,
         })
     }
 

@@ -1674,9 +1674,12 @@ pub struct Page {
     download_behavior: RefCell<DownloadBehavior>,
     /// Whether the last **embedder-driven** navigation ended as a download.
     ///
-    /// Cleared and consumed by the embedder boundary (`engine`/CDP) so it can
-    /// surface Chrome's `net::ERR_ABORTED` without changing the page API's own
-    /// "navigation answered" contract for download tests.
+    /// Out-of-band, like [`Page::take_layout_abort`], and for the same reason:
+    /// a download is not a failure of [`Page::navigate`] — the call did what it
+    /// was asked and the current document deliberately stayed — but the CDP
+    /// boundary above still has to answer Chrome's `net::ERR_ABORTED`. Set only
+    /// for the link the embedder actually asked for, cleared when the next
+    /// embedder navigation starts, and consumed by the read.
     embedder_navigation_was_download: Cell<bool>,
     in_flight: Cell<usize>,
     pending_async: RefCell<HashMap<RequestId, AsyncScript>>,
@@ -2946,6 +2949,9 @@ impl Page {
         let mut performed = 0usize;
         while let Some(navigation) = pending.take() {
             performed += 1;
+            // Only the first link is the navigation the caller asked for; the
+            // rest were chained by the document it loaded. See `commit_document`.
+            let requested = performed == 1;
             if performed > MAX_CHAINED_NAVIGATIONS {
                 let url = self.state.dom.borrow().document_url().to_owned();
                 let message = format!(
@@ -2985,11 +2991,11 @@ impl Page {
                     if load.is_plain() && self.is_same_document(&url) {
                         self.commit_same_document(&url, target, None);
                     } else {
-                        self.commit_document(&url, target, load, wait_until, embedder)?;
+                        self.commit_document(&url, target, load, wait_until, embedder, requested)?;
                     }
                 }
                 PendingNavigation::Traverse { delta } => {
-                    self.commit_traversal(delta, wait_until, embedder)?;
+                    self.commit_traversal(delta, wait_until, embedder, requested)?;
                 }
                 PendingNavigation::JavaScriptUrl { source } => {
                     self.run_javascript_url(&source, wait_until)?;
@@ -3141,6 +3147,14 @@ impl Page {
     }
 
     /// A cross-document navigation: fetch, decode, and replace the document.
+    ///
+    /// `embedder` describes the *chain* — who set it running — while
+    /// `requested` marks the one link the caller actually asked for, the first.
+    /// Everything after it was chained by the document that just committed, so
+    /// its outcome is that document's business, not the answer to the embedder's
+    /// call. The distinction is what keeps a page that commits and *then*
+    /// auto-starts a download from reporting the navigation itself as a
+    /// download (ADR-0032 D13a).
     fn commit_document(
         &self,
         url: &str,
@@ -3148,6 +3162,7 @@ impl Page {
         load: LoadKind,
         wait_until: WaitUntil,
         embedder: bool,
+        requested: bool,
     ) -> Result<(), JsError> {
         let LoadKind {
             body,
@@ -3209,7 +3224,7 @@ impl Page {
         // a subresource means nothing.
         if let Some(reason) = self.take_download(&final_url, &outcome, download.as_deref()) {
             self.record_navigation(NavigationEventKind::Failed, url, Some(reason));
-            if embedder {
+            if embedder && requested {
                 self.embedder_navigation_was_download.set(true);
             }
             return Ok(());
@@ -3333,6 +3348,7 @@ impl Page {
         delta: i32,
         wait_until: WaitUntil,
         embedder: bool,
+        requested: bool,
     ) -> Result<(), JsError> {
         let Some((index, url, state, same_document)) = ({
             let history = self.state.history();
@@ -3361,6 +3377,7 @@ impl Page {
             LoadKind::plain(),
             wait_until,
             embedder,
+            requested,
         )
     }
 
@@ -7832,6 +7849,12 @@ impl Page {
     }
 
     /// Whether the last embedder-driven navigation ended as a download.
+    ///
+    /// A download does not commit, so [`Page::navigate`] answers `Ok` — this is
+    /// how the boundary above tells that answer apart from an ordinary commit
+    /// (ADR-0032 D13a). Only the navigation the embedder *asked for* counts: a
+    /// script in the document that just committed can chain into a download,
+    /// and that is the document's business, not the answer to the call.
     ///
     /// Consuming read so one navigation cannot taint the next.
     #[must_use]
