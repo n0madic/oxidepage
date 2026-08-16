@@ -18,7 +18,7 @@
 //!    session, not per page.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 use oxidepage_engine::page_api::{NavigationEventKind, NetworkEvent, RequestId, ResourceType};
@@ -85,6 +85,20 @@ struct TargetEntry {
     /// on this side is the one string the protocol invented. Entries go when
     /// the frame does.
     child_loaders: HashMap<String, String>,
+    /// How many navigations of this target's top frame the **pump** has seen
+    /// end, counting commits, same-document commits and failures alike.
+    ///
+    /// The one thing a command handler can wait on. `Page.navigate` runs on a
+    /// session lane and returns as soon as the *page thread* is done, while the
+    /// loader it must answer with is folded in by the pump thread reading that
+    /// page's event stream — so reading the loader straight after the call
+    /// races, and the answer is the **outgoing** document's id whenever the
+    /// pump has not caught up (see [`TargetRegistry::await_navigation_end`]).
+    ///
+    /// Counted on the *terminal* kinds only. Counting `Started` too would let
+    /// the wait finish between the mint and the commit, which is the same stale
+    /// read with extra steps.
+    navigations_ended: u64,
 }
 
 struct Registry {
@@ -130,6 +144,12 @@ struct Shared {
     /// own pages with it.
     default_context: ContextId,
     inner: Mutex<Registry>,
+    /// Signalled by the pump whenever a navigation ends, so a command handler
+    /// can wait for its own navigation to be folded in rather than poll for it
+    /// (ADR-0004's no-busy-wait rule applies here too). One condvar for the
+    /// whole registry: a wait is rare — one command, once — and per-target
+    /// condvars would be a map to keep in sync with `targets` for no gain.
+    navigation_ended: Condvar,
 }
 
 impl TargetRegistry {
@@ -147,6 +167,7 @@ impl TargetRegistry {
                 subscribers: Vec::new(),
                 next_subscription: 0,
             }),
+            navigation_ended: Condvar::new(),
         }));
         for context in registry.0.browser.contexts() {
             let id = registry.adopt_context(&context);
@@ -336,6 +357,7 @@ impl TargetRegistry {
                     context,
                     frame: Frame::new(target_id.clone(), info.url.clone()),
                     child_loaders: HashMap::new(),
+                    navigations_ended: 0,
                 },
             );
             Self::publish(&mut inner, TargetSignal::Created(info));
@@ -393,6 +415,7 @@ impl TargetRegistry {
                         NavigationEventKind::Committed => {
                             registry.update_info(&pumped, Some(&navigation.url), None);
                             registry.new_loader(&pumped);
+                            registry.note_navigation_ended(&pumped);
                         }
                         // Classified *before* the URL moves: the
                         // `navigationType` a driver reads is a statement about
@@ -403,6 +426,7 @@ impl TargetRegistry {
                         NavigationEventKind::SameDocument => {
                             registry.note_same_document(&pumped, &navigation.url);
                             registry.update_info(&pumped, Some(&navigation.url), None);
+                            registry.note_navigation_ended(&pumped);
                         }
                         // A navigation that never committed — it failed, or it
                         // turned out to be a download — must not leave its
@@ -413,6 +437,7 @@ impl TargetRegistry {
                         // driver telling documents apart by loader must not see.
                         NavigationEventKind::Failed => {
                             registry.abandon_navigation(&pumped);
+                            registry.note_navigation_ended(&pumped);
                         }
                         _ => {}
                     }
@@ -570,6 +595,71 @@ impl TargetRegistry {
     pub fn new_loader(&self, target_id: &str) -> Option<String> {
         let mut inner = self.lock();
         Some(inner.targets.get_mut(target_id)?.frame.commit_loader())
+    }
+
+    /// How many navigations of this target the pump has seen *end*.
+    ///
+    /// Read before a command starts a navigation and waited on afterwards; see
+    /// [`TargetRegistry::await_navigation_end`].
+    #[must_use]
+    pub fn navigations_ended(&self, target_id: &str) -> u64 {
+        self.lock()
+            .targets
+            .get(target_id)
+            .map_or(0, |t| t.navigations_ended)
+    }
+
+    /// Records that a navigation ended, waking whoever is waiting for it.
+    fn note_navigation_ended(&self, target_id: &str) {
+        if let Some(entry) = self.lock().targets.get_mut(target_id) {
+            entry.navigations_ended += 1;
+        }
+        // Broadcast, not `notify_one`: the condvar is shared by every target,
+        // so the waiter this wakes may belong to a different one.
+        self.0.navigation_ended.notify_all();
+    }
+
+    /// Blocks until this target's navigation count passes `seen`, or `timeout`
+    /// runs out.
+    ///
+    /// The barrier between a command and the pump. `Page.navigate` answers on a
+    /// session lane the moment the *page thread* is done, but the `loaderId` it
+    /// must report is minted and adopted by the pump thread as it reads that
+    /// page's event stream — two threads, no ordering between them. Reading the
+    /// loader straight after the call therefore reports the **outgoing**
+    /// document's id whenever the pump has not caught up, which is a stale
+    /// answer to `Page.navigate` and two identical ids for two navigations.
+    ///
+    /// `seen` must be taken **before** the navigation is started: taken after,
+    /// the pump may already have folded everything in and the wait would be for
+    /// an event that has been and gone.
+    ///
+    /// A timeout is not an error. The answer then carries whatever the registry
+    /// holds — today's behaviour — because a degraded `loaderId` is a better
+    /// answer to a navigation that genuinely happened than a failed command.
+    /// The same is true of a target that vanished while we waited: it is gone
+    /// from the map, so the wait ends and the caller's `unwrap_or_default`
+    /// applies.
+    pub fn await_navigation_end(&self, target_id: &str, seen: u64, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut inner = self.lock();
+        loop {
+            match inner.targets.get(target_id) {
+                Some(entry) if entry.navigations_ended > seen => return,
+                // Gone: nothing left to wait for.
+                None => return,
+                Some(_) => {}
+            }
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return;
+            };
+            let (guard, _) = self
+                .0
+                .navigation_ended
+                .wait_timeout(inner, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            inner = guard;
+        }
     }
 
     /// Drops the pending loader of a navigation that never committed

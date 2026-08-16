@@ -105,6 +105,15 @@ fn set_intercept_file_chooser(connection: &Arc<Connection>, request: &Request) -
     Ok(serde_json::json!({}))
 }
 
+/// How long `Page.navigate` will wait for the pump to fold its navigation in
+/// before answering with whatever loader the registry holds.
+///
+/// A ceiling on a handoff between two threads that are both already awake, so
+/// it is only ever paid when something is badly wrong; a timeout answers with
+/// the stale loader — the behaviour that shipped before the wait existed —
+/// rather than failing a navigation that genuinely happened.
+const LOADER_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NavigateParams {
@@ -115,6 +124,11 @@ fn navigate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let session = connection.require_session(request)?;
     let params: NavigateParams = request.parse()?;
 
+    // Taken *before* the navigation, because it is the barrier the read below
+    // waits on: taken after, the pump may already have folded this navigation
+    // in and the wait would be for an event that has been and gone.
+    let ended_before = connection.registry.navigations_ended(&session.target_id);
+
     // `WaitUntil::Load` and not something shorter: CDP's `Page.navigate`
     // answers once the navigation has *committed*, and the closest the engine
     // offers is a completed load. Answering earlier is not available — the
@@ -123,6 +137,26 @@ fn navigate(connection: &Arc<Connection>, request: &Request) -> CommandResult {
     let outcome = session
         .page
         .navigate_outcome(&params.url, WaitUntil::Load)?;
+
+    // The loader is minted and adopted by the **pump** thread, which reads the
+    // page's event stream, while this handler runs on a session lane — two
+    // threads with no ordering between them. Reading straight through reports
+    // the *outgoing* document's loader whenever the pump has not caught up:
+    // `Page.navigate` answering with the id of the document it just replaced,
+    // and two navigations in a row answering with the same id (ADR-0032 D6a).
+    // Rare enough to look like a flaky test and to have been filed as one, but
+    // it is the protocol answer that is wrong.
+    //
+    // Only for a commit: a failed navigation and a download deliberately leave
+    // the committed loader alone, so the read is already correct for them and
+    // waiting would just pay a timeout on a page that never moved.
+    if outcome == NavigationOutcome::Committed {
+        connection.registry.await_navigation_end(
+            &session.target_id,
+            ended_before,
+            LOADER_SETTLE_TIMEOUT,
+        );
+    }
     let loader_id = connection
         .registry
         .loader_id(&session.target_id)

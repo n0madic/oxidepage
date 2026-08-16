@@ -164,7 +164,7 @@ fn a_cross_document_navigation_mints_a_new_loader() {
     // change. Reusing it would make the two indistinguishable.
     assert_ne!(
         first["loaderId"], second["loaderId"],
-        "a second document must get a new loaderId"
+        "a second document must get a new loaderId (first={first}, second={second})"
     );
     assert_eq!(first["frameId"], second["frameId"], "the frame is the same");
 }
@@ -242,9 +242,18 @@ fn each_navigation_reports_a_fresh_loader_on_init() {
         failed_init, ok_init,
         "a navigation after a failed one must still announce a fresh loader"
     );
+    // Every id this test has seen. It failed intermittently on macOS CI for a
+    // week and the bare assert could not say why — `ok["loaderId"] == before`
+    // (the reply raced the pump, D6a) and `ok_init == failed_init` (a stale
+    // `init` shifted the stream) look identical from two mismatched ids. The
+    // first turned out to be the answer; the printout stays, because the next
+    // way this can break will be a third one.
     assert_eq!(
         ok_init, ok["loaderId"],
-        "the loader `init` announced is the one the commit adopted"
+        "the loader `init` announced is the one the commit adopted \
+         (before={before}, after_failure={after_failure}, failed_init={failed_init}, \
+         ok_init={ok_init}, ok.loaderId={})",
+        ok["loaderId"]
     );
     assert_ne!(
         before, ok["loaderId"],

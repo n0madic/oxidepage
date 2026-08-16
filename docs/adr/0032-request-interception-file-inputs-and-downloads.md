@@ -195,6 +195,35 @@ not retire the current document's id, or a driver telling documents apart by
 loader sees a phantom — and the **pending** one, which every event of the load
 in flight carries. After the commit they are the same value.
 
+**And `Page.navigate` has to wait for the pump before it reads either**
+(2026-08-16). The loader is minted and adopted by the **pump thread**, which is
+the one reader of a page's event stream; the command runs on a session lane and
+returns the moment the *page thread* is done. Nothing ordered the two, so the
+reply carried whatever the registry happened to hold — under load, the
+**outgoing** document's loader. Two navigations in a row then answer with the
+same id, which is precisely the thing D6a says a driver must never see, and
+`init` names a loader the reply disagrees with.
+
+This surfaced as a macOS-only CI flake and was filed as one twice; it is a
+protocol bug that a fast machine hides. The barrier is a per-target count of
+navigations the pump has seen **end** — commits, same-document commits and
+failures alike — read before the navigation starts and waited on (`Condvar`, not
+a poll) after it returns. Three details are load-bearing:
+
+- **Terminal kinds only.** Counting `Started` would let the wait finish between
+  the mint and the commit: the same stale read, one step later.
+- **Read the count *before* the call.** Read after, and a pump that has already
+  caught up leaves the handler waiting for an event that has been and gone.
+- **Wait only for a commit.** A failed navigation and a download deliberately
+  leave the committed loader alone, so their read is already right — and a
+  same-document navigation never moves the loader at all, so a "wait until the
+  loader changes" barrier would hang on every `#fragment` until its timeout.
+  That is why the barrier counts events rather than watching the id.
+
+A timeout is not an error: the reply then carries the stale loader, which is the
+behaviour that shipped before the wait existed, because a degraded `loaderId`
+beats failing a navigation that genuinely happened.
+
 ### D7 — Release on disconnect is explicit, and the answer is `Continue`
 
 Because the page owns a `Sender` (D2), the channel never disconnects, so there is
@@ -448,6 +477,14 @@ until intercepted. **`crates/cdp/tests/page.rs`** pins D6a's two loader ids:
 each navigation announces a fresh loader on `init`, and a failed one does not
 commit an id. D13a adds the `Page.navigate` answer itself: `ERR_ABORTED` under
 both download behaviors, `allow` and the default `deny`.
+
+Those two loader assertions are also the only tests here that a *timing* bug can
+reach, so they are the ones that caught D6a's missing barrier — and they name
+every id they saw when they fail, because two mismatched hex strings cannot say
+which race lost. Reproducing it needs a loaded machine: sixteen busy loops on a
+ten-core laptop put `crates/cdp/tests/page.rs` at **8 failures in 20 runs**
+before the barrier and **0 in 20** after it, which is the measurement to repeat
+if either test starts flaking again.
 
 **`cargo xtask puppeteer`** is the acceptance gate: **45 of 45**, with
 `tests/automation/expectations.tsv` holding no entries. The twelve new checks
