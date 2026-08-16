@@ -399,9 +399,18 @@ whole chain in `run_navigation_chain`, and reading it alone was wrong in the
 "your download will begin shortly" case: a document commits, its script chains
 into a download, and the *committed* navigation reported itself as a download —
 so a driver saw `ERR_ABORTED` for a `page.goto` that had in fact moved the page.
-The flag is therefore set only on the chain's first link. (The `Err` return for a
-chained *failure* has the same conflation and is left alone here: it predates
-this ADR and changing it is a separate decision.)
+The flag is therefore set only on the chain's first link.
+
+**The `Err` return is judged the same way** (2026-08-16, the separate decision
+this paragraph first deferred). `commit_document`'s network-failure branch read
+`embedder` alone too, so a document that committed and then chained into a dead
+link came back as `Err` from `Page::navigate` — and as `Page.navigate.errorText`
+for a `page.goto` that had plainly moved the document. The gate is now
+`embedder && requested` in both places, which leaves a chained failure on the
+path already written for a script-initiated one: record it, log it to the
+console, keep the document that did commit. That is what a chained navigation
+*is*, whoever started the chain, and the `MAX_CHAINED_NAVIGATIONS` branch a few
+lines up had always answered `Ok` on the same reasoning.
 
 ## Verification
 
@@ -430,7 +439,10 @@ pages never mint the same download guid. For D13a it also pins the three answers
 the flag has to give: a download navigation reports one and the read consumes it,
 a committed navigation clears an unread one, and neither a script-started
 download nor one *chained* by a document that just committed is the embedder's
-navigation. **`crates/cdp/tests/dom.rs`**'s `setFileInputFiles`
+navigation. **`crates/page/tests/navigation.rs`** pins the failure half beside
+the script-navigation test it belongs to: a dead first link is still `Err`, a
+dead link *chained* from a document that committed is not.
+**`crates/cdp/tests/dom.rs`**'s `setFileInputFiles`
 refusal assertion flips to a success assertion, plus the chooser being silent
 until intercepted. **`crates/cdp/tests/page.rs`** pins D6a's two loader ids:
 each navigation announces a fresh loader on `init`, and a failed one does not

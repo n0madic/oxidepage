@@ -156,6 +156,11 @@ fn route(path: &str) -> Vec<u8> {
             "<!doctype html><title>bounce</title>\
              <script>location.href = '/next.html';</script>",
         ),
+        // Commits, then chains into a link that cannot be reached.
+        "/dead-end.html" => html(
+            "<!doctype html><title>dead-end</title>\
+             <script>location.href = 'http://127.0.0.1:1/nope';</script>",
+        ),
         // A navigation loop: every load navigates again. Must terminate.
         "/loop.html" => html(
             "<!doctype html><title>loop</title>\
@@ -899,6 +904,28 @@ fn a_failed_script_navigation_keeps_the_document() {
             .navigate("http://127.0.0.1:1/nope", WaitUntil::Load)
             .is_err()
     );
+}
+
+/// …and a failure the loaded document *chained into* is still the script's,
+/// not the embedder's.
+///
+/// `embedder` describes the whole navigation chain, so reading it alone made a
+/// dead link followed by a page that had already committed come back as the
+/// answer to `Page::navigate` — `Err` for a navigation that plainly worked, and
+/// `Page.navigate.errorText` for a `page.goto` that had moved the document.
+/// Same conflation ADR-0032 D13a fixed for downloads, and it is judged the same
+/// way: only the chain's first link is the call's own.
+#[test]
+fn a_chained_script_failure_is_not_the_embedders_navigation() {
+    let server = spawn_server();
+    let page = loopback_page();
+
+    page.navigate(&server.url("/dead-end.html"), WaitUntil::Load)
+        .expect("the navigation the embedder asked for did commit");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(document_url(&page), server.url("/dead-end.html"));
+    assert_eq!(eval(&page, "document.title"), "dead-end");
 }
 
 // ------------------------------------------------------- Navigation events

@@ -380,6 +380,10 @@ impl PageHandle {
     /// such a failure as `JsError::Host`, whose `Display` is the network
     /// layer's text verbatim: this string becomes `Page.navigate.errorText`,
     /// which a driver compares against Chrome's exact `net::ERR_…` names.
+    ///
+    /// It reports **this** navigation only. Where the document it loads sends
+    /// itself next is that document's business, so a script chaining into a
+    /// dead link — or into a download — leaves this an `Ok` (ADR-0032 D13a).
     pub fn navigate(&self, url: &str, wait: WaitUntil) -> EngineResult<Result<(), String>> {
         let url = url.to_owned();
         self.with(move |page| page.navigate(&url, wait).map_err(|e| e.to_string()))

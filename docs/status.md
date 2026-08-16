@@ -848,8 +848,9 @@ directory is refused and recorded rather than parsed as HTML. A download commits
 no document, so `Page.navigate` answers `errorText: "net::ERR_ABORTED"` as Chrome
 does under either behavior (ADR-0032 D13a) — a driver told the command succeeded
 waits for a commit that never arrives. Only the navigation the caller asked for
-is judged that way: a document that commits and *then* chains into a download is
-a successful navigation.
+is judged that way: once a document has committed, where its own script sends
+the page next is that document's business, so a chained download — and equally a
+chained *failure* — leaves `Page.navigate` reporting the success it had.
 
 **Protocol surface.** No user-agent override, no DOM mutation events over the protocol, no
 touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing

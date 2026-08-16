@@ -2192,10 +2192,13 @@ impl Page {
     /// policy-checked), decodes it, and loads it. The document URL becomes
     /// the final (post-redirect) URL.
     ///
-    /// A network or policy failure is an `Err` here — an embedder asked for
-    /// this URL and needs to hear that it did not load. A *script*-initiated
+    /// A network or policy failure on **this** URL is an `Err` — an embedder
+    /// asked for it and needs to hear that it did not load. A *script*-initiated
     /// navigation that fails keeps the current document instead, which is what
-    /// browsers do; see [`Page::run_navigation`].
+    /// browsers do; see [`Page::run_navigation`]. That covers the navigations
+    /// this one chains into: once a document has committed, where its script
+    /// goes next is no longer the answer to this call, whether it fails or
+    /// turns out to be a download (ADR-0032 D13a).
     pub fn navigate(&self, url: &str, wait_until: WaitUntil) -> Result<(), JsError> {
         let url = self.resolve_against_document(url);
         self.run_navigation(
@@ -3199,7 +3202,7 @@ impl Page {
             Err(error) => {
                 let message = error.to_string();
                 self.record_navigation(NavigationEventKind::Failed, url, Some(message.clone()));
-                if embedder {
+                if embedder && requested {
                     // `Host`, not `Engine`: this is the network layer's own
                     // text, and it surfaces as `Page.navigate.errorText`, which
                     // a driver compares against Chrome's `net::ERR_…` names.
@@ -3207,6 +3210,10 @@ impl Page {
                 }
                 // A failed script-initiated navigation keeps the current
                 // document — the page is not blanked, it simply did not move.
+                // A *chained* link is script-initiated too, whoever started the
+                // chain: the embedder's own navigation already committed, and a
+                // dead link the loaded document then followed is that
+                // document's problem, not the answer to the call (D13a).
                 self.hooks.engine_console(
                     ConsoleLevel::Error,
                     format!("navigation to `{url}` failed: {message}"),
