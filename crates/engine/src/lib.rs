@@ -62,7 +62,7 @@ pub use options::{
     DEFAULT_EVENT_CAPACITY, DEFAULT_MAX_PAGES_PER_CONTEXT, DEFAULT_SHARED_CACHE_ENTRIES,
     NewPageOptions,
 };
-pub use page::{PageHandle, PageId};
+pub use page::{NavigationOutcome, PageHandle, PageId};
 
 /// The page API a [`PageHandle::with`] closure works against, re-exported so an
 /// embedder needs no `oxidepage-page` dependency of its own.

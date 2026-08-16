@@ -366,6 +366,43 @@ what `Browser.setDownloadBehavior` already said. The filename is derived from
 `Content-Disposition` with path separators stripped, a traversing `downloadPath`
 is refused, and an existing file is not overwritten — a suffix is appended.
 
+### D13a — And `Page.navigate` answers `net::ERR_ABORTED` for it (2026-08-16)
+
+D13 said what a download does to the *document* and nothing about what the
+command that started it answers, and the gap cost the Puppeteer suite its one
+recurring hang: `a download does not commit a document` timed out on
+`the download navigation to settle` (CI 31889378467). The mechanism is in
+puppeteer-core's `cdp/Frame.js` — `navigate()` sets
+`ensureNewDocumentNavigation = !!response.loaderId`, so an answer carrying a
+loader and no `errorText` sends `goto` on to wait for
+`newDocumentNavigationPromise()`. A download commits nothing, so that promise
+resolved only by accident, through the `Page.frameStoppedLoading` this ADR emits
+for the `Failed` record — Puppeteer synthesises `load` out of it. Whenever that
+race went the other way, `goto` sat until its own 30 s navigation timeout.
+
+Chrome answers `errorText: "net::ERR_ABORTED"`, so the endpoint does too, and
+`goto` rejects at the command rather than waiting on an event that may never
+come. The `deny` path answers it as well: what the bytes did is not the
+navigation's business, and neither outcome committed a document.
+
+Getting there needs a third answer where `page` had two. `Page::navigate`
+deliberately returns `Ok` for a download — the call did what it was asked, and
+`crates/page/tests/downloads.rs` pins that — so the outcome travels **out of
+band**, as `Page::take_layout_abort` does for ADR-0037's aborts and for the same
+reason: a success that is not a commit. `PageHandle::navigate_outcome` reads the
+consuming flag beside the call and hands CDP a `NavigationOutcome` of
+`Committed` / `Download` / `Failed(reason)`, which is the whole shape the domain
+needs; `PageHandle::navigate`'s `Result<(), String>` stays for everyone else.
+
+**Only the navigation the embedder asked for counts.** `embedder` describes the
+whole chain in `run_navigation_chain`, and reading it alone was wrong in the
+"your download will begin shortly" case: a document commits, its script chains
+into a download, and the *committed* navigation reported itself as a download —
+so a driver saw `ERR_ABORTED` for a `page.goto` that had in fact moved the page.
+The flag is therefore set only on the chain's first link. (The `Err` return for a
+chained *failure* has the same conflation and is left alone here: it predates
+this ADR and changing it is a separate decision.)
+
 ## Verification
 
 **`crates/net/tests/intercept.rs`** covers the funnel against a loopback server:
@@ -389,11 +426,16 @@ that declared none, since there are no bytes for urlencoded to lose.
 that a traversing filename cannot escape the directory, that an existing file is
 never overwritten, that `<a download>` downloads a response carrying no
 `Content-Disposition` while a cross-origin one navigates instead, and that two
-pages never mint the same download guid. **`crates/cdp/tests/dom.rs`**'s `setFileInputFiles`
+pages never mint the same download guid. For D13a it also pins the three answers
+the flag has to give: a download navigation reports one and the read consumes it,
+a committed navigation clears an unread one, and neither a script-started
+download nor one *chained* by a document that just committed is the embedder's
+navigation. **`crates/cdp/tests/dom.rs`**'s `setFileInputFiles`
 refusal assertion flips to a success assertion, plus the chooser being silent
 until intercepted. **`crates/cdp/tests/page.rs`** pins D6a's two loader ids:
 each navigation announces a fresh loader on `init`, and a failed one does not
-commit an id.
+commit an id. D13a adds the `Page.navigate` answer itself: `ERR_ABORTED` under
+both download behaviors, `allow` and the default `deny`.
 
 **`cargo xtask puppeteer`** is the acceptance gate: **45 of 45**, with
 `tests/automation/expectations.tsv` holding no entries. The twelve new checks

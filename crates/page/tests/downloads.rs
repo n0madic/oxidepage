@@ -27,7 +27,8 @@ fn spawn_server() -> u16 {
             .unwrap();
         rt.block_on(async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            tx.send(listener.local_addr().unwrap().port()).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tx.send(port).unwrap();
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     return;
@@ -69,6 +70,16 @@ fn spawn_server() -> u16 {
                         // The `<a download>` case: a static file server sends
                         // the bytes with **no** disposition header at all.
                         "/report.pdf" => (None, String::from("%PDF-1.4 not html")),
+                        // "Your download will begin shortly": a document that
+                        // commits and *then* chains into a download.
+                        "/shortly.html" => (
+                            None,
+                            format!(
+                                "<title>shortly</title><script>\
+                                 location.href = 'http://127.0.0.1:{port}/report.csv';\
+                                 </script>"
+                            ),
+                        ),
                         _ => (None, String::from("<title>doc</title>")),
                     };
                     let mut head = format!(
@@ -153,6 +164,102 @@ fn an_attachment_does_not_commit_a_document() {
 
     let written = std::fs::read_to_string(directory.join("report.csv")).expect("the download");
     assert_eq!(written, "a,b\n1,2\n");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The out-of-band answer to "did that navigation commit?" (ADR-0032 D13a).
+///
+/// `navigate` answers `Ok` either way — a download is not a failure — so the
+/// CDP boundary above reads this to decide between silence and Chrome's
+/// `net::ERR_ABORTED`.
+#[test]
+fn a_download_navigation_is_reported_to_the_embedder() {
+    let port = spawn_server();
+    let directory = temp_dir("reported");
+    let page = page_with(Some(directory.clone()));
+
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/report.csv"),
+        WaitUntil::Load,
+    )
+    .expect("the download navigation answers");
+    assert!(
+        page.take_embedder_navigation_was_download(),
+        "the embedder must be able to tell a download from a commit"
+    );
+    assert!(
+        !page.take_embedder_navigation_was_download(),
+        "the read consumes: one navigation cannot answer for the next"
+    );
+
+    // And an unread flag does not survive the navigation that follows.
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/report.csv"),
+        WaitUntil::Load,
+    )
+    .expect("a second download");
+    page.navigate(&format!("http://127.0.0.1:{port}/a.html"), WaitUntil::Load)
+        .expect("an ordinary document");
+    assert!(
+        !page.take_embedder_navigation_was_download(),
+        "a committed navigation clears what the download before it set"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A document that commits and *then* chains into a download — the "your
+/// download will begin shortly" idiom — is a **committed** navigation.
+///
+/// The regression: `embedder` describes the whole navigation chain, so the
+/// chained download reported itself as the answer to the embedder's own call.
+/// A driver saw `net::ERR_ABORTED` for a `page.goto` that had moved the
+/// document, and rejected it.
+#[test]
+fn a_chained_download_does_not_answer_for_the_navigation_that_committed() {
+    let port = spawn_server();
+    let directory = temp_dir("chained");
+    let page = page_with(Some(directory.clone()));
+
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/shortly.html"),
+        WaitUntil::Load,
+    )
+    .expect("navigation");
+    page.settle(Duration::from_secs(5));
+
+    assert_eq!(
+        page.eval_to_string("document.title").unwrap(),
+        "shortly",
+        "the navigation the embedder asked for did commit"
+    );
+    assert!(
+        !page.take_embedder_navigation_was_download(),
+        "the chained download is the document's business, not the call's answer"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.join("report.csv")).expect("the download"),
+        "a,b\n1,2\n",
+        "and the chained download still happened"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A download the *page* started is likewise not the embedder's navigation.
+#[test]
+fn a_script_started_download_is_not_the_embedders_navigation() {
+    let port = spawn_server();
+    let directory = temp_dir("script-started");
+    let page = page_with(Some(directory.clone()));
+
+    click_download_link(&page, port, "/report.pdf", "");
+    assert!(
+        directory.join("report.pdf").exists(),
+        "the click downloaded"
+    );
+    assert!(
+        !page.take_embedder_navigation_was_download(),
+        "only an embedder-driven navigation sets the flag"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
