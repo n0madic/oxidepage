@@ -770,7 +770,7 @@ context per call. No per-world CSP and no per-world prototype-poisoning
 protection: isolation is of globals and wrappers, and the DOM underneath is one
 shared, equally-trusted tree.
 
-**Playwright.** `cargo xtask playwright` is 17 of 17 with an empty expectation
+**Playwright.** `cargo xtask playwright` is 23 of 23 with an empty expectation
 file. `browserType.launch()` is not supported — `connectOverCDP` is the entry
 point, and the pipe transport, Chromium's flag surface and the stderr handshake
 are out of scope. No video recording, no tracing, no `page.accessibility`, no
@@ -855,12 +855,16 @@ chained *failure* — leaves `Page.navigate` reporting the success it had.
 **Protocol surface.** No user-agent override, no DOM mutation events over the protocol, no
 touch or drag input, no `Input.setInterceptDrags`, and no inspector-facing
 domain (`Debugger`, `Profiler`, `HeapProfiler`, `CSS`, `Overlay`,
-`Accessibility`). The protocol reports nested browsing contexts —
+`Accessibility`). Nested browsing contexts are reported in full —
 `Page.getFrameTree` with real `childFrames`, `Page.frameAttached`/`frameDetached`,
-per-frame `Runtime.executionContextCreated`, `DOM.Node.frameId` — but
-`DOM.getFrameOwner` is still refused, `Page.createIsolatedWorld` ignores
-`frameId`, and `Network.*` events carry the main frame's id whatever frame
-started the request. `Emulation.setTimezoneOverride` and
+per-frame `Runtime.executionContextCreated`, `DOM.Node.frameId`,
+`DOM.getFrameOwner`, a `frameId`-honouring `Page.createIsolatedWorld` (which is
+what a driver's locators are evaluated in) and `Network.*` events naming the
+frame that started the request. What is missing is one level up: **a frame is
+not a `Target`**. There are no out-of-process iframes and no per-frame sessions
+— one OS thread and one session per page (ADR-0035) — so `Target.setAutoAttach`
+carrying a `sessionId` is accepted and finds no children to attach, and every
+target `Target.getTargets` reports is a page. `Emulation.setTimezoneOverride` and
 `setGeolocationOverride` are refused because there is no `Intl` and no
 Geolocation API to override; `setLocaleOverride` **is** implemented, and moves
 `navigator.languages` and `Accept-Language` together or not at all.
