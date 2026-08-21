@@ -1659,6 +1659,7 @@ dependencies = [
  "percent-encoding",
  "psl",
  "rustls",
+ "same-file",
  "thiserror",
  "tokio",
  "tower-service",

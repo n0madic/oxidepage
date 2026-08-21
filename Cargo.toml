@@ -125,6 +125,11 @@ url = "2"
 percent-encoding = "2"
 psl = "2"
 http-cache-semantics = "2"
+# Windows-only, and only for the `file_root` jail's handle-identity check
+# (ADR-0039): the volume-serial-number + file-index pair that stands in for
+# Unix's `dev`+`ino` is `windows_by_handle`, permanently unstable in `std`, and
+# reading it directly needs `unsafe` that `unsafe_code = "deny"` forbids.
+same-file = "1"
 
 # Chrome DevTools Protocol server (Phase 9 / automation stage 6, ADR-0030).
 #

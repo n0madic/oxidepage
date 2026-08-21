@@ -131,7 +131,10 @@ Unix and volume-serial-number + file-index on Windows (which `std` exposes only
 on handle-derived `Metadata`, so that arm re-opens rather than `stat`s). Other
 targets return `true` with a comment saying the jail degrades to path-only there.
 No `unsafe`, no `openat2`, no new dependency — which is what workspace-wide
-`unsafe_code = "deny"` requires.
+`unsafe_code = "deny"` requires. (**Amended by ADR-0039:** those `std`
+accessors are permanently unstable, so the Windows arm never compiled and now
+goes through `same-file` for the same pair. The Unix arm and the property are
+unchanged.)
 
 **Left open, and recorded rather than implied away:** a hard link inside the jail
 pointing at a file outside it defeats every path-based check. It has no link

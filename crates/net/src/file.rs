@@ -133,16 +133,18 @@ fn same_object(file: &std::fs::File, path: &Path) -> std::io::Result<bool> {
 }
 
 /// Windows has no `dev`/`ino`; the equivalent pair is the volume serial number
-/// and the file index, and `std` surfaces them only on a **handle-derived**
-/// `Metadata` — `fs::metadata` returns `None` for both. So the comparison needs
-/// a second open of the canonical path rather than a cheap `stat`.
+/// and the file index, which `GetFileInformationByHandle` answers for an open
+/// handle and nothing answers for a path. `std` has them behind the permanently
+/// unstable `windows_by_handle` feature, so the pair comes from `same-file`
+/// instead of `unsafe` (ADR-0039). Both sides must be handles, hence the second
+/// open of the canonical path rather than a cheap `stat`; `try_clone` keeps our
+/// own handle alive past the `Handle`'s drop.
 #[cfg(windows)]
 fn same_object(file: &std::fs::File, path: &Path) -> std::io::Result<bool> {
-    use std::os::windows::fs::MetadataExt;
-    let open = file.metadata()?;
-    let named = std::fs::File::open(path)?.metadata()?;
-    Ok(open.volume_serial_number() == named.volume_serial_number()
-        && open.file_index() == named.file_index())
+    use same_file::Handle;
+    let open = Handle::from_file(file.try_clone()?)?;
+    let named = Handle::from_path(path)?;
+    Ok(open == named)
 }
 
 /// Everywhere else (wasm and friends): no inode identity is available, so the
