@@ -81,11 +81,15 @@ stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "406a57149152
 # `git bisect` in an isolated worktree across the whole WPT corpus — at least
 # 14 files hung outright. `=0.10.0` is exact, not just `<0.11`, because that's
 # the specific version the bisect verified clean; bump only after re-running
-# the full `xtask wpt` run and confirming no HANG/CRASH. As a side effect this
-# also collapses two skrifa versions in the lockfile back to one (0.11 pulled
-# skrifa 0.43.2 transitively, alongside our own `0.42` pin below).
+# the full `xtask wpt` run and confirming no HANG/CRASH.
 parley = { version = "=0.10.0", default-features = false, features = ["std"] }
-skrifa = { version = "0.42", default-features = false, features = ["std"] }
+# Deliberately ahead of the skrifa parley pulls in (0.42.1), so the lockfile
+# carries two skrifa/read-fonts/font-types stacks. Nothing crosses between
+# them — we hand parley `&[u8]` blobs and parse them ourselves, so a version
+# skew is a compile error, not silent drift — and the split measures
+# **+19.4 KiB** on the release binary (23.34 -> 23.36 MiB), because the linker
+# drops what neither side calls. Re-measure before widening the gap.
+skrifa = { version = "0.46", default-features = false, features = ["std"] }
 # Web fonts (Phase 7, ADR-0008): `wuff` is nicoburns' pure-Rust WOFF/WOFF2 →
 # sfnt decoder (same author whose font patterns `layout/fonts.rs` mirrors); its
 # decompressors are `brotli-decompressor` (WOFF2) + `flate2` (WOFF1), both
