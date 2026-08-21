@@ -16,7 +16,7 @@ updates:
 
   # Actions are SHA-pinned in `.github/workflows/ci.yml`, which is exactly why
   # this entry is needed: a pin does not float, so nothing else would ever move
-  # it. Dependabot rewrites the SHA and keeps the trailing `# v4` comment in
+  # it. Dependabot rewrites the SHA and keeps the trailing version comment in
   # step.
   - package-ecosystem: github-actions
     directory: "/"
