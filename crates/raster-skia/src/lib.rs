@@ -187,7 +187,9 @@ pub fn encode_jpeg(image: &RasterImage, quality: u8) -> Result<Vec<u8>, image::I
 
     let rgb: Vec<u8> = image
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let over_white = |c: u8| {
                 let a = u32::from(p[3]);

@@ -951,7 +951,7 @@ fn pixmap_from_image(image: &DecodedImage, device: (u32, u32)) -> Option<Pixmap>
 /// Premultiplies straight-alpha RGBA into a pixmap.
 fn premultiplied(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
     let mut data = rgba.to_vec();
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         let a = u32::from(px[3]);
         px[0] = (u32::from(px[0]) * a / 255) as u8;
         px[1] = (u32::from(px[1]) * a / 255) as u8;
