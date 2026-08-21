@@ -73,15 +73,24 @@ taffy = { version = "=0.12.1", default-features = false, features = [
 ] }
 stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "406a571491523d69d52c396f240b14edd1a1974f", default-features = false, features = ["std", "block", "flexbox", "floats", "grid"] }
 # Hard-pinned below `0.11` (which would otherwise satisfy the unpinned range
-# the crate used before): parley 0.11's `TreeStyleBuilder` — the
-# `push_style_modification_span`/`pop_style_span` pair used for whitespace
-# trimming at style-span boundaries — feeds taffy's iterative flex-basis
-# measurement unstable intermediate widths, and the two don't converge: a
-# genuine infinite loop (99% CPU, not a slow test), not a flake. Confirmed by
-# `git bisect` in an isolated worktree across the whole WPT corpus — at least
-# 14 files hung outright. `=0.10.0` is exact, not just `<0.11`, because that's
-# the specific version the bisect verified clean; bump only after re-running
-# the full `xtask wpt` run and confirming no HANG/CRASH.
+# the crate used before): on 0.11.x, `break_all_lines` spins forever — a
+# genuine infinite loop (99% CPU, not a slow test), not a flake. `=0.10.0` is
+# exact, not just `<0.11`, because that is the version verified clean.
+#
+# The cause is upstream, not ours: `break_next` yields on a `CustomOutOfFlow`
+# inline box *without* advancing past it, so `while break_next().is_some() {}`
+# gets the same box back forever (linebender/parley#752). We hand parley every
+# float as `CustomOutOfFlow` (`layout/src/construct.rs`), which is why the 20
+# WPT files that hang are exactly the ones containing a float. Measured on
+# 0.11.1: 20 HANG, the corpus takes 241s instead of 20s, 18300/24358 subtests
+# instead of 18602/24661.
+#
+# Fixed upstream by linebender/parley#753 (merged 2026-08-18, "will get
+# backported as 0.11.2"). Verified here by patching #753 onto a v0.11.1
+# checkout: 0 HANG, 19.8s, and 18602/24661 — byte-identical to 0.10.0 — with
+# goldens, reftests, Puppeteer and Playwright all green. So **bump to 0.11.2 as
+# soon as it is published**; the gate is still a full `xtask wpt` run with no
+# HANG/CRASH, since the loop is bounded only by the runner's 45 s budget.
 parley = { version = "=0.10.0", default-features = false, features = ["std"] }
 # Deliberately ahead of the skrifa parley pulls in (0.42.1), so the lockfile
 # carries two skrifa/read-fonts/font-types stacks. Nothing crosses between
