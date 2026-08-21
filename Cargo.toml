@@ -85,7 +85,7 @@ stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "406a57149152
 # also collapses two skrifa versions in the lockfile back to one (0.11 pulled
 # skrifa 0.43.2 transitively, alongside our own `0.42` pin below).
 parley = { version = "=0.10.0", default-features = false, features = ["std"] }
-skrifa = { version = "0.42", default-features = false, features = ["std"] }
+skrifa = { version = "0.46", default-features = false, features = ["std"] }
 # Web fonts (Phase 7, ADR-0008): `wuff` is nicoburns' pure-Rust WOFF/WOFF2 →
 # sfnt decoder (same author whose font patterns `layout/fonts.rs` mirrors); its
 # decompressors are `brotli-decompressor` (WOFF2) + `flate2` (WOFF1), both
