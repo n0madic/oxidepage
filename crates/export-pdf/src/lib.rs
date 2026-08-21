@@ -472,10 +472,12 @@ fn write_shared_objects(pdf: &mut Pdf, list: &DisplayList, built: &Built) {
         let h = image.height as i32;
         let rgb: Vec<u8> = image
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
-        let alpha: Vec<u8> = image.rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let alpha: Vec<u8> = image.rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         // Embed the raw samples FlateDecode-compressed rather than uncompressed
         // (finding L4): image data dominates PDF size otherwise.
         let rgb = deflate(&rgb);

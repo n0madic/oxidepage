@@ -130,7 +130,12 @@ fn rasterize_svg_renders_at_the_requested_size() {
     assert_eq!((pixels.width, pixels.height), (64, 64));
     assert_eq!(pixels.rgba.len(), 64 * 64 * 4);
     assert!(
-        pixels.rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 255]),
+        pixels
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| *px == [255, 0, 0, 255]),
         "the whole canvas is the scaled-up rect, not a padded 8×8 blit"
     );
 }
@@ -192,7 +197,7 @@ mod svg_image_href {
     /// True when any pixel is opaque — i.e. the referenced image was composited.
     fn painted(bytes: &[u8]) -> bool {
         let pixels = rasterize_svg(bytes, 8, 8).expect("SVG rasterizes");
-        pixels.rgba.chunks_exact(4).any(|px| px[3] != 0)
+        pixels.rgba.as_chunks::<4>().0.iter().any(|px| px[3] != 0)
     }
 
     #[test]
