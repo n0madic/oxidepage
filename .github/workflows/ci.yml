@@ -14,19 +14,24 @@ jobs:
     name: Format & lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          # `@stable` used to carry the toolchain: that ref is a *branch* whose
+          # own action.yml defaults the input to `stable`. Pinning the SHA
+          # freezes that default too, so this is belt-and-braces — but it is
+          # what keeps the job honest if the pin is ever moved.
+          toolchain: stable
           components: rustfmt, clippy
       # stylo's build.rs runs a mako code generator (needs python3 on PATH).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.x"
       # `parley/system` (on by default via `layout`'s `system_fonts`) links
       # fontconfig on Linux, and the runner image ships no `fontconfig.pc`.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -46,17 +51,19 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
       # stylo's build.rs runs a mako code generator (needs python3 on PATH).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.x"
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build
         run: cargo build --workspace --all-targets
       - name: Test
@@ -74,16 +81,18 @@ jobs:
     name: Web Platform Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
       # stylo's build.rs runs a mako code generator (needs python3 on PATH).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.x"
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Release build: each test runs in its own subprocess (via current_exe),
       # so a release xtask runs the JS/style engine at full speed, and the
       # runner fans the subprocesses out across all cores.
@@ -96,12 +105,14 @@ jobs:
     # driver, and a second platform would triple the time for no extra signal.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -109,7 +120,7 @@ jobs:
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Release for the same reason the WPT job is: this drives the whole engine
       # through a real driver, and a debug build turns minutes into tens of them.
       # Fixtures are served from loopback; CI never touches the internet.
@@ -128,12 +139,14 @@ jobs:
     # (docs/automation-roadmap.md records that history).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -141,10 +154,55 @@ jobs:
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Release for the same reason the Puppeteer job is: this drives the whole
       # engine through a real driver, and a debug build turns minutes into tens
       # of them. Fixtures are served from loopback; CI never touches the
       # internet.
       - name: Playwright
         run: cargo run --release -p xtask -- playwright
+
+  audit:
+    name: Advisory audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+      # No project build here: `cargo audit` reads `Cargo.lock`, so this job
+      # needs neither python3 nor fontconfig and finishes in seconds.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      # Fails on any RustSec advisory affecting the locked dependency graph.
+      # A finding is fixed by bumping the lockfile, not by adding an ignore:
+      # this gate exists because a transitive DoS in the HTTP stack is a bug in
+      # the fetch pipeline whoever wrote it.
+      - name: cargo audit
+        run: cargo audit
+
+  msrv:
+    name: MSRV (1.89.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          # `rust-version` in the workspace manifest is a promise; without a job
+          # that keeps it, it is a comment. Bumping it is a deliberate edit in
+          # two places, which is the point.
+          toolchain: 1.89.0
+      # stylo's build.rs runs a mako code generator (needs python3 on PATH).
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.x"
+      # See the lint job: the system font source needs fontconfig on Linux.
+      - name: Fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `check`, not `test`: this job answers "does the declared MSRV compile
+      # the workspace", and the behavior itself is covered on stable across
+      # three platforms. `--all-targets` so tests and benches are checked too.
+      - name: cargo check
+        run: cargo check --workspace --all-targets

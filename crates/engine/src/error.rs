@@ -18,6 +18,15 @@ pub enum EngineError {
     /// The page did not answer within the configured command timeout. It is
     /// still alive — a page parked in a modal dialog or inside a synchronous
     /// document fetch legitimately cannot answer yet.
+    ///
+    /// **The command either did not run at all, or ran to completion.** There is
+    /// no partial state: giving up on the reply also cancels the queued job, and
+    /// the cancellation is checked once, before the closure runs, so a job
+    /// already past that point finishes rather than stopping mid-mutation. What
+    /// this error cannot tell you is *which* of the two happened — the two are
+    /// indistinguishable from here, and a job that started is one whose effects
+    /// have landed. So a retry after `Timeout` may perform the operation a
+    /// second time, and is safe only for work that tolerates that.
     Timeout,
     /// A page could not be created.
     Launch(String),

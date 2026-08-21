@@ -1,6 +1,6 @@
 # ADR-0029: `data:` URLs are decoded in the fetch pipeline, above the scheme gate
 
-- Status: accepted
+- Status: accepted, refined in part by ADR-0038
 - Date: 2026-07-28
 
 ## Context

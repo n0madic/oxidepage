@@ -658,7 +658,7 @@ impl FetchEngine {
         // `scheme_allowed` per hop — is what keeps an `http:` → `data:`
         // redirect a network error, as Fetch requires.
         if url.scheme() == "data" {
-            return data_outcome(&url);
+            return data_outcome(&url, self.policy.max_response_bytes);
         }
         if !self.policy.scheme_allowed(url.scheme()) {
             return Err(NetError::blocked(format!(
@@ -920,15 +920,29 @@ impl FetchEngine {
     }
 
     async fn load_file(&self, url: &Url) -> NetResult<FetchOutcome> {
+        // A `file://` subresource is a resource the page asked for like any
+        // other, so it is charged like any other: returning above the redirect
+        // loop is what puts it outside the loop's `charge_request`, not a
+        // decision that local bytes are free. Without this a document served
+        // from disk could pull an unbounded number of unbounded local files
+        // while the advertised per-page budgets read as enforced.
+        self.charge_request()?;
+        // `None`: a local file announces no length we would trust, so the
+        // reservation is `min(remaining headroom, max_response_bytes)` and the
+        // unused remainder is refunded when the reservation drops.
+        let mut reservation = self.reserve_bytes(None)?;
+        let cap = reservation.cap();
+
         // `file::load_file` does blocking `std::fs` I/O; keep it off the async
         // worker so a slow disk can't stall the runtime.
         let policy = Arc::clone(&self.policy);
         let url_owned = url.clone();
-        let f = tokio::task::spawn_blocking(move || file::load_file(&policy, &url_owned))
+        let f = tokio::task::spawn_blocking(move || file::load_file(&policy, &url_owned, cap))
             .await
             .map_err(|e| {
                 NetError::new(NetErrorKind::Io, format!("file load task failed: {e}"))
             })??;
+        reservation.commit(f.bytes.len() as u64);
         let mut headers = Vec::new();
         if let Some(ct) = f.content_type {
             headers.push(("content-type".to_owned(), ct));
@@ -1191,12 +1205,16 @@ async fn decompress(encoding: &str, body: Bytes, max: u64) -> NetResult<Bytes> {
 /// consumes, so a `data:` body is indistinguishable from a fetched one to every
 /// caller — including the asynchronous ones, which keep their `NetEvent` timing.
 ///
-/// The budget counters are deliberately not charged (matching `file://`, which
-/// also returns above them): there is no request to rate-limit and no body to
-/// stream, and `max_response_bytes` guards a decompression bomb arriving over
-/// the wire, not bytes the caller already had in memory.
-fn data_outcome(url: &Url) -> NetResult<FetchOutcome> {
-    let body = data::load_data(url)?;
+/// `max_response_bytes` **is** applied, as a per-URL cap enforced before the
+/// body is allocated (ADR-0038 D2). The cumulative counters — `max_requests` and
+/// `max_total_bytes` — deliberately are not, and unlike `file://` that is not an
+/// oversight: a `data:` body arrives *inside* the document that names it, whose
+/// own bytes were already charged, and base64 expands 3 bytes to 4, so the sum
+/// of every decoded `data:` body in a document is structurally under
+/// `0.75 × document size`. Charging them again would double-count, and rate-
+/// limiting them would drop a page's 501st inline icon — which no browser does.
+fn data_outcome(url: &Url, max_bytes: u64) -> NetResult<FetchOutcome> {
+    let body = data::load_data(url, max_bytes)?;
     Ok(FetchOutcome {
         head: ResponseHead {
             status: 200,

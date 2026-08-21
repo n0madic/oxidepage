@@ -26,11 +26,17 @@ cargo fmt --all --check
 cargo clippy -p oxidepage-paint --all-targets --features svg,webp -- -D warnings
 cargo test -p oxidepage-paint --features svg,webp
 
-# Size-optimized binary (14.4 MiB vs release's 20.6 MiB, <1% slower):
+# CI also runs these two, which nothing else covers:
+cargo audit                                    # RustSec gate over Cargo.lock
+cargo +1.89.0 check --workspace --all-targets  # the declared MSRV
+
+# Size-optimized binary (16.5 MiB vs release's 23.4 MiB, <1% slower):
 cargo build --profile min-size -p oxidepage-cli   # -> target/min-size/oxidepage
 ```
 
 The `min-size` profile keeps `opt-level = 3` and `panic = "unwind"` **on purpose**, and the reasons are load-bearing — read the comment above it in `Cargo.toml` before touching it. In short: a whole-binary `opt-level = "s"` measured **2x slower** end-to-end (the engine is compute-bound in raster/shaping/cascade/JS), and `panic = "abort"` would defeat `layout::webfont`'s `catch_unwind` trust boundary, turning a hostile web font into a remote process kill. Per-crate `opt-level = "s"` entries are each measured, not guessed; `psl` is deliberately absent because "s" changes it by zero bytes (it is a compiled data table).
+
+A `cargo audit` finding is fixed by bumping `Cargo.lock`, never by an ignore entry. GitHub Actions are SHA-pinned with the version in a trailing comment and moved by Dependabot, so `dtolnay/rust-toolchain` needs an explicit `toolchain:` at every use.
 
 Single tests (integration binaries are named by file stem):
 
@@ -174,7 +180,7 @@ The cached display list is keyed on a `PaintStamp` (dom/style/element-scroll/ima
 
 `NetService` owns a multi-thread tokio runtime *living on the page thread*; requests are spawned and progress comes back as `NetEvent::{Headers, Chunk, Done, Error}` over a crossbeam channel, tagged by `RequestId`. `dispatch_net_event` routes by id through the page-owned maps (async scripts → sheets → images → fonts), falling through to `bindings::deliver_net_event` for script-initiated `fetch`/XHR. It **must** call `finish` on every terminal event or the bookkeeping grows unbounded.
 
-**`data:` is decoded above the scheme gate, not by widening it** (ADR-0029). `fetch_inner` returns early for `data:` beside `file://`, so every consumer — scripts of all four flavours, modules, sheets, `@import`, images, fonts, `fetch`/XHR — gets it for free and the async ones keep their `NetEvent` timing. Do **not** add `data` to `ResourcePolicy::allowed_schemes`: the early return is deliberately *outside* the redirect loop, which re-checks the gate per hop, and that is the only thing keeping an `http:` → `data:` redirect a network error. `net::data::decode` is the one decoder — it percent-decodes *before* base64, per the Fetch data: URL processor, and `page`'s inline image/`@font-face` paths call it rather than rolling their own.
+**`data:` is decoded above the scheme gate, not by widening it** (ADR-0029). `fetch_inner` returns early for `data:` beside `file://`, so every consumer — scripts of all four flavours, modules, sheets, `@import`, images, fonts, `fetch`/XHR — gets it for free and the async ones keep their `NetEvent` timing. Do **not** add `data` to `ResourcePolicy::allowed_schemes`: the early return is deliberately *outside* the redirect loop, which re-checks the gate per hop, and that is the only thing keeping an `http:` → `data:` redirect a network error. `net::data::decode` is the one decoder — it percent-decodes *before* base64, per the Fetch data: URL processor, and `page`'s inline image/`@font-face` paths call it rather than rolling their own. It takes a **required** `max_bytes` and refuses over it before allocating, checked on the *encoded* length (ADR-0038 D2); the required parameter is the point — a new call site cannot compile without deciding its limit. The cumulative `max_requests`/`max_total_bytes` counters stay uncharged for `data:` on purpose, but `file://` **is** charged against both (D1), so do not read the two early returns as one rule.
 
 ### Adding a DOM interface or method
 

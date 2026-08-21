@@ -1,0 +1,24 @@
+version: 2
+
+# Two ecosystems, weekly. The `audit` job in CI is the *floor* — it fails only
+# once an advisory exists — and these PRs are what keep the graph from drifting
+# far enough that a patch bump stops being a patch bump.
+updates:
+  # Cargo updates arrive as lockfile PRs. Several `[workspace.dependencies]`
+  # entries carry `=x.y.z` pins whose reasons are load-bearing (stylo ↔
+  # selectors/cssparser, stylo ↔ stylo_taffy ↔ taffy, rquickjs) — read the
+  # comment above the pin before merging anything that touches one.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Actions are SHA-pinned in `.github/workflows/ci.yml`, which is exactly why
+  # this entry is needed: a pin does not float, so nothing else would ever move
+  # it. Dependabot rewrites the SHA and keeps the trailing `# v4` comment in
+  # step.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

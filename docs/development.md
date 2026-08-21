@@ -44,14 +44,18 @@ cargo bench -p oxidepage-page --bench geometry_rmw
 cargo build --profile min-size -p oxidepage-cli   # -> target/min-size/oxidepage
 ```
 
-14.4 MiB vs. release's 20.6 MiB, for well under 1% wall-clock cost; build
-time roughly triples. The `min-size` profile keeps `opt-level = 3` and
+16.5 MiB vs. release's 23.4 MiB (macOS/arm64, measured 2026-08-21 — a
+snapshot that drifts up with every dependency), for well under 1% wall-clock
+cost; build time roughly triples. The `min-size` profile keeps `opt-level = 3` and
 `panic = "unwind"` **on purpose**, and the reasons are load-bearing — read
 the comment above the profile in `Cargo.toml` before touching it. In short: a
 whole-binary `opt-level = "s"` measured **2x slower** end-to-end (the engine
 is compute-bound in raster/shaping/cascade/JS), and `panic = "abort"` would
-defeat `layout::webfont`'s `catch_unwind` trust boundary, turning a hostile
-web font into a remote process kill. Per-crate `opt-level = "s"` entries are
+defeat *three* `catch_unwind` trust boundaries — `layout::webfont` around a
+hostile web font (ADR-0008 D1), `layout::construct::to_taffy_style_guarded`
+around `stylo_taffy`'s grid narrowings (ADR-0036), and the whole layout pass
+(ADR-0037) — turning a hostile font, a hostile grid declaration or a taffy
+panic into a remote process kill. Per-crate `opt-level = "s"` entries are
 each measured, not guessed.
 
 ## Regenerating WebIDL bindings
@@ -90,7 +94,8 @@ crates/
 ├── paint         # box tree → display list (backgrounds, borders, text, images)
 ├── raster-skia   # display list → tiny-skia CPU raster → RGBA / PNG / JPEG
 ├── export-pdf    # display list → paginated PDF (pdf-writer)
-├── raster-vello, capi, cdp                # stubs for later phases
+├── cdp           # CDP endpoint: WebSocket, target registry, command lanes
+├── raster-vello, capi                     # stubs for later phases
 xtask/            # cargo xtask: vendoring, codegen, WPT / golden / reftest runners
 tests/
 ├── html5lib-tests/   # vendored html5lib tree-construction suite
@@ -106,8 +111,9 @@ point for embedding one page as a Rust library, and what the CLI drives.
 threads and hands out `Send + Sync` handles, so it depends on `page` and
 nothing depends on it (`cli` does **not**). `bindings` deliberately does not
 depend on `paint`/`raster-skia`/`page`; the render cache lives on `Page`, not
-on `PageState`. `capi`, `cdp`, and `raster-vello` are documented stubs for
-later phases.
+on `PageState`. `cdp` sits above `engine` and is reached only by
+`oxidepage serve`; nothing below it knows the protocol exists. `capi` and
+`raster-vello` are documented stubs for later phases.
 
 ## Adding a DOM interface or method
 

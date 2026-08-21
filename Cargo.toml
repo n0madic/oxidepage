@@ -168,9 +168,13 @@ strip = true
 # Size-optimized build: `cargo build --profile min-size -p oxidepage-cli`.
 #
 # Measured against `release` on a 3000-node reflow-thrash page (macOS/arm64,
-# 8 interleaved runs each, medians): 19.6 MiB -> 13.6 MiB (-31%) for +0.67%
-# wall-clock (12.045s vs 11.965s) — inside the run-to-run spread. PNG output is
-# byte-identical.
+# 8 interleaved runs each, medians): +0.67% wall-clock (12.045s vs 11.965s) —
+# inside the run-to-run spread. PNG output is byte-identical.
+#
+# Sizes, re-measured 2026-08-21 (macOS/arm64, `-p oxidepage-cli`): 23.4 MiB ->
+# 16.5 MiB (-29%). They drift upward with every dependency, so treat them as a
+# snapshot; the *ratio* is what has held. Only the sizes were re-measured — the
+# wall-clock figures above are the original run.
 #
 # `opt-level` stays at 3. A whole-binary `opt-level = "s"` was measured at **2x
 # slower** end-to-end: this engine is compute-bound in raster, shaping, cascade

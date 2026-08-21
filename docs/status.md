@@ -42,11 +42,16 @@ v1 limits.
   connector that resolves DNS in-house and filters every resolved address
   (loopback, RFC1918, link-local, CGNAT, cloud metadata, IPv6-mapped/tunnelled
   forms, numeric-literal hosts normalized by the URL parser) as the single
-  enforcement point; TLS via `ring` + bundled `webpki-roots`; a hand-rolled
+  enforcement point — the range table is kept against the IANA special-purpose
+  registries' *Globally Reachable* column, each range carrying a blocked address
+  and its reachable neighbour as tests (ADR-0038 D3); TLS via `ring` + bundled `webpki-roots`; a hand-rolled
   redirect pipeline with per-hop SSRF re-validation; an RFC 6265bis cookie jar
   (full PSL, `Secure`/`HttpOnly`/`SameSite`/prefixes/caps); an RFC 9111
   in-memory cache; `strict-origin-when-cross-origin` referrer; gzip/br/zstd/
-  deflate decompression; simple-request CORS; jailed opt-in `file://`. A
+  deflate decompression; simple-request CORS; jailed opt-in `file://` — jailed
+  on the *inode* it opened, not only on the path it canonicalized, and charged
+  against the same request and byte budgets as an HTTP response (ADR-0038 D1,
+  D4; a hard link into the jail is a recorded remaining hole). A
   `NetService` bridges the async net pool to the synchronous page thread over a
   crossbeam channel unified with the timer loop via `recv_deadline`. Real HTTP
   documents load and run their scripts headlessly with correct
@@ -513,7 +518,10 @@ v1 limits.
   the `Page` API — including methods that do not exist yet — and
   `navigate`/`eval_to_string`/`settle`/`screenshot`/`pdf`/`content`/
   `set_viewport`/`loop_stats` are one-line typed wrappers over it, each round
-  trip bounded by a command timeout so a wedged page reports rather than hangs.
+  trip bounded by a command timeout so a wedged page reports rather than hangs
+  — and the timeout **cancels**: a job that has not started is neutered and
+  drains as a no-op, so the error means the command either never ran or ran in
+  full, never half (ADR-0038 D5).
   In `page` the port is a **task source**: ordinary jobs drain at the top of
   `run_until_stalled_until` under the same `!navigating && !parsing` guard a
   queued navigation uses (a job that ran mid-parse would be a deterministic
@@ -636,6 +644,11 @@ Conformance work landing outside the phase plan:
   still does not block the parser. `allowed_schemes` stays `http`/`https`: the
   return is above the gate but *outside* the redirect loop, which re-checks the
   gate per hop, so an `http:` → `data:` redirect remains a network error. The
+  decoder takes a required per-URL byte cap and refuses an over-large body
+  *before* allocating for it, checked on the encoded length; the cumulative
+  `max_requests`/`max_total_bytes` counters are deliberately not charged,
+  because a `data:` body rides inside a document whose bytes already were
+  (ADR-0038 D2). The
   decoder follows the Fetch data: URL processor, which percent-decodes *before*
   base64 — the old `page`-local decoder did the reverse and so rejected every
   body whose base64 arrived percent-encoded, the shape `Url`'s own serializer

@@ -554,3 +554,65 @@ fn set_content_on_a_suspended_page_waits_for_the_resume() {
     );
     browser.close();
 }
+
+/// A timeout that only stops *waiting* leaves the command queued, so it lands
+/// later — after the driver has already reported the failure and moved on, at
+/// a moment nothing is expecting a mutation. Giving up on the reply must give
+/// up on the work (ADR-0038 D5).
+#[test]
+fn a_timed_out_command_is_cancelled_not_merely_abandoned() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // The first `Page::new` in a process pays a one-time system-font
+    // enumeration that can take seconds — far more than the deliberately short
+    // command timeout below, which `new_page` is also bounded by. Pay it here,
+    // under the generous default, so the timeout under test is the only one
+    // that can fire.
+    let warmup = Browser::new(test_options()).expect("browser");
+    warmup
+        .default_context()
+        .new_page(NewPageOptions::default())
+        .expect("warm-up page");
+    warmup.close();
+
+    let browser = Browser::new(oxidepage_engine::BrowserOptions {
+        command_timeout: Duration::from_millis(500),
+        ..test_options()
+    })
+    .expect("browser");
+    let page = browser
+        .default_context()
+        .new_page(NewPageOptions::default())
+        .expect("page");
+
+    // Occupy the page thread for far longer than the command timeout, so the
+    // command queued behind this one cannot possibly start before the wait
+    // expires. `post` does not wait, so it is not itself cancellable.
+    page.post(|_page| std::thread::sleep(Duration::from_secs(2)))
+        .unwrap();
+
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    let started = Instant::now();
+    let outcome = page.with(move |_page| {
+        flag.store(true, Ordering::Release);
+    });
+    assert_eq!(outcome, Err(EngineError::Timeout));
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "the wait must end at the command timeout, not at the blocking job"
+    );
+
+    // Let the blocking job finish and the loop take its next turn: the
+    // cancelled job drains here, and must drain as a no-op. A round trip that
+    // succeeds proves the queue has drained past it — the page is answering
+    // again.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && page.with(|_page| ()).is_err() {}
+    assert!(
+        !ran.load(Ordering::Acquire),
+        "the abandoned command must never run"
+    );
+    browser.close();
+}

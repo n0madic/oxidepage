@@ -60,6 +60,11 @@ fn ipv4_allowed(ip: Ipv4Addr) -> bool {
     if o[0..3] == [192, 0, 2] {
         return false;
     }
+    // 192.88.99.0/24 — deprecated 6to4 relay anycast. IANA marks the whole
+    // block (and 192.88.99.2, the 6a44 relay) Globally Reachable = False.
+    if o[0..3] == [192, 88, 99] {
+        return false;
+    }
     // 192.168.0.0/16 — RFC 1918 private.
     if a == 192 && b == 168 {
         return false;
@@ -108,17 +113,45 @@ fn ipv6_allowed(ip: Ipv6Addr) -> bool {
     if segs[0] & 0xffc0 == 0xfe80 {
         return false;
     }
+    // fec0::/10 — deprecated site-local. RFC 3879 removed it from the registry
+    // but explicitly tolerates existing deployments and tells routers to filter
+    // it; an SSRF boundary cannot delegate that to somebody else's router.
+    if segs[0] & 0xffc0 == 0xfec0 {
+        return false;
+    }
     // ff00::/8 — multicast.
     if hi == 0xff {
         return false;
     }
-    // 2001:db8::/32 — documentation.
+    // 100::/64 (discard-only, RFC 6666) and 100:0:0:1::/64 (dummy prefix,
+    // RFC 9780) — one branch, since they differ only in the fourth hextet.
+    if segs[0] == 0x0100 && segs[1] == 0 && segs[2] == 0 && segs[3] <= 1 {
+        return false;
+    }
+    // 2001:db8::/32 — documentation. *Not* covered by the 2001::/23 branch
+    // below (0x0db8 > 0x01ff), so it needs its own test.
     if segs[0] == 0x2001 && segs[1] == 0x0db8 {
         return false;
     }
-    // 2001::/32 — Teredo tunnels an obfuscated IPv4 endpoint; reject the
-    // whole range rather than try to de-obfuscate it.
-    if segs[0] == 0x2001 && segs[1] == 0x0000 {
+    // 2001::/23 — "IETF Protocol Assignments", Globally Reachable = False in
+    // the IANA registry. One branch covers Teredo (2001::/32, which tunnels an
+    // obfuscated IPv4 endpoint we decline to de-obfuscate), benchmarking
+    // (2001:2::/48) and deprecated ORCHID (2001:10::/28).
+    //
+    // The registry does carve four Globally Reachable = True exceptions out of
+    // this block — 2001:1::1/128 (PCP), 2001:3::/32 (AMT), 2001:20::/28
+    // (ORCHIDv2) and 2001:30::/28 (DET). Overblocking them is deliberate, the
+    // same trade already made for 192.0.0.0/24: none is a fetchable web origin,
+    // and a coarse boundary is the one that stays correct as the registry moves.
+    if segs[0] == 0x2001 && segs[1] <= 0x01ff {
+        return false;
+    }
+    // 3fff::/20 — documentation (RFC 9637).
+    if segs[0] == 0x3fff && segs[1] >> 12 == 0 {
+        return false;
+    }
+    // 5f00::/16 — SRv6 SIDs (RFC 9602), Globally Reachable = False.
+    if segs[0] == 0x5f00 {
         return false;
     }
     // 2002::/16 — 6to4 embeds an IPv4 address in the next two hextets.
@@ -140,6 +173,15 @@ fn ipv6_allowed(ip: Ipv6Addr) -> bool {
             (segs[7] & 0xff) as u8,
         );
         return ipv4_allowed(embedded);
+    }
+    // 64:ff9b:1::/48 — NAT64 local-use prefixes. Unlike the well-known
+    // 64:ff9b::/96 above (Globally Reachable = True, which is why it recurses
+    // into the embedded IPv4 rather than being rejected outright), IANA marks
+    // this one False: it names a *local* translator, and its low 80 bits carry
+    // no fixed IPv4 layout to recurse into. The branches cannot both match —
+    // the one above requires `segs[2..6] == [0, 0, 0, 0]`.
+    if segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001 {
+        return false;
     }
     true
 }
@@ -217,6 +259,16 @@ mod tests {
     }
 
     #[test]
+    fn blocks_6to4_relay_anycast() {
+        assert!(!ip_allowed(v4("192.88.99.1")));
+        assert!(!ip_allowed(v4("192.88.99.2"))); // the 6a44 relay
+        assert!(!ip_allowed(v4("192.88.99.255")));
+        // Neighbours outside the /24 stay reachable.
+        assert!(ip_allowed(v4("192.88.98.1")));
+        assert!(ip_allowed(v4("192.88.100.1")));
+    }
+
+    #[test]
     fn blocks_loopback_and_local_v6() {
         assert!(!ip_allowed(v6("::1")));
         assert!(!ip_allowed(v6("::")));
@@ -254,5 +306,50 @@ mod tests {
         assert!(!ip_allowed(v6("64:ff9b::7f00:1")));
         // Teredo range blocked outright.
         assert!(!ip_allowed(v6("2001:0:0:0:0:0:0:1")));
+    }
+
+    #[test]
+    fn nat64_well_known_recurses_but_local_use_is_blocked() {
+        // 64:ff9b::/96 is Globally Reachable: the embedded IPv4 decides.
+        assert!(ip_allowed(v6("64:ff9b::8.8.8.8")));
+        assert!(!ip_allowed(v6("64:ff9b::10.0.0.1")));
+        // 64:ff9b:1::/48 is not: blocked whatever it appears to embed.
+        assert!(!ip_allowed(v6("64:ff9b:1::8.8.8.8")));
+        assert!(!ip_allowed(v6("64:ff9b:1::1")));
+        assert!(!ip_allowed(v6("64:ff9b:1:ffff:ffff:ffff:ffff:ffff")));
+        // The neighbouring /48s are outside both.
+        assert!(ip_allowed(v6("64:ff9b:2::1")));
+    }
+
+    #[test]
+    fn blocks_ietf_protocol_assignments_v6() {
+        // 2001::/23, whole range.
+        assert!(!ip_allowed(v6("2001::1"))); // Teredo
+        assert!(!ip_allowed(v6("2001:2::1"))); // benchmarking
+        assert!(!ip_allowed(v6("2001:10::1"))); // deprecated ORCHID
+        assert!(!ip_allowed(v6("2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff"))); // last of /23
+        // Documentation sits above the /23 and needs its own branch.
+        assert!(!ip_allowed(v6("2001:db8::1")));
+        // The first hextet-pair past the /23 is reachable again.
+        assert!(ip_allowed(v6("2001:200::1"))); // WIDE, a real allocation
+    }
+
+    #[test]
+    fn blocks_discard_dummy_documentation_and_srv6() {
+        // 100::/64 discard-only and 100:0:0:1::/64 dummy prefix.
+        assert!(!ip_allowed(v6("100::1")));
+        assert!(!ip_allowed(v6("100:0:0:1::1")));
+        assert!(ip_allowed(v6("100:0:0:2::1"))); // just past the pair
+        // 3fff::/20 documentation.
+        assert!(!ip_allowed(v6("3fff::1")));
+        assert!(!ip_allowed(v6("3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff")));
+        assert!(ip_allowed(v6("3fff:1000::1"))); // 21st bit set: outside /20
+        assert!(ip_allowed(v6("4000::1")));
+        // 5f00::/16 SRv6 SIDs.
+        assert!(!ip_allowed(v6("5f00::1")));
+        assert!(ip_allowed(v6("5f01::1")));
+        // fec0::/10 deprecated site-local.
+        assert!(!ip_allowed(v6("fec0::1")));
+        assert!(!ip_allowed(v6("feff:ffff::1")));
     }
 }

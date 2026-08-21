@@ -6150,11 +6150,16 @@ impl Page {
         // `net::data::decode` drops for exactly this caller — so an inline
         // decode and one that went over `net` agree byte for byte.
         if let Some(rest) = url.strip_prefix("data:") {
-            match oxidepage_net::data::decode(rest) {
-                Some(body) => {
+            // The per-URL byte cap the fetch pipeline would have applied. This
+            // path skips the pipeline entirely, so the limit has to be fetched
+            // from the policy and passed by hand — an over-cap body is a broken
+            // image, the same answer a malformed one gets.
+            let cap = self.net.policy().max_response_bytes;
+            match oxidepage_net::data::decode(rest, cap) {
+                Ok(body) => {
                     self.finish_image(url, &body.bytes, Some(&body.content_type));
                 }
-                None => self.mark_image_broken(url),
+                Err(_) => self.mark_image_broken(url),
             }
             return;
         }
@@ -6507,8 +6512,13 @@ impl Page {
             // `data:` URLs decode inline (no network), so success or failure is
             // known immediately and a failure falls straight through.
             if let Some(rest) = url.strip_prefix("data:") {
-                let decoded = oxidepage_net::data::decode(rest)
-                    .is_some_and(|body| self.finish_font(frame, family, &body.bytes, attrs));
+                // As in `start_image_load_url`: this path never enters the fetch
+                // pipeline, so the per-URL cap comes from the policy directly.
+                // Over the cap is a source that did not load, which is what the
+                // fallback chain below already handles.
+                let cap = self.net.policy().max_response_bytes;
+                let decoded = oxidepage_net::data::decode(rest, cap)
+                    .is_ok_and(|body| self.finish_font(frame, family, &body.bytes, attrs));
                 if decoded {
                     return;
                 }

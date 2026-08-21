@@ -300,6 +300,90 @@ async fn response_cannot_exceed_remaining_byte_budget() {
     assert!(eng.total_charged_bytes() <= 5000);
 }
 
+/// A `file://` subresource returns above the redirect loop, and therefore above
+/// the loop's budget charging. It is charged explicitly instead (ADR-0038 D1) —
+/// without that, an opted-in local document could pull unbounded local bytes
+/// while the advertised per-page budgets read as enforced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_urls_are_charged_against_the_same_budget_as_http() {
+    let dir = std::env::temp_dir().join(format!("oxidepage-file-budget-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("small.txt");
+    let big = dir.join("big.txt");
+    std::fs::write(&small, vec![b'a'; 4000]).unwrap();
+    std::fs::write(&big, vec![b'b'; 10_000]).unwrap();
+
+    let policy = ResourcePolicy {
+        allow_file: true,
+        file_root: Some(dir.clone()),
+        max_total_bytes: 5000,
+        max_response_bytes: 1_000_000,
+        ..loopback_policy()
+    };
+    let eng = engine_with(policy);
+
+    let file_get = |path: &std::path::Path| NetRequest {
+        method: "GET".to_owned(),
+        url: url::Url::from_file_path(path).unwrap().to_string(),
+        ..NetRequest::default()
+    };
+
+    assert_eq!(eng.total_charged_bytes(), 0);
+    let first = eng.fetch(file_get(&small)).await.unwrap();
+    assert_eq!(first.body.len(), 4000);
+    assert_eq!(
+        eng.total_charged_bytes(),
+        4000,
+        "a local file is charged like any other response"
+    );
+
+    // 10 000 B against the 1000 B that remain: refused by the read cap, and the
+    // reservation refunded, so the counter is left exact.
+    let err = eng.fetch(file_get(&big)).await.unwrap_err();
+    assert_eq!(err.kind, NetErrorKind::Blocked, "detail: {}", err.detail);
+    assert_eq!(
+        eng.total_charged_bytes(),
+        4000,
+        "an over-budget file must never be charged"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The other early return above the redirect loop. `data:` gets the per-URL cap
+/// but deliberately *not* the cumulative counters (ADR-0038 D2), and this pins
+/// both halves — the wiring from `ResourcePolicy` through `fetch_inner` to the
+/// decoder is one line, and it is the line a refactor would drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn data_urls_are_capped_per_url_but_never_charged_cumulatively() {
+    let policy = ResourcePolicy {
+        max_response_bytes: 16,
+        ..loopback_policy()
+    };
+    let eng = engine_with(policy);
+
+    let data = |body: &str| NetRequest {
+        method: "GET".to_owned(),
+        url: format!("data:text/plain,{body}"),
+        ..NetRequest::default()
+    };
+
+    let out = eng.fetch(data("under-the-cap")).await.unwrap();
+    assert_eq!(out.body.as_ref(), b"under-the-cap");
+
+    let err = eng
+        .fetch(data("this-body-is-well-over-sixteen-bytes"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, NetErrorKind::Blocked, "detail: {}", err.detail);
+
+    assert_eq!(
+        eng.total_charged_bytes(),
+        0,
+        "a data: body rides inside a document whose bytes were already charged"
+    );
+}
+
 /// Regression: the engine never emitted an `Origin` header, so a third-party
 /// server could not tell that a cross-origin `POST` was cross-origin — defeating
 /// `Origin`-based CSRF defenses — and CORS servers that require the header broke.

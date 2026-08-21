@@ -12,6 +12,11 @@
 //! loop re-checks `scheme_allowed` on every hop, which is what keeps an
 //! `http:` response redirecting to `data:` a network error, as Fetch requires.
 //!
+//! Returning above the gate also returns above the budget counters, so the one
+//! limit that must travel with the decoder travels as a parameter:
+//! [`decode`] refuses a body over `max_bytes` before allocating for it
+//! (ADR-0038 D2).
+//!
 //! [`ResourcePolicy::scheme_allowed`]: crate::policy::ResourcePolicy::scheme_allowed
 
 use url::{Position, Url};
@@ -32,18 +37,32 @@ pub struct DataBody {
 /// parse (Fetch, data: URL processor step 14).
 const DEFAULT_MIME: &str = "text/plain;charset=US-ASCII";
 
-/// Decodes a whole `data:` URL.
-pub fn load_data(url: &Url) -> NetResult<DataBody> {
+/// Why a `data:` URL produced no body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataError {
+    /// No comma, or a base64 body that is not decodable.
+    Malformed,
+    /// The body is larger than the caller's limit. Reported *before* the body
+    /// is decoded, so nothing proportional to it was ever allocated.
+    TooLarge,
+}
+
+/// Decodes a whole `data:` URL, refusing a body over `max_bytes`.
+pub fn load_data(url: &Url, max_bytes: u64) -> NetResult<DataBody> {
     // Step 2: the serialization with the fragment excluded. A `data:` URL's
     // query is part of its body; its fragment is not.
     let input = url[..Position::AfterQuery]
         .strip_prefix("data:")
         .ok_or_else(|| NetError::invalid_url(format!("not a data: URL: {url}")))?
         .to_owned();
-    decode(&input).ok_or_else(|| NetError::invalid_url(format!("malformed data: URL: {url}")))
+    decode(&input, max_bytes).map_err(|e| match e {
+        DataError::Malformed => NetError::invalid_url(format!("malformed data: URL: {url}")),
+        DataError::TooLarge => NetError::blocked(format!("data: URL exceeds {max_bytes} bytes")),
+    })
 }
 
-/// Decodes the part of a `data:` URL *after* the `data:` prefix.
+/// Decodes the part of a `data:` URL *after* the `data:` prefix, refusing a body
+/// over `max_bytes`.
 ///
 /// Exposed separately because the page's image and `@font-face` paths hold an
 /// already-serialized URL string and decode inline, without entering the fetch
@@ -52,14 +71,33 @@ pub fn load_data(url: &Url) -> NetResult<DataBody> {
 /// — otherwise the two entry points disagree, and they must not: a `#` is not
 /// in the base64 alphabet, so `…;base64,R0lGOD…#x` would decode over the wire
 /// and come back a broken image inline.
-#[must_use]
-pub fn decode(input: &str) -> Option<DataBody> {
+///
+/// `max_bytes` is a required parameter rather than an option with a default:
+/// every entry point here reached the decoder from attacker-controlled markup,
+/// and a limit that can be omitted is one that will be. It bounds *resident
+/// bytes*, not conformance — a `data:` body has no `Content-Length` to lie
+/// about and no stream to cut short, so the only place to refuse is before the
+/// allocation.
+pub fn decode(input: &str, max_bytes: u64) -> Result<DataBody, DataError> {
     // Step 2's "exclude fragment", for callers who did not come through a
     // parsed `Url`. In a *serialized* URL a literal `#` always starts the
     // fragment; a `#` belonging to the body is spelled `%23`.
     let input = input.split_once('#').map_or(input, |(head, _)| head);
     // Steps 5–8: the MIME type runs up to the first comma; no comma is failure.
-    let (mime, encoded_body) = input.split_once(',')?;
+    let (mime, encoded_body) = input.split_once(',').ok_or(DataError::Malformed)?;
+
+    // The cap, checked on the *encoded* length and therefore before the first
+    // allocation proportional to the body. Both transforms below only shrink —
+    // percent-decoding collapses `%XX` triples to one byte, base64 four
+    // characters to three — so the encoded length is a sound upper bound on the
+    // decoded one. It is a loose bound, not an exact one: a heavily
+    // percent-encoded body just under the limit is refused even though its
+    // decoded form would have fitted. That is the trade an
+    // allocate-nothing-first check costs, and it errs toward refusing.
+    if encoded_body.len() as u64 > max_bytes {
+        return Err(DataError::TooLarge);
+    }
+
     // Step 6.
     let mut mime = mime
         .trim_matches(|c: char| c.is_ascii_whitespace())
@@ -75,7 +113,7 @@ pub fn decode(input: &str) -> Option<DataBody> {
     let body = match strip_base64_marker(&mime) {
         Some(rest) => {
             mime = rest.to_owned();
-            forgiving_base64(&body)?
+            forgiving_base64(&body).ok_or(DataError::Malformed)?
         }
         None => body,
     };
@@ -90,7 +128,7 @@ pub fn decode(input: &str) -> Option<DataBody> {
         mime = DEFAULT_MIME.to_owned();
     }
 
-    Some(DataBody {
+    Ok(DataBody {
         bytes: body,
         content_type: mime,
     })
@@ -186,13 +224,19 @@ fn base64_value(b: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// No cap: the limit has its own tests below, and threading one through
+    /// every conformance case would only obscure them.
+    const NO_CAP: u64 = u64::MAX;
+
     fn text(input: &str) -> Option<String> {
-        decode(input).map(|d| String::from_utf8(d.bytes).unwrap())
+        decode(input, NO_CAP)
+            .ok()
+            .map(|d| String::from_utf8(d.bytes).unwrap())
     }
 
     #[test]
     fn plain_body_is_percent_decoded() {
-        let d = decode("text/javascript,d1%20%3D%20'one'%3B").unwrap();
+        let d = decode("text/javascript,d1%20%3D%20'one'%3B", NO_CAP).unwrap();
         assert_eq!(d.bytes, b"d1 = 'one';");
         assert_eq!(d.content_type, "text/javascript");
     }
@@ -201,7 +245,7 @@ mod tests {
     fn base64_body_is_percent_decoded_before_base64() {
         // `Url`'s serializer percent-encodes the `=` padding; decoding base64
         // first would choke on the `%`.
-        let d = decode("text/javascript;base64,ZDIgPSAndHdvJzs%3D").unwrap();
+        let d = decode("text/javascript;base64,ZDIgPSAndHdvJzs%3D", NO_CAP).unwrap();
         assert_eq!(d.bytes, b"d2 = 'two';");
         assert_eq!(d.content_type, "text/javascript");
     }
@@ -210,6 +254,7 @@ mod tests {
     fn fully_percent_encoded_base64_body() {
         let d = decode(
             "text/javascript;base64,%5a%44%4d%67%50%53%41%6e%64%47%68%79%5a%57%55%6e%4f%77%3D%3D",
+            NO_CAP,
         )
         .unwrap();
         assert_eq!(d.bytes, b"d3 = 'three';");
@@ -217,8 +262,11 @@ mod tests {
 
     #[test]
     fn base64_ignores_ascii_whitespace_including_percent_encoded() {
-        let d = decode("text/javascript;base64,%20ZD%20Qg%0D%0APS%20An%20Zm91cic%0D%0A%207%20")
-            .unwrap();
+        let d = decode(
+            "text/javascript;base64,%20ZD%20Qg%0D%0APS%20An%20Zm91cic%0D%0A%207%20",
+            NO_CAP,
+        )
+        .unwrap();
         assert_eq!(d.bytes, b"d4 = 'four';");
     }
 
@@ -230,32 +278,32 @@ mod tests {
 
     #[test]
     fn missing_comma_is_failure() {
-        assert!(decode("text/plain").is_none());
-        assert!(decode("").is_none());
+        assert!(decode("text/plain", NO_CAP).is_err());
+        assert!(decode("", NO_CAP).is_err());
     }
 
     #[test]
     fn empty_mime_takes_the_default() {
-        let d = decode(",hello").unwrap();
+        let d = decode(",hello", NO_CAP).unwrap();
         assert_eq!(d.bytes, b"hello");
         assert_eq!(d.content_type, DEFAULT_MIME);
         // `;base64` alone leaves an empty type behind, which also defaults.
-        let d = decode(";base64,aGk=").unwrap();
+        let d = decode(";base64,aGk=", NO_CAP).unwrap();
         assert_eq!(d.bytes, b"hi");
         assert_eq!(d.content_type, DEFAULT_MIME);
     }
 
     #[test]
     fn leading_semicolon_gains_text_plain() {
-        let d = decode(";charset=utf-8,hi").unwrap();
+        let d = decode(";charset=utf-8,hi", NO_CAP).unwrap();
         assert_eq!(d.content_type, "text/plain;charset=utf-8");
     }
 
     #[test]
     fn mime_parameters_survive() {
-        let d = decode("text/javascript;charset=utf-8,x").unwrap();
+        let d = decode("text/javascript;charset=utf-8,x", NO_CAP).unwrap();
         assert_eq!(d.content_type, "text/javascript;charset=utf-8");
-        let d = decode("text/css;charset=utf-8;base64,YQ==").unwrap();
+        let d = decode("text/css;charset=utf-8;base64,YQ==", NO_CAP).unwrap();
         assert_eq!(d.content_type, "text/css;charset=utf-8");
         assert_eq!(d.bytes, b"a");
     }
@@ -266,7 +314,7 @@ mod tests {
         assert_eq!(text("text/plain; base64,aGk=").unwrap(), "hi");
         // Only a *trailing* `;base64` is a marker; a parameter that merely
         // starts with the word is not, so the body stays literal text.
-        let d = decode("text/plain;base64=1,aGk%3D").unwrap();
+        let d = decode("text/plain;base64=1,aGk%3D", NO_CAP).unwrap();
         assert_eq!(d.bytes, b"aGk=");
         assert_eq!(d.content_type, "text/plain;base64=1");
     }
@@ -274,7 +322,7 @@ mod tests {
     #[test]
     fn multibyte_mime_tail_is_not_sliced() {
         // `strip_base64_marker` must not index into the middle of a char.
-        assert!(decode("текст,hi").is_some());
+        assert!(decode("текст,hi", NO_CAP).is_ok());
     }
 
     #[test]
@@ -283,14 +331,14 @@ mod tests {
         assert_eq!(text("x;base64,aGk").unwrap(), "hi");
         assert_eq!(text("x;base64,aGk=").unwrap(), "hi");
         // A remainder of one is a hard failure.
-        assert!(decode("x;base64,aGkAA").is_none());
+        assert!(decode("x;base64,aGkAA", NO_CAP).is_err());
         // Non-alphabet characters are rejected.
-        assert!(decode("x;base64,a*k=").is_none());
+        assert!(decode("x;base64,a*k=", NO_CAP).is_err());
     }
 
     #[test]
     fn binary_body_round_trips() {
-        let d = decode("image/png;base64,iVBORw0KGgo=").unwrap();
+        let d = decode("image/png;base64,iVBORw0KGgo=", NO_CAP).unwrap();
         assert_eq!(d.bytes, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
         assert_eq!(d.content_type, "image/png");
     }
@@ -309,8 +357,8 @@ mod tests {
         // The two entry points agree, which is what the callers rely on.
         let url = Url::parse("data:text/plain;base64,aGk=#frag").unwrap();
         assert_eq!(
-            load_data(&url).unwrap(),
-            decode("text/plain;base64,aGk=#frag").unwrap()
+            load_data(&url, NO_CAP).unwrap(),
+            decode("text/plain;base64,aGk=#frag", NO_CAP).unwrap()
         );
     }
 
@@ -318,12 +366,50 @@ mod tests {
     fn load_data_keeps_the_query_and_drops_the_fragment() {
         // A `data:` URL's query is body; its fragment is not.
         let url = Url::parse("data:text/plain,a?b#c").unwrap();
-        assert_eq!(load_data(&url).unwrap().bytes, b"a?b");
+        assert_eq!(load_data(&url, NO_CAP).unwrap().bytes, b"a?b");
     }
 
     #[test]
     fn load_data_rejects_a_malformed_url() {
         let url = Url::parse("data:text/plain").unwrap();
-        assert!(load_data(&url).is_err());
+        assert!(load_data(&url, NO_CAP).is_err());
+    }
+
+    #[test]
+    fn a_body_over_the_cap_is_refused() {
+        // The cap counts the *encoded* body, not the MIME type before the comma.
+        assert_eq!(decode("text/plain,hello", 5).unwrap().bytes, b"hello");
+        assert_eq!(decode("text/plain,hello", 4), Err(DataError::TooLarge));
+        // Zero admits only an empty body.
+        assert_eq!(decode("text/plain,", 0).unwrap().bytes, b"");
+        assert_eq!(decode("text/plain,x", 0), Err(DataError::TooLarge));
+        // A base64 body is measured before it is decoded — 8 encoded characters
+        // for 6 decoded bytes, and it is the 8 that is compared.
+        assert_eq!(decode("x;base64,aGVsbG8h", 8).unwrap().bytes, b"hello!");
+        assert_eq!(decode("x;base64,aGVsbG8h", 7), Err(DataError::TooLarge));
+    }
+
+    /// The over-cap refusal must not depend on the body being decodable, which
+    /// is what shows the check runs before any work proportional to it.
+    #[test]
+    fn the_cap_is_checked_before_decoding() {
+        // Malformed base64 (remainder of one) *and* over the cap: TooLarge wins,
+        // because the decoder never ran.
+        assert_eq!(decode("x;base64,aGkAA", 4), Err(DataError::TooLarge));
+        // Under the cap, the same input reaches the decoder and is malformed.
+        assert_eq!(decode("x;base64,aGkAA", 64), Err(DataError::Malformed));
+    }
+
+    #[test]
+    fn load_data_reports_an_over_cap_body_as_blocked() {
+        let url = Url::parse("data:text/plain,hello").unwrap();
+        let err = load_data(&url, 4).unwrap_err();
+        assert_eq!(err.kind, oxidepage_base::NetErrorKind::Blocked);
+        // A malformed one stays an invalid-URL error, not a budget refusal.
+        let url = Url::parse("data:text/plain").unwrap();
+        assert_ne!(
+            load_data(&url, NO_CAP).unwrap_err().kind,
+            oxidepage_base::NetErrorKind::Blocked
+        );
     }
 }

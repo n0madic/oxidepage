@@ -299,13 +299,28 @@ impl PageHandle {
         T: Send + 'static,
     {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        // Abandoning the wait must abandon the work, or [`EngineError::Timeout`]
+        // means only "no answer yet" and the command lands later, at a moment
+        // nothing is expecting it. The queue is unbounded and stays that way
+        // (`send` may never block — see [`PageHandle::send`]), so a timed-out
+        // job is not removed from it; it is *neutered*, and drains as a no-op on
+        // the next turn of the loop.
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&abandoned);
         let job: BoxedWork = Box::new(move |page| {
+            // Checked once, before `f` runs. A job already past this point runs
+            // to completion: cancelling mid-`f` is what would leave the page
+            // half-mutated, which is the state this whole contract exists to
+            // rule out.
+            if flag.load(Ordering::Acquire) {
+                return;
+            }
             let _ = reply_tx.send(f(page));
         });
         self.send(wrap(job))?;
         match reply_rx.recv_timeout(timeout) {
             Ok(value) => Ok(value),
-            Err(RecvTimeoutError::Timeout) => Err(EngineError::Timeout),
+            Err(RecvTimeoutError::Timeout) => abandon(&abandoned, &reply_rx),
             // The reply sender was dropped without answering: the thread died
             // under the job. A panic leaves a message behind.
             Err(RecvTimeoutError::Disconnected) => Err(self.gone()),
@@ -328,6 +343,10 @@ impl PageHandle {
     }
 
     /// Posts work without waiting for it. Errors only if the page is gone.
+    ///
+    /// No cancellation counterpart to [`PageHandle::call_within`]'s: a caller
+    /// that never waited never gave up waiting, and a posted job carries no
+    /// deadline to miss.
     pub fn post<F>(&self, f: F) -> EngineResult<()>
     where
         F: FnOnce(&Page) + Send + 'static,
@@ -1093,6 +1112,22 @@ impl PageHandle {
     }
 }
 
+/// The post-timeout half of [`PageHandle::call_within`]: raise the abandoned
+/// flag, then answer.
+///
+/// A free function because the race it settles has no seam to test through in
+/// place — there is no hook between `recv_timeout` giving up and this running.
+///
+/// The two orderings here cannot be made to agree, and the tie goes to the
+/// reply. The job may have passed its flag check and answered in the window
+/// between the wait expiring and the flag going up; reporting `Timeout` then
+/// would be a lie about work that is finished and whose result is in hand. So
+/// `try_recv` runs *after* the store and a value, if there is one, wins.
+fn abandon<T>(flag: &AtomicBool, reply_rx: &Receiver<T>) -> EngineResult<T> {
+    flag.store(true, Ordering::Release);
+    reply_rx.try_recv().map_err(|_| EngineError::Timeout)
+}
+
 /// Spawns a page thread and blocks until its `Page` is built, so a construction
 /// failure is an ordinary `Result` rather than a panic on a thread nobody is
 /// watching.
@@ -1364,4 +1399,40 @@ fn run_page_thread(
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     oxidepage_page::panic_message(payload, "page thread panicked")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The benign half of the timeout race: the job answered in the window
+    /// between the wait expiring and the flag going up. There is no seam to
+    /// reach that window through `call_within`, so it is staged directly —
+    /// a reply already sitting in the channel when `abandon` runs.
+    #[test]
+    fn a_reply_that_arrived_in_the_race_window_beats_the_timeout() {
+        let flag = AtomicBool::new(false);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(42_u32).unwrap();
+
+        assert_eq!(abandon(&flag, &rx), Ok(42));
+        assert!(
+            flag.load(Ordering::Acquire),
+            "the flag is raised either way — a later job must still be cancelled"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_wait_is_a_timeout_and_cancels() {
+        let flag = AtomicBool::new(false);
+        // `_tx` stays alive: dropping it would make the channel *disconnected*,
+        // a different case that `call_within` handles before ever getting here.
+        let (_tx, rx) = crossbeam_channel::bounded::<u32>(1);
+
+        assert_eq!(abandon(&flag, &rx), Err(EngineError::Timeout));
+        assert!(
+            flag.load(Ordering::Acquire),
+            "the job must see the cancellation when it eventually drains"
+        );
+    }
 }
