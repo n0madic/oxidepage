@@ -48,6 +48,7 @@ pub(crate) mod history;
 pub(crate) mod html_anchor_element;
 pub(crate) mod html_area_element;
 pub(crate) mod html_button_element;
+pub(crate) mod html_canvas_element;
 pub(crate) mod html_collection;
 pub(crate) mod html_element;
 pub(crate) mod html_field_set_element;

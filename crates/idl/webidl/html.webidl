@@ -216,7 +216,12 @@ interface HTMLIFrameElement : HTMLElement {
   readonly attribute Document? contentDocument;
   readonly attribute WindowProxy? contentWindow;
 };
-interface HTMLCanvasElement : HTMLElement {};
+interface HTMLCanvasElement : HTMLElement {
+  // No rendering context (2d/webgl) is implemented; per the HTML spec the
+  // method must exist and returns null for an unsupported contextId, which
+  // lets pages take their graceful-degradation path instead of throwing.
+  any getContext(DOMString contextId, optional any options);
+};
 interface HTMLPictureElement : HTMLElement {};
 interface HTMLSourceElement : HTMLElement {};
 interface HTMLMediaElement : HTMLElement {};

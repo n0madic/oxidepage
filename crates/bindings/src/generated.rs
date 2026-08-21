@@ -3547,6 +3547,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
 
     let proto_html_canvas_element = cx.begin_interface("HTMLCanvasElement", Some("HTMLElement"))?;
+    cx.define_method(
+        &proto_html_canvas_element,
+        "getContext",
+        1,
+        gen_html_canvas_element_get_context,
+    )?;
     cx.finish_interface(
         "HTMLCanvasElement",
         &proto_html_canvas_element,
@@ -12254,6 +12260,16 @@ fn gen_htmli_frame_element_get_content_window(
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
     imp::htmli_frame_element::content_window(cx, this)
+}
+
+fn gen_html_canvas_element_get_context(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = call.arg(1);
+    imp::html_canvas_element::get_context(cx, this, a0, a1)
 }
 
 fn gen_html_slot_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

@@ -3760,3 +3760,26 @@ fn unqualified_event_target_calls_receive_the_window_as_receiver() {
            return count === 1; })()"
     ));
 }
+
+// === HTMLCanvasElement.getContext ===
+
+/// No rendering context is implemented, so `getContext` must answer `null` for
+/// every contextId — the spec's "not supported" answer, which is what pages'
+/// feature-detection idioms (`getContext('webgl') || …`) branch on. The method
+/// itself must exist: an absent member would throw `TypeError` and kill the
+/// page's own try/catch fallback (whatismybrowser's WebGL probe did exactly
+/// that).
+#[test]
+fn canvas_get_context_returns_null_for_unsupported_contexts() {
+    let h = Harness::new(PAGE);
+    assert!(h.eval_bool("typeof document.createElement('canvas').getContext === 'function'"));
+    assert!(h.eval_bool("document.createElement('canvas').getContext('2d') === null"));
+    assert!(h.eval_bool("document.createElement('canvas').getContext('webgl') === null"));
+    // The one-argument call is the common form; the optional options argument
+    // must not be required.
+    assert!(h.eval_bool(
+        "(() => { const c = document.createElement('canvas'); \
+           try { return c.getContext('webgl', { antialias: true }) === null; } \
+           catch (e) { return false; } })()"
+    ));
+}
