@@ -93,7 +93,7 @@ skrifa = { version = "0.42", default-features = false, features = ["std"] }
 # fonts for PDF embedding.
 wuff = "0.2"
 subsetter = { version = "0.2", default-features = false }
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # Paint / raster / PDF (Phase 6, ADR-0007). tiny-skia is the CPU rasterizer;
 # `image` decodes raster formats (SVG behind the optional `resvg` dep, gated by
