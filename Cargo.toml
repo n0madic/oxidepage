@@ -91,7 +91,7 @@ stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "406a57149152
 # goldens, reftests, Puppeteer and Playwright all green. So **bump to 0.11.2 as
 # soon as it is published**; the gate is still a full `xtask wpt` run with no
 # HANG/CRASH, since the loop is bounded only by the runner's 45 s budget.
-parley = { version = "=0.10.0", default-features = false, features = ["std"] }
+parley = { version = "=0.11.1", default-features = false, features = ["std"] }
 # Deliberately ahead of the skrifa parley pulls in (0.42.1), so the lockfile
 # carries two skrifa/read-fonts/font-types stacks. Nothing crosses between
 # them — we hand parley `&[u8]` blobs and parse them ourselves, so a version
