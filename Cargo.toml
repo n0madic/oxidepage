@@ -114,7 +114,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 tiny-skia = "0.12"
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
-resvg = { version = "0.47", default-features = false }
+resvg = { version = "0.48", default-features = false }
 pdf-writer = "0.15"
 
 # Network stack (Phase 3): async runtime, HTTP client, TLS, cookies, cache.
