@@ -31,7 +31,7 @@ jobs:
       # fontconfig on Linux, and the runner image ships no `fontconfig.pc`.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -63,7 +63,7 @@ jobs:
       - name: Fontconfig headers
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build
         run: cargo build --workspace --all-targets
       - name: Test
@@ -92,7 +92,7 @@ jobs:
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Release build: each test runs in its own subprocess (via current_exe),
       # so a release xtask runs the JS/style engine at full speed, and the
       # runner fans the subprocesses out across all cores.
@@ -120,7 +120,7 @@ jobs:
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Release for the same reason the WPT job is: this drives the whole engine
       # through a real driver, and a debug build turns minutes into tens of them.
       # Fixtures are served from loopback; CI never touches the internet.
@@ -154,7 +154,7 @@ jobs:
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Release for the same reason the Puppeteer job is: this drives the whole
       # engine through a real driver, and a debug build turns minutes into tens
       # of them. Fixtures are served from loopback; CI never touches the
@@ -172,7 +172,7 @@ jobs:
           toolchain: stable
       # No project build here: `cargo audit` reads `Cargo.lock`, so this job
       # needs neither python3 nor fontconfig and finishes in seconds.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       # Fails on any RustSec advisory affecting the locked dependency graph.
@@ -200,7 +200,7 @@ jobs:
       # See the lint job: the system font source needs fontconfig on Linux.
       - name: Fontconfig headers
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # `check`, not `test`: this job answers "does the declared MSRV compile
       # the workspace", and the behavior itself is covered on stable across
       # three platforms. `--all-targets` so tests and benches are checked too.
