@@ -63,13 +63,16 @@ fn set_discover_targets(connection: &Arc<Connection>, request: &Request) -> Comm
     // that connects to a running browser sees the same stream as one that was
     // watching from the start. Without this, `puppeteer.connect()` to a browser
     // with open pages finds none of them.
+    //
+    // Through the connection's once-per-target record: a target created just
+    // before this command may still have its `Created` signal in flight, and
+    // reporting it here *and* there would announce it twice.
     if params.discover && !was_on {
         for info in connection.registry.infos() {
-            connection.emit(crate::message::Event::browser(
-                "Target.targetCreated",
-                serde_json::json!({ "targetInfo": info }),
-            ));
+            connection.announce_created(&info);
         }
+    } else if !params.discover && was_on {
+        connection.forget_announcements();
     }
     Ok(serde_json::json!({}))
 }
@@ -105,9 +108,7 @@ fn set_auto_attach(connection: &Arc<Connection>, request: &Request) -> CommandRe
 
     if params.auto_attach && !was_on {
         for info in connection.registry.infos() {
-            if connection.sessions_for(&info.target_id).is_empty() {
-                connection.attach(&info.target_id)?;
-            }
+            connection.auto_attach_existing(&info.target_id)?;
         }
     }
     Ok(serde_json::json!({}))
