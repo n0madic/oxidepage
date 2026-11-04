@@ -109,7 +109,7 @@ fn native_inner(f: NativeFn, ce: bool) -> HostFn {
             // before the script resumes, so `contentDocument` and
             // `contentWindow` answer on the next line (ADR-0045). After the
             // reactions: a `connectedCallback` may insert one too.
-            if cx.state.dom.borrow().has_pending_frame_connect() {
+            if cx.state.dom.borrow().take_frame_connect_signal() {
                 cx.state.frame.global.attach_connected_frames();
             }
             // Apply wrapper retention for nodes this call connected/disconnected

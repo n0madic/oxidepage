@@ -36,9 +36,12 @@ to reach the page from that point.
    `FrameHost` trait with a single method, `attach_connected_frames`. Its
    `PageGlobal` holds a `Weak<dyn FrameHost>`, for the same cycle reason as
    `WorldEnter`. After a successful host call, the trampoline calls it when
-   `DomTree::has_pending_frame_connect` says an `<iframe>` was connected. It
-   makes that call after the custom element reactions, so an `<iframe>` a
-   `connectedCallback` inserted is included.
+   `DomTree::take_frame_connect_signal` says an `<iframe>` was connected since
+   the last check. The signal is a flag raised by each queued `Connected`, so
+   the gate is O(1) and fires once per insertion rather than on every later
+   DOM call of the task. The trampoline makes that call after the custom
+   element reactions, so an `<iframe>` a `connectedCallback` inserted is
+   included.
 
 2. **The page is found through a scoped thread-local.**
    - `ENTERED_PAGE` is set for the extent of every `Page::with_cx` and
@@ -59,10 +62,14 @@ to reach the page from that point.
      still in the queue through the ordinary `attach_child_frame`: the same
      document, engines, realm, sandbox flags, init scripts and `Attached`
      event as the task path.
-   - It records each such `<iframe>` in `attached_early`. The queued
-     `Connected` entry stays put, and its drain finds the context already
-     there and owes only the initial navigation to `src`/`srcdoc` and the pin
-     release.
+   - It records each `<iframe>` it tried in `attached_early`, with whether the
+     context was built. The queued `Connected` entry stays put, and its drain
+     finds the context already there and owes only the initial navigation to
+     `src`/`srcdoc` and the pin release.
+   - A refused attempt (the frame cap) is not retried by later host calls, so
+     the refusal is reported once, not once per DOM call. The drain makes the
+     one ordinary attempt. A top-level navigation clears the record along
+     with the arena whose queue it describes.
    - The navigation remains a task, and so does the `load` an `<iframe>`
      without `src` fires, exactly as ADR-0035 had them.
 

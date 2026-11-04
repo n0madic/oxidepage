@@ -267,6 +267,10 @@ pub struct DomTree {
     /// drained by the page to create or discard nested browsing contexts
     /// (ADR-0035). Entries **pin** their node, like `image_updates`.
     frame_updates: Vec<FrameUpdate>,
+    /// Raised whenever an `<iframe>` is reported connected, lowered by the one
+    /// reader that creates contexts early (ADR-0045). A `Cell` so the reader
+    /// can lower it through a shared borrow on every host call.
+    frame_connect_signal: Cell<bool>,
     /// Monotonic counter bumped on every style-relevant DOM mutation (all funnel
     /// through `note_children_changed`/`note_subtree_mutation`). Lets CSSOM views
     /// cache resolved values and invalidate them exactly when the DOM changes.
@@ -384,6 +388,7 @@ impl DomTree {
             image_updates: Vec::new(),
             script_updates: Vec::new(),
             frame_updates: Vec::new(),
+            frame_connect_signal: Cell::new(false),
             style_version: Cell::new(0),
             structure_version: Cell::new(0),
             base_url_cache: RefCell::new(None),
@@ -655,13 +660,12 @@ impl DomTree {
         std::mem::take(&mut self.frame_updates)
     }
 
-    /// Whether an `<iframe>` was reported connected and not yet drained: the
-    /// cheap gate in front of creating its context synchronously.
-    #[must_use]
-    pub fn has_pending_frame_connect(&self) -> bool {
-        self.frame_updates
-            .iter()
-            .any(|u| matches!(u, FrameUpdate::Connected(_)))
+    /// Whether an `<iframe>` was reported connected since the last call, and
+    /// lowers the signal: the O(1) gate in front of creating contexts early,
+    /// so a task that inserted one frame does not rescan the queue on every
+    /// later DOM call.
+    pub fn take_frame_connect_signal(&self) -> bool {
+        self.frame_connect_signal.replace(false)
     }
 
     /// The `<iframe>`s reported connected and not yet drained, in queue order.
@@ -685,6 +689,9 @@ impl DomTree {
     /// can free it before the page's next turn, and the page has to reach the
     /// element to find which browsing context to discard.
     fn push_frame_update(&mut self, update: FrameUpdate) {
+        if matches!(update, FrameUpdate::Connected(_)) {
+            self.frame_connect_signal.set(true);
+        }
         self.pin(update.node());
         self.frame_updates.push(update);
     }

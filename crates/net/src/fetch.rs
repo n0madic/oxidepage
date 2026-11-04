@@ -432,6 +432,17 @@ pub struct ResponseHead {
     pub timing_allow_origin: Option<String>,
 }
 
+/// [`timing_allow_origin_of`] over a `HeaderMap`, reading only that field
+/// rather than copying the whole header block. A non-UTF-8 value is skipped.
+fn timing_allow_origin_in(headers: &HeaderMap) -> Option<String> {
+    let values: Vec<&str> = headers
+        .get_all("timing-allow-origin")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    (!values.is_empty()).then(|| values.join(", "))
+}
+
 /// Every `Timing-Allow-Origin` field of `headers`, combined into one list the
 /// way HTTP merges a repeated list header; `None` when there is none.
 #[must_use]
@@ -950,7 +961,7 @@ impl FetchEngine {
                 headers: response_headers,
                 redirected,
                 response_type,
-                timing_allow_origin: timing_allow_origin_of(&header_pairs(&parts.headers)),
+                timing_allow_origin: timing_allow_origin_in(&parts.headers),
             };
             return Ok(FetchOutcome {
                 head,
@@ -1616,7 +1627,7 @@ fn cached_outcome(cached: crate::cache::CachedResponse, url: &Url) -> FetchOutco
             headers: header_pairs(&cached.headers),
             redirected: false,
             response_type: ResponseType::Basic,
-            timing_allow_origin: timing_allow_origin_of(&header_pairs(&cached.headers)),
+            timing_allow_origin: timing_allow_origin_in(&cached.headers),
         },
         body: cached.body,
     }

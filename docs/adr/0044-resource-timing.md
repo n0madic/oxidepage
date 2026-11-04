@@ -36,6 +36,11 @@ blocking `@import` fetches appear in it too.
    The page installs a `TimingSink` that appends each entry to that context's
    `FrameShared` log. The sink resolves the context by the request's frame
    tag, and an untagged request belongs to the top-level context.
+   - Every subresource fetch must therefore name its context. That includes
+     the blocking ones: parser-blocking scripts, `@import` and a frame
+     realm's module loads.
+   - An untagged fetch from a frame would show a cross-origin frame's
+     subresource URLs in its parent's timeline.
    - The log is bounded to 1024 entries, oldest first out.
    - Every entry carries a sequence number.
    - Each world's `performance` pulls the entries past its own cursor

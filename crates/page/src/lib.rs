@@ -1603,6 +1603,9 @@ struct PendingFont {
 struct PageCssFetcher {
     net: Rc<NetService>,
     doc_url: String,
+    /// The context whose sheet is importing, so the fetch is that frame's —
+    /// in its Resource Timing timeline and nobody else's (ADR-0044).
+    frame: oxidepage_base::FrameId,
 }
 
 impl CssFetcher for PageCssFetcher {
@@ -1611,7 +1614,8 @@ impl CssFetcher for PageCssFetcher {
             .net
             .fetch_blocking(
                 NetRequest::subresource(url.as_str(), self.doc_url.clone())
-                    .of_type(ResourceType::Stylesheet),
+                    .of_type(ResourceType::Stylesheet)
+                    .in_frame(self.frame),
             )
             .map_err(|e| e.to_string())?;
         if out.head.status >= 400 {
@@ -1631,6 +1635,9 @@ struct ModuleLoader {
     net: Rc<NetService>,
     /// The current document, read for the initiator/referrer of a module load.
     dom: Rc<RefCell<DomTree>>,
+    /// The context this realm belongs to, which every load is tagged with
+    /// (ADR-0044): an untagged fetch would count as the top-level document's.
+    frame: oxidepage_base::FrameId,
 }
 
 impl ModuleSource for ModuleLoader {
@@ -1649,7 +1656,7 @@ impl ModuleSource for ModuleLoader {
         let doc_url = self.dom.borrow().document_url().to_owned();
         let out = self
             .net
-            .fetch_blocking(NetRequest::module(url, doc_url))
+            .fetch_blocking(NetRequest::module(url, doc_url).in_frame(self.frame))
             .map_err(|e| e.to_string())?;
         if out.head.status >= 400 {
             return Err(format!("module `{url}`: HTTP {}", out.head.status));
@@ -1692,10 +1699,13 @@ pub struct Page {
     /// the task drain: building it then and there would announce the child
     /// to a driver before its parent.
     attaching_frame: Cell<bool>,
-    /// `<iframe>`s whose context a host call created ahead of the queued
-    /// [`oxidepage_dom::FrameUpdate::Connected`]. That entry still owes the
-    /// initial navigation, which stays a task.
-    attached_early: RefCell<HashSet<NodeId>>,
+    /// `<iframe>`s a host call already tried to give a context ahead of the
+    /// queued [`oxidepage_dom::FrameUpdate::Connected`], and whether it did.
+    /// `true`: that entry owes only the initial navigation, which stays a
+    /// task. `false`: refused (the frame cap), and not retried — nor
+    /// re-reported — on every later host call of the task; the drain makes
+    /// the one ordinary attempt.
+    attached_early: RefCell<HashMap<NodeId, bool>>,
     worlds: Rc<worlds::WorldTable>,
     net: Rc<NetService>,
     net_rx: Receiver<NetEvent>,
@@ -2101,9 +2111,10 @@ impl Page {
         let net = Rc::new(net);
         hooks.set_net(Rc::clone(&net));
         // Resource Timing (ADR-0044): each completed fetch goes to the context
-        // that started it. A request no context named is the top-level
-        // document's (a blocking module or `@import` fetch, which is untagged);
-        // one whose context has since been detached is dropped with it.
+        // that started it. Every subresource fetch names its context, so an
+        // untagged request is the top-level document's own (its deferred
+        // module scripts); one whose context has since been detached is
+        // dropped with it.
         // **Weak**: `net` outlives the frame table in drop order.
         {
             let frames = Rc::downgrade(&frames);
@@ -2123,6 +2134,7 @@ impl Page {
             world.realm().set_module_loader(Rc::new(ModuleLoader {
                 net: Rc::clone(&net),
                 dom: Rc::clone(&state.dom),
+                frame: oxidepage_base::MAIN_FRAME,
             }));
         }
 
@@ -2138,7 +2150,7 @@ impl Page {
             frames,
             _frame_host: frame_host,
             attaching_frame: Cell::new(false),
-            attached_early: RefCell::new(HashSet::new()),
+            attached_early: RefCell::new(HashMap::new()),
             worlds: world_table,
             net,
             net_rx,
@@ -3565,6 +3577,9 @@ impl Page {
         // name a freed document, and this runs before anything below can start
         // a load into one.
         self.discard_frames(self.frames.detach_nested());
+        // The replaced arena takes its frame queue with it, so no drain will
+        // ever settle what a host call recorded against it (ADR-0045).
+        self.attached_early.borrow_mut().clear();
         // The outgoing top-level document's blob URLs die with it (ADR-0042).
         // The new document was fetched before this runs, so a navigation *to*
         // one of them has already resolved it.
@@ -3995,10 +4010,14 @@ impl Page {
             || self.state.dom.borrow().document_url().to_owned(),
             |node| self.document_url_for(node),
         );
-        match self
-            .net
-            .fetch_blocking(NetRequest::subresource(url, doc_url).of_type(ResourceType::Script))
-        {
+        let request = NetRequest::subresource(url, doc_url).of_type(ResourceType::Script);
+        // The frame the `<script>` is in, so the fetch is reported as that
+        // frame's (ADR-0044) rather than the top-level document's.
+        let request = match node {
+            Some(node) => self.tag_frame(request, node),
+            None => request,
+        };
+        match self.net.fetch_blocking(request) {
             Ok(out) if out.head.status < 400 => {
                 let ct = header_content_type(&out.head.headers);
                 let source = decode_charset(&out.body, ct.as_deref());
@@ -5674,8 +5693,8 @@ impl Page {
                     // turn, in that order.
                     // Or already given one by the host call that inserted it
                     // (ADR-0045), in which case only the navigation is owed.
-                    let attached = self.attach_child_frame(owner)
-                        || self.attached_early.borrow_mut().remove(&owner);
+                    let early = self.attached_early.borrow_mut().remove(&owner);
+                    let attached = early == Some(true) || self.attach_child_frame(owner);
                     if attached {
                         navigated.insert(owner);
                     }
@@ -5737,14 +5756,20 @@ impl Page {
         }
         let owners = self.state.dom.borrow().pending_frame_connects();
         for owner in owners {
+            if self.attached_early.borrow().contains_key(&owner) {
+                continue;
+            }
             let connected = self
                 .state
                 .dom
                 .borrow()
                 .get(owner)
                 .is_some_and(oxidepage_dom::node::Node::is_connected);
-            if connected && self.attach_child_frame(owner) {
-                self.attached_early.borrow_mut().insert(owner);
+            // Not connected any more: its own `Disconnected` follows in the
+            // queue, and a reinsertion raises the signal again.
+            if connected {
+                let attached = self.attach_child_frame(owner);
+                self.attached_early.borrow_mut().insert(owner, attached);
             }
         }
     }
@@ -5881,6 +5906,7 @@ impl Page {
         realm.set_module_loader(Rc::new(ModuleLoader {
             net: Rc::clone(&self.net),
             dom: Rc::clone(&self.state.dom),
+            frame: frame.id(),
         }));
         // A fresh id, not `MAIN_WORLD`: world ids are unique page-wide because
         // the table is flat, and id 0 is the *top-level* frame's default world
@@ -7136,7 +7162,17 @@ impl Page {
     /// `<style>` sheets and starts fetches for `<link rel=stylesheet>`.
     fn drain_style_updates(&self) {
         let updates = self.state.dom.borrow_mut().take_style_updates();
+        // A `<style>` queues an update when it is inserted and another when its
+        // text arrives, usually in the same batch. Re-parsing reads the current
+        // text, so the second parse can only repeat the first — and a parse is
+        // where an `@import` is fetched, so it fetched twice.
+        let mut parsed: HashSet<NodeId> = HashSet::new();
         for update in updates {
+            if let StyleUpdate::StyleElement(node) = update
+                && !parsed.insert(node)
+            {
+                continue;
+            }
             // The queue is tree-wide because the arena is; each entry belongs
             // to the engine of the frame that renders its node document
             // (ADR-0035 D1). An entry whose node has been freed, or whose
@@ -7189,6 +7225,7 @@ impl Page {
         let fetcher = PageCssFetcher {
             net: Rc::clone(&self.net),
             doc_url,
+            frame: frame.id(),
         };
         let style = &frame.shared().style;
         let loader = BlockingImportLoader::new(
@@ -7313,6 +7350,7 @@ impl Page {
         let fetcher = PageCssFetcher {
             net: Rc::clone(&self.net),
             doc_url,
+            frame: frame.id(),
         };
         let style = &frame.shared().style;
         let engine = style.borrow();
@@ -7409,6 +7447,7 @@ impl Page {
         let fetcher = PageCssFetcher {
             net: Rc::clone(&self.net),
             doc_url,
+            frame: frame.id(),
         };
         let style = &frame.shared().style;
         let engine = style.borrow();
@@ -7610,6 +7649,7 @@ impl Page {
         realm.set_module_loader(Rc::new(ModuleLoader {
             net: Rc::clone(&self.net),
             dom: Rc::clone(&self.state.dom),
+            frame,
         }));
         let id = self.worlds.next_id();
         let state = oxidepage_bindings::install_world(&realm, &shared, id, name)

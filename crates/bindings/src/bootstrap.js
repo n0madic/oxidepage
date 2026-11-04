@@ -815,9 +815,17 @@
             // Every entry's state, keyed by the entry object: the getters read
             // it, so a page cannot forge an entry by writing own properties.
             const slots = new WeakMapCtor();
+            // The entry type each subclass's members require: a getter of
+            // `PerformanceResourceTiming` called on a mark is an illegal
+            // invocation, not `undefined`.
+            const BRANDS = {
+                PerformanceMark: "mark",
+                PerformanceMeasure: "measure",
+                PerformanceResourceTiming: "resource",
+            };
             const slotOf = (entry, what) => {
                 const s = weakMapGet.call(slots, entry);
-                if (s === undefined) {
+                if (s === undefined || (what in BRANDS && s.entryType !== BRANDS[what])) {
                     throw new TypeError("Illegal invocation: not a " + what);
                 }
                 return s;
@@ -1038,6 +1046,10 @@
                 });
             };
             defMethod("mark", function mark(name, options) {
+                if (arguments.length < 1) {
+                    throw new TypeError("Failed to execute 'mark' on 'Performance': "
+                        + "1 argument required, but only 0 present.");
+                }
                 maybeReset();
                 const entry = new PerformanceMark(name, options);
                 userEntries.push(entry);
@@ -1045,6 +1057,10 @@
                 return entry;
             });
             defMethod("measure", function measure(name, startOrOptions, endMark) {
+                if (arguments.length < 1) {
+                    throw new TypeError("Failed to execute 'measure' on 'Performance': "
+                        + "1 argument required, but only 0 present.");
+                }
                 maybeReset();
                 let startTime = 0;
                 let endTime = performance.now();
@@ -1106,8 +1122,9 @@
                     throw new TypeError("Failed to execute 'setResourceTimingBufferSize' on "
                         + "'Performance': 1 argument required, but only 0 present.");
                 }
-                const n = Number(maxSize);
-                resourceLimit = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) >>> 0 : 0;
+                // WebIDL `unsigned long`: ToUint32, so -1 wraps to 2^32 - 1
+                // and a non-finite value is 0.
+                resourceLimit = Number(maxSize) >>> 0;
             });
         }
 

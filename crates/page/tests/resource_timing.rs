@@ -80,6 +80,23 @@ fn this_origin(path: &str, peer: u16) -> Vec<u8> {
             ),
         ),
         "/data.json" => resp("application/json", "", "{\"a\":1}"),
+        "/framed" => resp(
+            "text/html",
+            "",
+            "<!doctype html><script src=/frame.js></script>\
+             <style>@import url(/imported.css);</style>",
+        ),
+        "/frame.js" => resp("text/javascript", "", "window.ran = true;"),
+        "/top-import" => resp(
+            "text/html",
+            "",
+            "<!doctype html><style>@import url(/imported.css);</style>",
+        ),
+        "/with-frame" => resp(
+            "text/html",
+            "",
+            "<!doctype html><iframe src=/framed></iframe>",
+        ),
         _ => resp("text/css", "", "div { color: red }"),
     }
 }
@@ -170,5 +187,99 @@ fn fetch_entries_arrive_and_the_buffer_obeys_its_controls() {
         page.eval_to_string("String(performance.getEntriesByType('resource').length)")
             .unwrap(),
         "0"
+    );
+}
+
+#[test]
+fn a_frames_fetches_are_its_own_and_not_its_parents() {
+    // The frame's parser-blocking script and its `@import` are fetched on the
+    // blocking path; each must land in the frame's timeline only.
+    let port = spawn_server(this_origin, 0);
+    let page = Page::new(PageOptions {
+        policy: Some(ResourcePolicy::permissive_localhost()),
+        ..PageOptions::default()
+    })
+    .unwrap();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/with-frame"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    let names = "performance.getEntriesByType('resource')\
+                 .map(e => e.name.split('/').pop()).sort().join()";
+    assert_eq!(page.eval_to_string(names).unwrap(), "");
+    let tree = page.frame_tree();
+    let child = tree[1].context_id.expect("the frame has a realm");
+    let result = page
+        .evaluate_in(
+            Some(child),
+            names,
+            &oxidepage_page::EvaluateOptions::default(),
+        )
+        .expect("the context exists")
+        .expect_done();
+    assert_eq!(
+        result
+            .result
+            .value_json
+            .unwrap_or_default()
+            .trim_matches('"'),
+        "frame.js,imported.css"
+    );
+}
+
+#[test]
+fn the_buffer_size_is_an_unsigned_long_and_entries_are_branded() {
+    let port = spawn_server(this_origin, 0);
+    let page = page_at(port);
+    assert_eq!(
+        page.eval_to_string(
+            "const kind = f => { try { f(); return 'ok'; } catch (e) { return e.name; } };\
+             performance.setResourceTimingBufferSize(-1);\
+             const keeps = performance.getEntriesByType('resource').length > 0;\
+             const get = Object.getOwnPropertyDescriptor(\
+               PerformanceResourceTiming.prototype, 'initiatorType').get;\
+             [keeps, kind(() => get.call(performance.mark('m'))),\
+              kind(() => performance.mark()), kind(() => performance.measure())].join()"
+        )
+        .unwrap(),
+        "true,TypeError,TypeError,TypeError"
+    );
+}
+
+#[test]
+fn an_inline_style_import_is_fetched_once() {
+    // A `<style>` queues one update on insertion and one when its text
+    // arrives; parsing it twice fetched its `@import` twice.
+    let port = spawn_server(this_origin, 0);
+    let page = Page::new(PageOptions {
+        policy: Some(ResourcePolicy::permissive_localhost()),
+        ..PageOptions::default()
+    })
+    .unwrap();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/top-import"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string(
+            "performance.getEntriesByType('resource').map(e => e.name.split('/').pop()).join()"
+        )
+        .unwrap(),
+        "imported.css"
+    );
+    // Removed and reinserted in one batch, the sheet still applies.
+    page.eval_to_string(
+        "const s = document.querySelector('style'); s.remove(); document.head.append(s); ''",
+    )
+    .unwrap();
+    page.settle(Duration::from_millis(200));
+    assert_eq!(
+        page.eval_to_string("String(document.styleSheets.length)")
+            .unwrap(),
+        "1"
     );
 }
