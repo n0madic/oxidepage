@@ -85,12 +85,19 @@ stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "406a57149152
 # 0.11.1: 20 HANG, the corpus takes 241s instead of 20s, 18300/24358 subtests
 # instead of 18602/24661.
 #
-# Fixed upstream by linebender/parley#753 (merged 2026-08-18, "will get
-# backported as 0.11.2"). Verified here by patching #753 onto a v0.11.1
-# checkout: 0 HANG, 19.8s, and 18602/24661 — byte-identical to 0.10.0 — with
-# goldens, reftests, Puppeteer and Playwright all green. So **bump to 0.11.2 as
-# soon as it is published**; the gate is still a full `xtask wpt` run with no
-# HANG/CRASH, since the loop is bounded only by the runner's 45 s budget.
+# Fixed upstream by linebender/parley#753 (merged 2026-08-18). Verified here by
+# patching #753 onto a v0.11.1 checkout: 0 HANG, 19.8s, and 18602/24661 —
+# byte-identical to 0.10.0 — with goldens, reftests, Puppeteer and Playwright
+# all green. The promised 0.11.2 backport was never published, so **0.11.x is a
+# dead end: do not take a Dependabot bump to 0.11.1**. The fix ships in 0.12.0
+# (2026-10-09), but that release is a migration, not a bump: it removes
+# `TreeBuilder::set_white_space_mode` and `LineMetrics::{ascent, descent}`,
+# adds required `TextStyle`/`InlineBox`/`AlignmentOptions` fields, moves to a
+# CSS line-box model with its own `vertical-align`, and makes `Cluster` span a
+# whole grapheme — 14 compile errors in `layout` alone, and goldens, reftests
+# and WPT will move with the line metrics. The gate is still a full `xtask wpt`
+# run with no HANG/CRASH, since the loop is bounded only by the runner's 45 s
+# budget.
 parley = { version = "=0.10.0", default-features = false, features = ["std"] }
 # Deliberately ahead of the skrifa parley pulls in (0.42.1), so the lockfile
 # carries two skrifa/read-fonts/font-types stacks. Nothing crosses between
