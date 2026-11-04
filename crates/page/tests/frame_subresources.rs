@@ -109,6 +109,11 @@ fn spawn_server() -> (u16, Arc<Mutex<Seen>>) {
                                 .then(|| value.trim().to_owned())
                         });
                     seen.lock().unwrap().push((path.clone(), referer));
+                    // Answered late on purpose: long enough that a `settle`
+                    // which forgot the request was in flight returns first.
+                    if path.ends_with("slow-api") {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
                     let body = if path.ends_with(".png") {
                         resp("image/png", &png_bytes())
                     } else if path.ends_with("bg.css") {
@@ -150,6 +155,21 @@ fn spawn_server() -> (u16, Arc<Mutex<Seen>>) {
                               fetch('api-fetch');\
                               const x = new XMLHttpRequest();\
                               x.open('GET', 'api-xhr'); x.send();\
+                              </script>",
+                        )
+                    } else if path == "/slow.html" {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><iframe id=f src='nested/slow-frame.html'></iframe>",
+                        )
+                    } else if path.ends_with("slow-frame.html") {
+                        resp(
+                            "text/html",
+                            b"<!doctype html><script>\
+                              const x = new XMLHttpRequest();\
+                              x.onload = () => { document.title = 'xhr ' + x.status; };\
+                              x.open('GET', 'slow-api'); x.send();\
+                              fetch('slow-api').then(() => { document.body.dataset.fetch = 'done'; });\
                               </script>",
                         )
                     } else if path == "/bg.html" {
@@ -419,6 +439,36 @@ fn a_frames_fetch_and_xhr_resolve_against_the_frames_document() {
             "a frame's script API resolved against its embedder: {seen:?}"
         );
     }
+}
+
+/// `settle` waits for a `fetch`/XHR started **inside a frame**.
+///
+/// Idleness counted only the top-level main world's pending requests, but a
+/// frame's requests are booked in the frame's own world (the promise and the
+/// wrapper are that world's values). So `settle` returned the moment the
+/// frame's subresources were done — with its XHR still on the wire — and a
+/// caller read state the response had not written yet. Under load that made
+/// `a_frames_fetch_and_xhr_resolve_against_the_frames_document` flaky; a
+/// response held back by the server makes it deterministic.
+#[test]
+fn settle_waits_for_a_frames_fetch_and_xhr() {
+    let (port, _paths) = spawn_server();
+    let page = page();
+    page.navigate(
+        &format!("http://127.0.0.1:{port}/slow.html"),
+        WaitUntil::Load,
+    )
+    .unwrap();
+    page.settle(Duration::from_secs(5));
+    assert_eq!(
+        page.eval_to_string(
+            "const d = document.getElementById('f').contentDocument;\
+             d.title + ' / ' + d.body.dataset.fetch"
+        )
+        .unwrap(),
+        "xhr 200 / done",
+        "settle returned before the frame's requests completed"
+    );
 }
 
 /// A `background-image` introduced by a sheet that lands *inside a frame* is
