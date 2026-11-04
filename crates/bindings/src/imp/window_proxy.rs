@@ -157,21 +157,16 @@ fn set_frame_location(
     Ok(())
 }
 
-/// `postMessage`: hands a value to another browsing context.
+/// `postMessage` on a proxy: hands a value to another browsing context.
 ///
-/// **Delivered as a task, never synchronously.** A listener in the receiver
-/// commonly answers with a `postMessage` back, and a synchronous entry would
-/// ride the native stack until `MAX_WORLD_DEPTH` caught it (ADR-0035 D4).
-///
-/// The value is serialized here, in the *sender's* realm, and deserialized in
-/// the receiver's — which is what keeps every `JsValue` inside its own runtime.
-/// That serializer is a JSON subset, so `Map`, `Set`, `Date`, `ArrayBuffer`,
-/// typed arrays and cycles are refused rather than silently flattened.
+/// Everything past picking the target is [`post_to_frame`], which
+/// `window.postMessage` shares.
 pub(crate) fn post_message(
     cx: &BindCx<'_>,
     this: Rc<WindowProxyData>,
     message: JsValue,
     target_origin: JsValue,
+    transfer: JsValue,
 ) -> Result<(), JsThrow> {
     let target = match &*this {
         WindowProxyData::Frame(frame) => *frame,
@@ -185,11 +180,56 @@ pub(crate) fn post_message(
             ));
         }
     };
+    post_to_frame(cx, target, message, target_origin, transfer)
+}
+
+/// HTML's "window post message steps", for a target that is one of this
+/// page's browsing contexts — another one, or the sender's own.
+///
+/// **Delivered as a task, never synchronously.** A listener in the receiver
+/// commonly answers with a `postMessage` back, and a synchronous entry would
+/// ride the native stack until `MAX_WORLD_DEPTH` caught it (ADR-0035 D4). A
+/// page posting to itself gets the same task, as in a browser: the message is
+/// never observable before the sending script yields.
+///
+/// The value is serialized here, in the *sender's* realm, and deserialized in
+/// the receiver's — which is what keeps every `JsValue` inside its own runtime.
+/// That serializer is a JSON subset, so `Map`, `Set`, `Date`, `ArrayBuffer`,
+/// typed arrays and cycles are refused rather than silently flattened.
+///
+/// `options` is the second argument as given, because it selects the
+/// overload: `postMessage(message, targetOrigin, transfer)` when it is a
+/// string (or anything else that is not an object), and
+/// `postMessage(message, { targetOrigin, transfer })` when it is an object,
+/// `null` or absent — WebIDL resolves a dictionary-vs-string overload that
+/// way. Either way the absent `targetOrigin` is `"/"`.
+pub(crate) fn post_to_frame(
+    cx: &BindCx<'_>,
+    target: oxidepage_base::FrameId,
+    message: JsValue,
+    options: JsValue,
+    transfer: JsValue,
+) -> Result<(), JsThrow> {
+    let (target_origin, transfer) = match &options {
+        JsValue::Undefined | JsValue::Null => (String::from("/"), JsValue::Undefined),
+        JsValue::Object(dict) => {
+            let origin = cx.scope.get(dict, "targetOrigin").map_err(JsThrow::from)?;
+            let origin = if origin.is_undefined() {
+                String::from("/")
+            } else {
+                cx.scope.coerce_string(&origin)?
+            };
+            let transfer = cx.scope.get(dict, "transfer").map_err(JsThrow::from)?;
+            (origin, transfer)
+        }
+        other => (cx.scope.coerce_string(other)?, transfer),
+    };
+    check_transfer(cx, &transfer)?;
     let Some(state) = cx.frame_state(target) else {
         return Ok(()); // the context is gone; HTML drops the message
     };
     // `targetOrigin` is the sender saying *who it believes it is talking to*.
-    // Accepting it and ignoring it — which this did — turns
+    // Accepting it and ignoring it turns
     // `child.postMessage(token, "https://trusted.example")` into a delivery to
     // whatever the frame actually is, which is the exact confusion the argument
     // exists to prevent.
@@ -198,16 +238,7 @@ pub(crate) fn post_message(
     // else is parsed (a `SyntaxError` if it will not) and compared at delivery.
     // A mismatch **drops the message silently** — telling the sender would leak
     // the target's origin to a page not entitled to it.
-    // The argument is optional in the IDL, and an absent one is **not** the
-    // string `"undefined"`: HTML's one-argument form is the
-    // `postMessage(message, options)` overload, whose `targetOrigin` defaults
-    // to `"/"`. Coercing `undefined` made `frame.contentWindow.postMessage(d)`
-    // throw a `SyntaxError` here where it works everywhere else.
-    let target_origin = if target_origin.is_undefined() {
-        String::from("/")
-    } else {
-        cx.scope.coerce_string(&target_origin)?
-    };
+    let own = target == cx.state.frame.frame();
     let (sender_url, target_url) = {
         let dom = cx.state.dom.borrow();
         (
@@ -221,7 +252,10 @@ pub(crate) fn post_message(
         // test rather than of the printed origin, so two documents that share
         // an opaque origin because they share a URL (an `about:blank` frame and
         // its embedder) still match, while two unrelated opaque origins do not.
-        if !cx.same_origin_frame(&state) {
+        // A window posting to itself is one document: even an opaque origin
+        // is the same origin as itself, so a sandboxed frame still reaches
+        // its own listeners.
+        if !own && !cx.same_origin_frame(&state) {
             return Ok(());
         }
     } else if target_origin != "*" {
@@ -236,24 +270,53 @@ pub(crate) fn post_message(
         };
         let actual = crate::imp::htmli_frame_element::origin_of(&target_url);
         // An opaque origin (`origin_of` spells it `"null"`) matches nothing but
-        // `*` — it is not equal to itself, which is what makes a sandboxed
-        // frame unaddressable by name.
+        // `*` (and `/` from itself, above) — a serialized `"null"` names no
+        // origin, which is what makes a sandboxed frame unaddressable by name.
         if wanted == "null" || actual == "null" || wanted != actual {
             return Ok(());
         }
     }
     let serialized = clone_message(cx, &message)?;
-    let origin = sender_origin;
     cx.state
         .frame
         .global
         .queue_message(crate::state::PendingMessage {
             target,
             source: cx.state.frame.frame(),
-            origin,
+            origin: sender_origin,
             data: serialized,
         });
     Ok(())
+}
+
+/// The transfer list: absent or empty is fine, and anything in it is refused.
+///
+/// This engine has nothing transferable (`MessagePort`, `ArrayBuffer`
+/// detachment), so a non-empty list would be accepted and then ignored — the
+/// sender believing ownership moved when it did not. HTML throws
+/// `DataCloneError` for an object it cannot transfer, and so does this, for
+/// all of them; a list that is not even list-like is WebIDL's `TypeError`.
+fn check_transfer(cx: &BindCx<'_>, transfer: &JsValue) -> Result<(), JsThrow> {
+    let JsValue::Object(list) = transfer else {
+        return if transfer.is_undefined() {
+            Ok(())
+        } else {
+            Err(JsThrow::Type(
+                "postMessage: transfer is not a sequence".to_owned(),
+            ))
+        };
+    };
+    let length = cx.scope.get(list, "length").map_err(JsThrow::from)?;
+    match length {
+        JsValue::Number(0.0) => Ok(()),
+        JsValue::Number(_) => Err(cx.dom_throw(
+            DomExceptionKind::DataCloneError,
+            "postMessage: this engine has no transferable objects",
+        )),
+        _ => Err(JsThrow::Type(
+            "postMessage: transfer is not a sequence".to_owned(),
+        )),
+    }
 }
 
 /// Serializes a message body, refusing what the subset cannot carry.
