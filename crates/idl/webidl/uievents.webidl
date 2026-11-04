@@ -157,7 +157,7 @@ interface KeyboardEvent : UIEvent {
   // Legacy (UI Events §"Legacy KeyboardEvent supplemental interface"), still
   // what `document.createEvent("KeyboardEvent")` callers use. It sets `key`
   // and `location` only: `code`, `repeat`, `charCode` and `keyCode` are not
-  // among its arguments and keep their defaults, as in every browser.
+  // among its arguments and keep whatever they held, as in every browser.
   undefined initKeyboardEvent(DOMString typeArg, optional boolean bubblesArg = false,
                               optional boolean cancelableArg = false,
                               optional any viewArg = null, optional DOMString keyArg = "",

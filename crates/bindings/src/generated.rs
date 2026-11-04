@@ -5122,6 +5122,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         gen_message_event_get_last_event_id,
     )?;
     cx.define_getter(&proto_message_event, "source", gen_message_event_get_source)?;
+    cx.define_method(
+        &proto_message_event,
+        "initMessageEvent",
+        1,
+        gen_message_event_init_message_event,
+    )?;
     cx.finish_interface(
         "MessageEvent",
         &proto_message_event,
@@ -15427,6 +15433,22 @@ fn gen_message_event_get_last_event_id(
 fn gen_message_event_get_source(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
     imp::message_event::source(cx, this)
+}
+
+fn gen_message_event_init_message_event(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_bool_or(call, 1, false);
+    let a2 = cx.arg_bool_or(call, 2, false);
+    let a3 = call.arg(3);
+    let a4 = cx.arg_dom_string_or(call, 4, "")?;
+    let a5 = cx.arg_dom_string_or(call, 5, "")?;
+    let a6 = call.arg(6);
+    imp::message_event::init_message_event(cx, this, a0, a1, a2, a3, a4, a5, a6)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_message_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

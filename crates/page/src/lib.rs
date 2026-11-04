@@ -4685,10 +4685,7 @@ impl Page {
     /// written, a race that showed up only under load.
     fn script_net_pending(&self) -> bool {
         self.worlds
-            .all()
-            .iter()
-            .filter_map(|world| world.state())
-            .any(|state| state.net_pending() != 0)
+            .any(|world| world.state().is_some_and(|state| state.net_pending() != 0))
     }
 
     /// Drives the page from `rx` until the channel closes or a control job

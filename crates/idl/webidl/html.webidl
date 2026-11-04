@@ -651,6 +651,17 @@ interface MessageEvent : Event {
   readonly attribute DOMString origin;
   readonly attribute DOMString lastEventId;
   readonly attribute any source;
+  // Legacy, and what `document.createEvent("MessageEvent")` is useless
+  // without. `source` is `any` for the reason `source` the attribute is (no
+  // `WindowProxy` type in the generator). HTML's last argument, `ports`, is
+  // left out: this engine has no `MessagePort` (and no `ports` attribute), so
+  // the only list a caller can build is the empty default, and an extra
+  // trailing argument is ignored the way JS ignores any.
+  undefined initMessageEvent(DOMString type, optional boolean bubbles = false,
+                             optional boolean cancelable = false,
+                             optional any data = null, optional USVString origin = "",
+                             optional DOMString lastEventId = "",
+                             optional any source = null);
 };
 
 interface MediaQueryList : EventTarget {

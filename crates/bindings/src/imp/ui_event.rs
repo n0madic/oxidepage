@@ -210,3 +210,42 @@ pub(crate) fn init_ui_event(
     payload.detail = detail;
     Ok(())
 }
+
+/// What every legacy initializer below `UIEvent` shares (`initMouseEvent`,
+/// `initKeyboardEvent`): run `initUIEvent`, then — unless the event is being
+/// dispatched, when every `init*Event` is a no-op — set the modifiers and hand
+/// the subclass payload to `write` for the members only that initializer names.
+///
+/// The caller brand-checks `this` first, so a plain `Event` is a `TypeError`
+/// rather than a reinitialized event.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn init_ui_subclass(
+    cx: &BindCx<'_>,
+    this: &EventRef,
+    event_type: String,
+    bubbles: bool,
+    cancelable: bool,
+    view: JsValue,
+    detail: i32,
+    modifiers: Modifiers,
+    write: impl FnOnce(&mut UiKind),
+) -> Result<(), JsThrow> {
+    init_ui_event(
+        cx,
+        this.clone(),
+        event_type,
+        bubbles,
+        cancelable,
+        view,
+        detail,
+    )?;
+    let mut ev = this.borrow_mut();
+    if ev.dispatching {
+        return Ok(());
+    }
+    if let Some(payload) = ev.ui.as_deref_mut() {
+        payload.modifiers = modifiers;
+        write(&mut payload.kind);
+    }
+    Ok(())
+}

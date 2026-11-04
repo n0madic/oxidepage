@@ -154,6 +154,16 @@ impl WorldTable {
         self.slots.borrow().clone()
     }
 
+    /// Whether any live world satisfies `test`, walked in place.
+    ///
+    /// For a question asked on every turn of the event loop: [`Self::all`]
+    /// clones the table so the caller may enter a world while iterating, and
+    /// that is an allocation per call. `test` must not create or drop worlds,
+    /// since the table stays borrowed while it runs.
+    pub(crate) fn any(&self, test: impl FnMut(&World) -> bool) -> bool {
+        self.slots.borrow().iter().map(|world| &**world).any(test)
+    }
+
     /// The lowest unused world id. Ids are dense and **are** reused when a
     /// world is rebuilt at a commit — which is exactly why a `WorldId` never
     /// crosses the thread boundary and the monotonic `context_id` does.

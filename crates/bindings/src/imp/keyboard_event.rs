@@ -10,7 +10,9 @@ use oxidepage_js::{HostCall, JsThrow, JsValue};
 use crate::cx::BindCx;
 use crate::events::{KeyboardFields, Modifiers, UiKind};
 use crate::imp::event::EventRef;
-use crate::imp::ui_event::{member_bool, member_string, member_u32, parse_ui_init, payload};
+use crate::imp::ui_event::{
+    init_ui_subclass, member_bool, member_string, member_u32, parse_ui_init, payload,
+};
 
 fn fields<T>(this: &EventRef, read: impl FnOnce(&KeyboardFields) -> T) -> Result<T, JsThrow> {
     payload(this, "KeyboardEvent", |p| match &p.kind {
@@ -61,33 +63,28 @@ pub(crate) fn init_keyboard_event(
     fields(&this, |_| ())?;
     // `initKeyboardEvent` has no `detail` argument; UIEvent's initializer
     // resets it to 0, which is the spec's "initialize" for it too.
-    crate::imp::ui_event::init_ui_event(
-        cx,
-        this.clone(),
-        event_type,
-        bubbles,
-        cancelable,
-        view,
-        0,
-    )?;
-    let mut ev = this.borrow_mut();
-    if ev.dispatching {
-        return Ok(());
-    }
-    let Some(payload) = ev.ui.as_deref_mut() else {
-        return Ok(());
-    };
-    payload.modifiers = Modifiers {
+    let modifiers = Modifiers {
         ctrl,
         shift,
         alt,
         meta,
     };
-    if let UiKind::Keyboard(keyboard) = &mut payload.kind {
-        keyboard.key = key;
-        keyboard.location = location;
-    }
-    Ok(())
+    init_ui_subclass(
+        cx,
+        &this,
+        event_type,
+        bubbles,
+        cancelable,
+        view,
+        0,
+        modifiers,
+        |kind| {
+            if let UiKind::Keyboard(keyboard) = kind {
+                keyboard.key = key;
+                keyboard.location = location;
+            }
+        },
+    )
 }
 
 pub(crate) fn key(_cx: &BindCx<'_>, this: EventRef) -> Result<String, JsThrow> {
