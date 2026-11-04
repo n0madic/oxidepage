@@ -227,7 +227,7 @@ impl LayoutTree {
         // Short circuit if inline context contains no text or inline boxes
         if !has_styles_preventing_being_collapsed_through
             && inline_layout.text.is_empty()
-            && inline_layout.layout.inline_boxes().is_empty()
+            && inline_layout.layout.inline_boxes().len() == 0
         {
             // Put layout back
             self.box_mut(box_id).ifc = Some(inline_layout);
@@ -347,6 +347,9 @@ impl LayoutTree {
             text_align,
             AlignmentOptions {
                 align_when_overflowing: false,
+                // `text-align-last: auto` — stylo's servo engine does not
+                // ship the property.
+                last_line_alignment: None,
             },
         );
 

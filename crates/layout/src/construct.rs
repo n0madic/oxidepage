@@ -25,7 +25,9 @@ use oxidepage_dom::node::attr_name;
 use oxidepage_dom::node::is_text_kind;
 use oxidepage_dom::{DomTree, NodeData, NodeKind};
 use oxidepage_style::{StyleEngine, Viewport};
-use parley::{InlineBox, InlineBoxKind, TreeBuilder, WhiteSpaceCollapse};
+use parley::{
+    InlineBox, InlineBoxKind, StyleProperty, TreeBuilder, VerticalAlign, WhiteSpaceCollapse,
+};
 use servo_arc::Arc as ServoArc;
 use style::computed_values::pointer_events::T as PointerEvents;
 use style::computed_values::position::T as Position;
@@ -1934,17 +1936,19 @@ fn build_ifc(
         .filter_map(|&child| tree.box_(child).dom_node.map(|n| (n, child)))
         .collect();
 
-    let parley_style = text::style(root_brush, root_style);
+    let mut parley_style = text::style(root_brush, root_style);
+    // The IFC root's own `vertical-align` places *it* in an outer line (when
+    // it is an inline-block); it must not shift the content inside it.
+    parley_style.vertical_align = VerticalAlign::BASELINE;
     let root_line_height =
         text::resolve_line_height(parley_style.line_height, parley_style.font_size);
-    let collapse_mode =
-        text::white_space_collapse(root_style.get_inherited_text().white_space_collapse);
     let text_transform = root_style.clone_text_transform() & TextTransform::CASE_TRANSFORMS;
 
     let mut contributors: Vec<NodeId> = Vec::new();
     let (layout, ifc_text) = fonts.with_contexts(|font_cx, layout_cx| {
+        // `white-space-collapse` travels in each span's style (the root's
+        // included), so parley collapses across span boundaries itself.
         let mut builder = layout_cx.tree_builder(font_cx, 1.0, true, &parley_style);
-        builder.set_white_space_mode(collapse_mode);
 
         let walk = |builder: &mut TreeBuilder<'_, TextBrush>, contributors: &mut Vec<NodeId>| {
             let mut cx = IfcWalker {
@@ -1970,18 +1974,18 @@ fn build_ifc(
                         builder.push_text(marker);
                     }
                     if let Some(pseudo) = before {
-                        push_pseudo_span(builder, pseudo, root_line_height, collapse_mode);
+                        push_pseudo_span(builder, pseudo, root_line_height);
                     }
                     for child in dom.flat_tree_children(*root) {
-                        cx.walk(builder, child, collapse_mode, text_transform);
+                        cx.walk(builder, child, text_transform);
                     }
                     if let Some(pseudo) = after {
-                        push_pseudo_span(builder, pseudo, root_line_height, collapse_mode);
+                        push_pseudo_span(builder, pseudo, root_line_height);
                     }
                 }
                 IfcSource::Anonymous { items, .. } => {
                     for &item in items {
-                        cx.walk(builder, item, collapse_mode, text_transform);
+                        cx.walk(builder, item, text_transform);
                     }
                 }
                 IfcSource::PseudoContent { text, .. } => {
@@ -2032,7 +2036,6 @@ fn push_pseudo_span(
     builder: &mut TreeBuilder<'_, TextBrush>,
     pseudo: &PseudoText,
     root_line_height: f32,
-    collapse_mode: WhiteSpaceCollapse,
 ) {
     if pseudo.text.is_empty() {
         return;
@@ -2045,7 +2048,6 @@ fn push_pseudo_span(
     builder.push_style_span(span_style);
     builder.push_text(&pseudo.text);
     builder.pop_style_span();
-    builder.set_white_space_mode(collapse_mode);
 }
 
 struct IfcWalker<'a> {
@@ -2060,7 +2062,6 @@ impl IfcWalker<'_> {
         &mut self,
         builder: &mut TreeBuilder<'_, TextBrush>,
         node: NodeId,
-        parent_collapse: WhiteSpaceCollapse,
         parent_text_transform: TextTransform,
     ) {
         match self.dom.node(node).data() {
@@ -2084,11 +2085,6 @@ impl IfcWalker<'_> {
                 }
 
                 let style = self.dom.primary_style(node);
-                let collapse_mode = style
-                    .as_ref()
-                    .map(|s| text::white_space_collapse(s.clone_white_space_collapse()))
-                    .unwrap_or(parent_collapse);
-                builder.set_white_space_mode(collapse_mode);
                 let text_transform = style
                     .as_ref()
                     .map(|s| s.clone_text_transform() & TextTransform::CASE_TRANSFORMS)
@@ -2106,20 +2102,35 @@ impl IfcWalker<'_> {
                 match (display.outside(), display.inside()) {
                     (DisplayOutside::None, DisplayInside::None) => {}
                     (DisplayOutside::None, DisplayInside::Contents) => {
+                        // No box, so no span of its own — but its text
+                        // children still collapse by *its* computed
+                        // `white-space-collapse`, which may differ from the
+                        // enclosing span's.
+                        let collapse = style
+                            .as_ref()
+                            .map(|s| text::white_space_collapse(s.clone_white_space_collapse()));
+                        if let Some(collapse) = collapse {
+                            builder.push_style_modification_span(&[
+                                StyleProperty::WhiteSpaceCollapse(collapse),
+                            ]);
+                        }
                         let children = self.dom.flat_tree_children(node);
                         for child in children {
-                            self.walk(builder, child, collapse_mode, text_transform);
+                            self.walk(builder, child, text_transform);
+                        }
+                        if collapse.is_some() {
+                            builder.pop_style_span();
                         }
                     }
                     (DisplayOutside::Inline, DisplayInside::Flow)
                         if !is_atomic_inline_tag(self.dom, node) =>
                     {
                         if el.is_html_element() && el.name.local == local_name!("br") {
-                            builder.push_style_modification_span(&[]);
-                            builder.set_white_space_mode(WhiteSpaceCollapse::Preserve);
+                            builder.push_style_modification_span(&[
+                                StyleProperty::WhiteSpaceCollapse(WhiteSpaceCollapse::Preserve),
+                            ]);
                             builder.push_text("\n");
                             builder.pop_style_span();
-                            builder.set_white_space_mode(collapse_mode);
                         } else {
                             let mut span_style = style
                                 .as_ref()
@@ -2139,22 +2150,8 @@ impl IfcWalker<'_> {
 
                             let children = self.dom.flat_tree_children(node);
                             for child in children {
-                                self.walk(builder, child, collapse_mode, text_transform);
+                                self.walk(builder, child, text_transform);
                             }
-
-                            // Parley trims trailing whitespace at every
-                            // style-span boundary (`pop_style_span` commits the
-                            // span's text with `is_span_last = true`, which runs
-                            // `trim_end`). CSS instead collapses an inline
-                            // element's trailing whitespace with the following
-                            // in-flow content, so flush the pending text through
-                            // a throwaway span first — that commit uses
-                            // `is_span_last = false` and keeps a single trailing
-                            // space. Parley still excludes real line-end
-                            // whitespace from line metrics, so nothing shifts at
-                            // an actual end of line.
-                            builder.push_style_modification_span(&[]);
-                            builder.pop_style_span();
 
                             builder.pop_style_span();
                         }
@@ -2172,6 +2169,18 @@ impl IfcWalker<'_> {
                                 // Width and height are set during layout
                                 width: 0.0,
                                 height: 0.0,
+                                // v1 aligns every atomic inline by its
+                                // bottom margin edge (`None`): an
+                                // inline-block's own last-line baseline is
+                                // not reported yet.
+                                baseline: None,
+                                vertical_align: style
+                                    .as_ref()
+                                    .map(|s| {
+                                        let lh = text::style_line_height(s);
+                                        text::vertical_align(s, lh)
+                                    })
+                                    .unwrap_or_default(),
                             });
                         }
                     }

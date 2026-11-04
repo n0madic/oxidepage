@@ -359,9 +359,12 @@ fn atomic_inline_block_participates_in_line_layout() {
     assert_eq!((s.size.width, s.size.height), (30.0, 30.0));
     // Placed after the first two 10px glyphs.
     assert_eq!(s.location.x, 20.0);
-    // Line height grows to fit the 30px inline block.
+    // The line box grows to fit the 30px inline block *and* the strut: the
+    // empty block's bottom margin edge sits on the baseline (CSS 2.1 §10.8.1),
+    // so it spans 30px above it, while the root inline's Ahem descent (0.2em)
+    // still hangs 2px below it — 32px, as browsers lay it out.
     let d = layout.tree().box_(box_of(&layout, &dom, "d")).final_layout;
-    assert_eq!(d.size.height, 30.0);
+    assert_eq!(d.size.height, 32.0);
 }
 
 #[test]
