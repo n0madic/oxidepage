@@ -76,7 +76,7 @@ pub(crate) fn same_origin(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    let (Ok(a), Ok(b)) = (url::Url::parse(a), url::Url::parse(b)) else {
+    let (Some(a), Some(b)) = (parse_for_origin(a), parse_for_origin(b)) else {
         return false;
     };
     a.scheme() == b.scheme()
@@ -84,11 +84,27 @@ pub(crate) fn same_origin(a: &str, b: &str) -> bool {
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
+/// Parses a document URL for an origin comparison, looking **through** a
+/// `blob:` URL to the URL it was minted under (ADR-0042).
+///
+/// URL's origin of `blob:https://a.example/<uuid>` is `https://a.example`, so
+/// a document loaded from one — `<iframe src=blob:…>`, a navigation to
+/// `URL.createObjectURL(html)` — is same-origin with the page that made it.
+/// Compared on its own scheme and host, it would be same-origin with nothing.
+fn parse_for_origin(url: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "blob" {
+        return Some(parsed);
+    }
+    let inner = url::Url::parse(parsed.path()).ok()?;
+    matches!(inner.scheme(), "http" | "https" | "file").then_some(inner)
+}
+
 /// A document URL reduced to `scheme://host[:port]`, which is what
 /// `MessageEvent.origin` reports. `"null"` for anything without a host —
 /// `about:blank` inherits its embedder's URL at load, so it never lands here.
 pub(crate) fn origin_of(url: &str) -> String {
-    let Ok(parsed) = url::Url::parse(url) else {
+    let Some(parsed) = parse_for_origin(url) else {
         return "null".to_owned();
     };
     match parsed.host_str() {

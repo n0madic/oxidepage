@@ -79,6 +79,25 @@ pub trait HostHooks {
     fn start_fetch(&self, request: NetRequest) -> RequestId;
     /// Cancels an in-flight network request.
     fn abort(&self, id: RequestId);
+
+    /// `URL.createObjectURL`: records `url` → `bytes` in the page's blob URL
+    /// store on behalf of `creator`'s current document (ADR-0042). `false` when
+    /// the store refuses it (over its byte cap) — or, by default, when the
+    /// embedder has no store at all, so nothing could ever resolve the URL.
+    fn register_blob_url(
+        &self,
+        url: &str,
+        bytes: Vec<u8>,
+        content_type: String,
+        creator: FrameId,
+    ) -> bool {
+        let _ = (url, bytes, content_type, creator);
+        false
+    }
+    /// `URL.revokeObjectURL`.
+    fn revoke_blob_url(&self, url: &str) {
+        let _ = url;
+    }
     /// `document.cookie` getter: script-visible cookies for `document_url`
     /// (`HttpOnly` cookies excluded).
     fn get_cookie(&self, document_url: &str) -> String;

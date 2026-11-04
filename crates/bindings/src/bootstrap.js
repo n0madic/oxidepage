@@ -876,6 +876,8 @@
         // surface. `randomBytes` backs `crypto`.
         const nativeRandomBytes = globalThis.__oxide_randomBytes;
         const nativeCssSupports = globalThis.__oxide_cssSupports;
+        const nativeCreateObjectURL = globalThis.__oxide_createObjectURL;
+        const nativeRevokeObjectURL = globalThis.__oxide_revokeObjectURL;
 
         const def = (target, name, value) => {
             reflectDefineProperty(target, name, {
@@ -999,6 +1001,26 @@
                 { value: "CSS", writable: false, enumerable: false, configurable: true });
             reflectDefineProperty(globalThis, "CSS", {
                 value: cssObj, writable: true, enumerable: false, configurable: true,
+            });
+        }
+
+        // === URL.createObjectURL / revokeObjectURL (ADR-0042) ===
+        // WebIDL static operations, which the codegen does not emit, so they
+        // are defined on the generated constructor here: writable,
+        // enumerable, configurable, like any operation.
+        if (typeof nativeCreateObjectURL === "function" && typeof globalThis.URL === "function") {
+            const URLCtor = globalThis.URL;
+            def(URLCtor, "createObjectURL", function createObjectURL(obj) {
+                if (arguments.length < 1) {
+                    throw new TypeError("URL.createObjectURL: 1 argument required, but only 0 present.");
+                }
+                return nativeCreateObjectURL(obj);
+            });
+            def(URLCtor, "revokeObjectURL", function revokeObjectURL(url) {
+                if (arguments.length < 1) {
+                    throw new TypeError("URL.revokeObjectURL: 1 argument required, but only 0 present.");
+                }
+                nativeRevokeObjectURL(`${url}`);
             });
         }
 
@@ -1516,6 +1538,8 @@
         // The `__oxide_*` helpers have been captured into locals; hide them.
         reflectDeleteProperty(globalThis, "__oxide_randomBytes");
         reflectDeleteProperty(globalThis, "__oxide_cssSupports");
+        reflectDeleteProperty(globalThis, "__oxide_createObjectURL");
+        reflectDeleteProperty(globalThis, "__oxide_revokeObjectURL");
     };
 
     // URLSearchParams pair iteration, built on a native `snapshot(params)`

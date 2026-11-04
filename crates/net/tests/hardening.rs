@@ -812,3 +812,40 @@ async fn redirect_to_a_data_url_stays_blocked() {
         err.detail
     );
 }
+
+// --- `blob:` is answered above the scheme gate, but not across a redirect ----
+
+/// The blob store answers its own URLs above the gate (ADR-0042), so — like
+/// `data:` — a redirect from `http:` must not reach one: the redirect loop
+/// re-checks the allowlist, and `blob` is deliberately not on it. A *real*
+/// registered URL is the redirect target, so only the gate can stop it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redirect_to_a_registered_blob_url_stays_blocked() {
+    let policy = loopback_policy();
+    assert!(!policy.scheme_allowed("blob"));
+    let engine = engine_with(policy);
+    let target = "blob:http://127.0.0.1/0000";
+    engine
+        .blob_urls()
+        .register(
+            target,
+            b"secret".to_vec(),
+            "text/plain".into(),
+            oxidepage_base::MAIN_FRAME,
+        )
+        .unwrap();
+    let direct = engine
+        .fetch(NetRequest {
+            url: target.to_owned(),
+            ..NetRequest::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(&direct.body[..], b"secret", "the URL itself resolves");
+
+    let port =
+        spawn_server(move |_text| http_response(302, "Found", &[("Location", target)], b"")).await;
+    let err = engine.fetch(get(port, "/redirect")).await.unwrap_err();
+    assert_eq!(err.kind, NetErrorKind::Blocked, "detail: {}", err.detail);
+    assert!(err.detail.contains("blob"), "{}", err.detail);
+}

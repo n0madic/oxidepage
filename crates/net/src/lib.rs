@@ -21,6 +21,7 @@
 //!   `NetPool` — the runtime, connection pool and cache a browser shares
 //!   across its pages (ADR-0027 D7).
 
+pub mod blob;
 pub mod cache;
 pub mod client;
 pub mod connector;
@@ -35,6 +36,7 @@ pub mod policy;
 pub mod record;
 pub mod service;
 
+pub use blob::{BlobUrlError, BlobUrlStore};
 pub use cache::{CachePartition, HttpCache};
 pub use client::HttpClient;
 pub use cookies::{CookieJar, CookieSource, CookieView};

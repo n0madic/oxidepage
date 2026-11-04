@@ -1181,6 +1181,32 @@ impl NetService {
         command
     }
 
+    /// `URL.createObjectURL`: records `url` → `bytes` in the page's blob URL
+    /// store (ADR-0042), on behalf of `creator`'s current document.
+    pub fn register_blob_url(
+        &self,
+        url: &str,
+        bytes: Vec<u8>,
+        content_type: String,
+        creator: oxidepage_base::FrameId,
+    ) -> Result<(), crate::BlobUrlError> {
+        self.engine
+            .blob_urls()
+            .register(url, bytes, content_type, creator)
+    }
+
+    /// `URL.revokeObjectURL`.
+    pub fn revoke_blob_url(&self, url: &str) {
+        self.engine.blob_urls().revoke(url);
+    }
+
+    /// Revokes every blob URL `frame`'s documents created — its document is
+    /// being replaced, or the frame discarded (File API: a blob URL lives as
+    /// long as the document that made it).
+    pub fn revoke_blob_urls_created_by(&self, frame: oxidepage_base::FrameId) {
+        self.engine.blob_urls().revoke_created_by(frame);
+    }
+
     /// Cancels an in-flight request (best-effort; a completed-but-undelivered
     /// response is dropped).
     pub fn abort(&self, id: RequestId) {

@@ -480,6 +480,9 @@ pub struct FetchEngine {
     /// nor writes, which is what "disabled" has to mean for a driver
     /// intercepting requests — a served hit never reaches the interceptor.
     cache_disabled: Arc<AtomicBool>,
+    /// The page's blob URL store (ADR-0042). Per engine, like the budget
+    /// counters, because a page is the partition a blob URL resolves in.
+    blob_urls: Arc<crate::BlobUrlStore>,
 }
 
 impl FetchEngine {
@@ -524,6 +527,7 @@ impl FetchEngine {
             cache,
             partition,
         } = parts;
+        let blob_urls = Arc::new(crate::BlobUrlStore::new(policy_blob_cap(&policy)));
         Self {
             client,
             policy,
@@ -534,7 +538,14 @@ impl FetchEngine {
             total_bytes: Arc::new(AtomicU64::new(0)),
             request_defaults,
             cache_disabled: Arc::new(AtomicBool::new(false)),
+            blob_urls,
         }
+    }
+
+    /// The page's blob URL store (ADR-0042).
+    #[must_use]
+    pub fn blob_urls(&self) -> &Arc<crate::BlobUrlStore> {
+        &self.blob_urls
     }
 
     /// Turns the HTTP cache off (or back on) for this engine's requests.
@@ -659,6 +670,17 @@ impl FetchEngine {
         // redirect a network error, as Fetch requires.
         if url.scheme() == "data" {
             return data_outcome(&url, self.policy.max_response_bytes);
+        }
+        // `blob:` likewise (ADR-0042): the bytes are already in the page's
+        // store, and answering here keeps an `http:` → `blob:` redirect a
+        // network error for the same reason.
+        if url.scheme() == "blob" {
+            return blob_outcome(
+                &self.blob_urls,
+                &url,
+                &request.method,
+                self.policy.max_response_bytes,
+            );
         }
         if !self.policy.scheme_allowed(url.scheme()) {
             return Err(NetError::blocked(format!(
@@ -1225,6 +1247,51 @@ fn data_outcome(url: &Url, max_bytes: u64) -> NetResult<FetchOutcome> {
             response_type: ResponseType::Basic,
         },
         body: Bytes::from(body.bytes),
+    })
+}
+
+/// The blob store's cap: the page's whole-response budget, since every entry
+/// is bytes the page could otherwise have fetched once.
+fn policy_blob_cap(policy: &ResourcePolicy) -> u64 {
+    policy.max_total_bytes
+}
+
+/// Fetch's scheme fetch for `blob:`: `GET` of a registered URL, or a network
+/// error. Any other method is a network error too, as Fetch requires.
+fn blob_outcome(
+    store: &crate::BlobUrlStore,
+    url: &Url,
+    method: &str,
+    max_bytes: u64,
+) -> NetResult<FetchOutcome> {
+    if !method.eq_ignore_ascii_case("GET") {
+        return Err(NetError::blocked(format!(
+            "blob: URLs answer GET only, not {method}"
+        )));
+    }
+    let Some((bytes, content_type)) = store.resolve(url) else {
+        return Err(NetError::invalid_url(format!(
+            "blob: URL is not registered in this page: {url}"
+        )));
+    };
+    if bytes.len() as u64 > max_bytes {
+        return Err(NetError::blocked(format!(
+            "blob: URL exceeds {max_bytes} bytes"
+        )));
+    }
+    Ok(FetchOutcome {
+        head: ResponseHead {
+            status: 200,
+            status_text: "OK".to_owned(),
+            final_url: url.to_string(),
+            headers: vec![
+                ("content-type".to_owned(), content_type),
+                ("content-length".to_owned(), bytes.len().to_string()),
+            ],
+            redirected: false,
+            response_type: ResponseType::Basic,
+        },
+        body: bytes,
     })
 }
 

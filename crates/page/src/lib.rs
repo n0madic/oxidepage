@@ -1416,6 +1416,25 @@ impl HostHooks for LoopHooks {
         }
     }
 
+    fn register_blob_url(
+        &self,
+        url: &str,
+        bytes: Vec<u8>,
+        content_type: String,
+        creator: oxidepage_base::FrameId,
+    ) -> bool {
+        self.net.borrow().as_ref().is_some_and(|net| {
+            net.register_blob_url(url, bytes, content_type, creator)
+                .is_ok()
+        })
+    }
+
+    fn revoke_blob_url(&self, url: &str) {
+        if let Some(net) = self.net.borrow().as_ref() {
+            net.revoke_blob_url(url);
+        }
+    }
+
     fn get_cookie(&self, document_url: &str) -> String {
         let Some(net) = self.net.borrow().as_ref().map(Rc::clone) else {
             return String::new();
@@ -3485,6 +3504,11 @@ impl Page {
         // name a freed document, and this runs before anything below can start
         // a load into one.
         self.discard_frames(self.frames.detach_nested());
+        // The outgoing top-level document's blob URLs die with it (ADR-0042).
+        // The new document was fetched before this runs, so a navigation *to*
+        // one of them has already resolved it.
+        self.net
+            .revoke_blob_urls_created_by(oxidepage_base::MAIN_FRAME);
         // Abort every in-flight subresource from the previous document so a
         // late completion cannot apply to — or corrupt the counters of — the
         // next one.
@@ -5325,6 +5349,9 @@ impl Page {
         // disconnection for the `<iframe>`s it held — exactly the case
         // `reset_document_state` handles for the page (ADR-0035 D1).
         self.discard_frames(self.frames.detach_below(frame.id()));
+        // The outgoing document's blob URLs, as for the top level in
+        // `reset_document_state`; `html` is already fetched.
+        self.net.revoke_blob_urls_created_by(frame.id());
         let previous = frame.document();
         let document = {
             let mut dom = self.state.dom.borrow_mut();
@@ -5855,6 +5882,8 @@ impl Page {
         let mut realms = Vec::new();
         for frame in doomed {
             realms.extend(self.worlds.release_frame(frame.id()));
+            // A discarded context's document unloads, and its blob URLs with it.
+            self.net.revoke_blob_urls_created_by(frame.id());
         }
         // Pass 2: the realms, once nothing holds a `Persistent` any more.
         drop(realms);

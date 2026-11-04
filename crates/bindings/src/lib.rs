@@ -535,6 +535,12 @@ fn install_native_helpers(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         ))
     })?;
 
+    // `__oxide_createObjectURL(blob)` and `__oxide_revokeObjectURL(url)` back
+    // the `URL` statics (ADR-0042); the bootstrap defines those, because the
+    // codegen emits no static operations.
+    define_fn(cx, &global, "__oxide_createObjectURL", 1, create_object_url)?;
+    define_fn(cx, &global, "__oxide_revokeObjectURL", 1, revoke_object_url)?;
+
     // `__oxide_cssSupports(a, b)` backs `CSS.supports`. The bootstrap resolves
     // the WebIDL overload by argument count and stringifies both arguments, so
     // a `null` second argument here means the one-argument `conditionText`
@@ -1063,6 +1069,69 @@ fn window_device_pixel_ratio(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValu
     Ok(JsValue::Number(f64::from(
         cx.state.layout.borrow().viewport().dpr,
     )))
+}
+
+/// `URL.createObjectURL(blob)`: `blob:<origin>/<uuid v4>`, registered in the
+/// page's blob URL store for this realm's frame (ADR-0042).
+///
+/// The bytes are copied once, here: the store is read from the network
+/// threads, and a `Blob`'s buffer is a page-thread `Rc`. A blob is immutable,
+/// so the copy is the same value for its whole life. `MediaSource` is the
+/// other argument HTML allows; there is none here, so anything that is not a
+/// `Blob` is a `TypeError`.
+fn create_object_url(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let blob = cx
+        .this_blob(&call.arg(0))
+        .map_err(|_| JsThrow::Type("URL.createObjectURL: argument is not a Blob".to_owned()))?;
+    let bytes = blob.bytes[blob.start..blob.end].to_vec();
+    let origin = crate::imp::htmli_frame_element::origin_of(&cx.state.frame.document_url());
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw)
+        .map_err(|e| JsThrow::Type(format!("random source unavailable: {e}")))?;
+    // RFC 9562 version 4, variant 10.
+    raw[6] = (raw[6] & 0x0f) | 0x40;
+    raw[8] = (raw[8] & 0x3f) | 0x80;
+    let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let url = format!(
+        "blob:{origin}/{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    );
+    let registered =
+        cx.state
+            .hooks
+            .register_blob_url(&url, bytes, blob.type_.clone(), cx.state.frame.frame());
+    if !registered {
+        return Err(cx.dom_throw(
+            oxidepage_base::DomExceptionKind::QuotaExceededError,
+            "URL.createObjectURL: the page's blob URL store is full",
+        ));
+    }
+    Ok(JsValue::String(url))
+}
+
+/// `URL.revokeObjectURL(url)`: forgets a blob URL **this origin** made. Any
+/// other string — not a URL, not `blob:`, another origin's — is ignored, as
+/// the File API says, so no page can revoke what it did not create.
+fn revoke_object_url(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let text = cx.arg_dom_string(call, 0)?;
+    let Ok(parsed) = url::Url::parse(&text) else {
+        return Ok(JsValue::Undefined);
+    };
+    if parsed.scheme() != "blob" {
+        return Ok(JsValue::Undefined);
+    }
+    let own = crate::imp::htmli_frame_element::origin_of(&cx.state.frame.document_url());
+    if crate::imp::htmli_frame_element::origin_of(parsed.as_str()) != own {
+        return Ok(JsValue::Undefined);
+    }
+    cx.state
+        .hooks
+        .revoke_blob_url(&parsed[..url::Position::AfterQuery]);
+    Ok(JsValue::Undefined)
 }
 
 /// `window.parent`: the embedding context's proxy, or this window for the

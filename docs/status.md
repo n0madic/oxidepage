@@ -882,8 +882,12 @@ cache. No HAR recording, no WebSocket interception (there is no `WebSocket` in
 the engine), no service workers. Response timing phases are absent, and
 `requestWillBeSent` carries `initiator: { type: "other" }`.
 
-**Files.** No `URL.createObjectURL` and no `blob:` scheme — a new scheme would
-widen the policy gate and nothing in the 90% run needs one. No `DataTransfer`,
+**Files.** `URL.createObjectURL`/`revokeObjectURL` and the `blob:` scheme are
+in (ADR-0042): one store per page, answered above the scheme gate like `data:`
+so every loader resolves it and a redirect to one stays blocked; URLs die with
+the document that made them, and the store is capped at `max_total_bytes`. A
+blob URL does not resolve in another page, and there is no `MediaSource` to
+pass it. No `DataTransfer`,
 so `input.files` is settable only by the embedder and `setInputFiles` on a
 non-`<input>` target fails. `FileReader` has no `readAsBinaryString` and no
 progress events beyond `loadstart`/`load`/`loadend`. `<input type=file>` has no

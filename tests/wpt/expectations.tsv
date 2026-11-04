@@ -1232,8 +1232,26 @@ css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negat
 css/cssom-view/scrollWidthHeight-overflow-visible-margin-collapsing.html	__harness__	OK
 css/cssom-view/scrollWidthHeight-overflow-visible-negative-margins.html	__harness__	OK
 css/cssom-view/scrolling-no-browsing-context.html	__harness__	OK
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	Execution of tests in quirks mode	NOTRUN
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	__harness__	TIMEOUT
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	__harness__	OK
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the HTML body element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the HTML body element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the root element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the root element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scroll() on the HTML body element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scroll() on the root element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollBy() on the HTML body element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollBy() on the root element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollRight of the content in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollRight of the content in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollTop on the HTML body element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollTop on the root element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollTop on the root element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the HTML body element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the HTML body element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the root element in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the root element in quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollingElement in non-quirks mode	FAIL
+css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollingElement in quirks mode	FAIL
 css/cssom-view/scrollingElement.html	__harness__	OK
 css/cssom-view/scrollingElement.html	scrollingElement in no-quirks mode 	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in no-quirks mode  (body table)	FAIL
