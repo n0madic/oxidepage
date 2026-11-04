@@ -37,6 +37,10 @@ interface Window : EventTarget {
   undefined alert(optional DOMString message = "");
   boolean confirm(optional DOMString message = "");
   DOMString? prompt(optional DOMString message = "", optional DOMString defaultValue = "");
+  // Both HTML overloads in one: `(message, targetOrigin, transfer)` and
+  // `(message, options)`, told apart by whether the second argument is an
+  // object — the generator has no overloads, so the imp resolves it.
+  undefined postMessage(any message, optional any targetOriginOrOptions, optional any transfer);
 };
 
 // Event handler IDL attributes (HTML §8.1.7). `EventHandler` is a type the
@@ -636,7 +640,8 @@ interface WindowProxy {
   undefined close();
   undefined focus();
   attribute any location;
-  undefined postMessage(any message, optional any targetOrigin);
+  // The same two overloads as `Window.postMessage`, resolved the same way.
+  undefined postMessage(any message, optional any targetOriginOrOptions, optional any transfer);
 };
 
 dictionary MessageEventInit : EventInit {

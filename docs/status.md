@@ -808,8 +808,12 @@ pre-existing gap in stylo's media-feature support. `page.fill` on a
 
 **Nested browsing contexts.** `postMessage` carries a JSON subset and
 **refuses** anything outside it with `DataCloneError`: no `Map`, `Set`, `Date`,
-`ArrayBuffer`, typed arrays, cycles or transferables, and no `MessageChannel`.
-An object reached across a frame boundary carries the *accessing* realm's
+`ArrayBuffer`, typed arrays, cycles or transferables, and no `MessageChannel`;
+a non-empty `transfer` list is a `DataCloneError` too, never ignored. Both
+HTML overloads work — `(message, targetOrigin, transfer)` and
+`(message, { targetOrigin, transfer })` — on a frame's `WindowProxy` and on
+`window` itself, whose `postMessage` posts to its own listeners as a task with
+`event.source === window`. An object reached across a frame boundary carries the *accessing* realm's
 prototypes, and a child's globals (`contentWindow.myVar`) are unreachable —
 both deliberate (ADR-0035 D4). Indexed and named access to a child context
 (`window[0]`, `window.frames[0]`, `window.frames['inner']`) is present and

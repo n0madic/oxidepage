@@ -184,3 +184,19 @@ pub(crate) fn prompt(
         DialogResponse::AcceptWith(text) => Ok(Some(text)),
     }
 }
+
+/// `window.postMessage`: a message to this very browsing context, delivered
+/// as a task to its own `message` listeners with `event.source === window`.
+///
+/// The same steps as a frame proxy's `postMessage` — the target is simply the
+/// sender's own context — so targetOrigin matching, the clone limits and the
+/// task delivery cannot differ between the two.
+pub(crate) fn post_message(
+    cx: &BindCx<'_>,
+    _this: EventTargetKey,
+    message: JsValue,
+    options: JsValue,
+    transfer: JsValue,
+) -> Result<(), JsThrow> {
+    crate::imp::window_proxy::post_to_frame(cx, cx.state.frame.frame(), message, options, transfer)
+}

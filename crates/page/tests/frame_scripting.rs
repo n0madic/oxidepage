@@ -134,6 +134,92 @@ fn post_message_reaches_a_frame_and_comes_back() {
     assert_eq!(s(&page, "window.replies[0]"), "5");
 }
 
+/// `window.postMessage` reaches the page's own listeners — as a task, with
+/// its own `window` as `source` and its own origin — and the reply idiom
+/// `e.source.postMessage(…)` therefore works for it too.
+#[test]
+fn a_page_can_post_a_message_to_itself() {
+    let page = page(
+        "<!DOCTYPE html><body><script>\
+           window.seen = [];\
+           window.addEventListener(\"message\", (e) => {\
+             window.seen.push([e.data.n, e.source === window, e.origin === location.origin].join(\"/\"));\
+             if (e.data.n === 1) e.source.postMessage({ n: 2 }, \"*\");\
+           });\
+         </script></body>",
+    );
+    let synchronous = page
+        .eval_to_string("window.postMessage({ n: 1 }); window.seen.length")
+        .unwrap();
+    assert_eq!(
+        synchronous, "0",
+        "not delivered while the sender still runs"
+    );
+
+    page.settle(Duration::from_millis(500));
+    assert_eq!(s(&page, "window.seen.join()"), "1/true/true,2/true/true");
+    assert_eq!(
+        s(
+            &page,
+            "[typeof window.postMessage, window.postMessage.length].join()"
+        ),
+        "function,1"
+    );
+}
+
+/// HTML's options overload, `postMessage(message, { targetOrigin })`, on both
+/// a proxy and the page's own window: an object second argument is the
+/// dictionary, not a `targetOrigin` string to parse.
+#[test]
+fn post_message_takes_the_options_overload() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <iframe id='f' srcdoc='<script>\
+           window.addEventListener(\"message\", (e) => { document.title += e.data; });\
+         </script>'></iframe>\
+         <script>\
+           window.got = \"\";\
+           window.addEventListener(\"message\", (e) => { window.got += e.data; });\
+         </script></body>",
+    );
+    page.eval_to_string(
+        "const w = document.getElementById('f').contentWindow;\
+         w.postMessage('a', { targetOrigin: '*' });\
+         w.postMessage('x', { targetOrigin: 'https://elsewhere.example' });\
+         w.postMessage('b', {});\
+         window.postMessage('c', { targetOrigin: '/', transfer: [] });\
+         window.postMessage('d', null);\
+         0",
+    )
+    .unwrap();
+    page.settle(Duration::from_millis(500));
+    assert_eq!(
+        s(&page, "document.getElementById('f').contentDocument.title"),
+        "ab",
+        "a mismatched targetOrigin drops the message silently"
+    );
+    assert_eq!(s(&page, "window.got"), "cd");
+}
+
+/// Nothing is transferable here, so a non-empty transfer list is refused
+/// rather than accepted and ignored; an empty one is the default and fine.
+#[test]
+fn post_message_refuses_a_transfer_list() {
+    let page = page("<!DOCTYPE html><body></body>");
+    assert_eq!(
+        s(
+            &page,
+            "const name = (f) => { try { f(); return 'ok'; } catch (e) { return e.name; } };\
+             [name(() => window.postMessage(1, '*', [])),\
+              name(() => window.postMessage(1, '*', [new ArrayBuffer(1)])),\
+              name(() => window.postMessage(1, { transfer: [{}] })),\
+              name(() => window.postMessage(1, '*', 5)),\
+              name(() => window.postMessage(1, 'not an origin'))].join()"
+        ),
+        "ok,DataCloneError,DataCloneError,TypeError,SyntaxError"
+    );
+}
+
 /// Delivery is a task. A `postMessage` is never observable before the calling
 /// script yields — which is what stops a ping-pong from riding the native
 /// stack.
@@ -291,6 +377,30 @@ fn allow_scripts_lets_a_sandboxed_frame_run() {
         ),
         "ran"
     );
+}
+
+/// An opaque origin is same-origin with nothing else, but a window posting to
+/// itself is one document: the default `targetOrigin` of `"/"` still reaches
+/// a sandboxed frame's own listeners.
+#[test]
+fn a_sandboxed_frame_can_post_to_itself() {
+    // The embedder listens first: the frame's reply can arrive while the
+    // parser is still suspended at a later script.
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <script>\
+           window.got = [];\
+           window.addEventListener(\"message\", (e) => { window.got.push(e.data); });\
+         </script>\
+         <iframe sandbox='allow-scripts' srcdoc='<script>\
+           window.addEventListener(\"message\", (e) => {\
+             if (e.source === window) parent.postMessage(\"self:\" + e.data, \"*\");\
+           });\
+           window.postMessage(\"hi\");\
+         </script>'></iframe></body>",
+    );
+    page.settle(Duration::from_millis(500));
+    assert_eq!(s(&page, "window.got.join()"), "self:hi");
 }
 
 /// Without `allow-same-origin` the frame has an **opaque** origin, so its

@@ -2179,6 +2179,7 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.define_method(&proto_window, "alert", 0, gen_window_alert)?;
     cx.define_method(&proto_window, "confirm", 0, gen_window_confirm)?;
     cx.define_method(&proto_window, "prompt", 0, gen_window_prompt)?;
+    cx.define_method(&proto_window, "postMessage", 1, gen_window_post_message)?;
     cx.define_accessor(
         &proto_window,
         "onabort",
@@ -9753,6 +9754,15 @@ fn gen_window_prompt(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
     })
 }
 
+fn gen_window_post_message(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window(&call.this)?;
+    let a0 = call.arg(0);
+    let a1 = call.arg(1);
+    let a2 = call.arg(2);
+    imp::window::post_message(cx, this, a0, a1, a2)?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_window_get_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window(&call.this)?;
     Ok(imp::event_handler(cx, this, "abort"))
@@ -15406,7 +15416,8 @@ fn gen_window_proxy_post_message(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
     let this = cx.this_window_proxy(&call.this)?;
     let a0 = call.arg(0);
     let a1 = call.arg(1);
-    imp::window_proxy::post_message(cx, this, a0, a1)?;
+    let a2 = call.arg(2);
+    imp::window_proxy::post_message(cx, this, a0, a1, a2)?;
     Ok(JsValue::Undefined)
 }
 
