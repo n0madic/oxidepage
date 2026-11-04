@@ -68,6 +68,23 @@ interface MouseEvent : UIEvent {
   readonly attribute unsigned short buttons;
   readonly attribute EventTarget? relatedTarget;
   boolean getModifierState(DOMString keyArg);
+  // Legacy, and the reason `document.createEvent("MouseEvents")` exists at
+  // all: the event it returns is useless without it. Two deliberate type
+  // escapes: `buttonArg` is the spec's `short`, declared `long` because the
+  // generator has no signed-short argument (ToInt32 then truncating to i16 is
+  // exactly ToInt16, so nothing observable changes); and `viewArg` /
+  // `relatedTargetArg` are `any` for the same reason `UIEvent.view` is.
+  undefined initMouseEvent(DOMString typeArg, optional boolean bubblesArg = false,
+                           optional boolean cancelableArg = false,
+                           optional any viewArg = null, optional long detailArg = 0,
+                           optional long screenXArg = 0, optional long screenYArg = 0,
+                           optional long clientXArg = 0, optional long clientYArg = 0,
+                           optional boolean ctrlKeyArg = false,
+                           optional boolean altKeyArg = false,
+                           optional boolean shiftKeyArg = false,
+                           optional boolean metaKeyArg = false,
+                           optional long buttonArg = 0,
+                           optional any relatedTargetArg = null);
 };
 
 dictionary WheelEventInit : MouseEventInit {
@@ -137,6 +154,18 @@ interface KeyboardEvent : UIEvent {
   readonly attribute unsigned long keyCode;
   readonly attribute unsigned long which;
   boolean getModifierState(DOMString keyArg);
+  // Legacy (UI Events §"Legacy KeyboardEvent supplemental interface"), still
+  // what `document.createEvent("KeyboardEvent")` callers use. It sets `key`
+  // and `location` only: `code`, `repeat`, `charCode` and `keyCode` are not
+  // among its arguments and keep their defaults, as in every browser.
+  undefined initKeyboardEvent(DOMString typeArg, optional boolean bubblesArg = false,
+                              optional boolean cancelableArg = false,
+                              optional any viewArg = null, optional DOMString keyArg = "",
+                              optional unsigned long locationArg = 0,
+                              optional boolean ctrlKey = false,
+                              optional boolean altKey = false,
+                              optional boolean shiftKey = false,
+                              optional boolean metaKey = false);
 };
 
 dictionary FocusEventInit : UIEventInit {

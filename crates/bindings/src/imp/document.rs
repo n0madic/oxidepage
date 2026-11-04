@@ -479,8 +479,12 @@ pub(crate) fn create_event(
     // The legacy plural aliases are part of it — `"MouseEvents"` is what every
     // pre-constructor test and library passes, and it is the only spelling some
     // of them know.
-    let (iface, ui) = match interface.to_ascii_lowercase().as_str() {
+    let lowered = interface.to_ascii_lowercase();
+    let (iface, ui) = match lowered.as_str() {
         "event" | "events" | "htmlevents" | "svgevents" => ("Event", None),
+        // In the table and implemented (ADR-0035 D4). It carries a message
+        // payload rather than a UI one, so it is built below.
+        "messageevent" => ("MessageEvent", None),
         "customevent" => ("CustomEvent", None),
         "uievent" | "uievents" => ("UIEvent", Some(UiKind::Plain)),
         "mouseevent" | "mouseevents" => ("MouseEvent", Some(UiKind::Mouse(Box::default()))),
@@ -514,6 +518,13 @@ pub(crate) fn create_event(
     // missing payload would make them throw instead.
     if let Some(kind) = ui {
         data.ui = Some(Box::new(UiPayload::new(kind)));
+    }
+    if iface == "MessageEvent" {
+        data.message = Some(Box::new(crate::events::MessagePayload {
+            origin: String::new(),
+            source: None,
+            last_event_id: String::new(),
+        }));
     }
     let (value, _) = cx.new_event_object(iface, data)?;
     Ok(value)

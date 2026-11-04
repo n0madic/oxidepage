@@ -76,7 +76,12 @@ v1 limits.
   `getComputedStyle` returns computed values, and the CSSOM is scripted:
   `el.style` (camelCase/dashed/indexed via a proxy), `getComputedStyle`,
   `document.styleSheets`, `CSSStyleSheet.insertRule`/`deleteRule`/`disabled`,
-  `CSSRuleList`, `CSSRule`/`CSSStyleRule` (`selectorText`, `style`). Gated by
+  `CSSRuleList`, `CSSRule`/`CSSStyleRule` (`selectorText`, `style`), and the
+  `CSS` namespace: `CSS.escape` (CSSOM's "serialize an identifier", in JS so a
+  lone surrogate survives) and both overloads of `CSS.supports`, answered by
+  stylo's own `@supports` evaluator so the method and the at-rule cannot
+  disagree. `@page` is **not** parsed — stylo accepts it only in its Gecko
+  build — so it is absent from `cssRules` and there is no `CSSPageRule`. Gated by
   style-engine, computed-value, and CSSOM integration tests plus the WPT
   `css/cssom` suite. Implementation decisions: ADR-0005.
 - **Phase 5 — Layout & geometry (taffy + parley)**: done. A box tree separate
@@ -408,7 +413,11 @@ v1 limits.
   interfaces with constructors and init dictionaries, carried by one boxed
   optional payload on `EventData` so a non-UI event pays a null pointer for them.
   `document.createEvent` accepts the legacy names (`"MouseEvents"`, `"UIEvents"`,
-  `"textevent"`, …). **Activation moved into `dispatch_event`**, triggered by the
+  `"textevent"`, …) plus `"MessageEvent"`, and the legacy initializers that make
+  the result usable exist — `initUIEvent`, `initMouseEvent` and
+  `initKeyboardEvent` — so the pre-constructor idiom
+  `createEvent("MouseEvents")` → `initMouseEvent("click", …)` → `dispatchEvent`
+  produces a real, activating click. **Activation moved into `dispatch_event`**, triggered by the
   spec's real condition — a `click` carrying a mouse payload — so `.click()`,
   `dispatchEvent(new MouseEvent("click"))` and a synthesized click share one
   path; a plain `Event` named `"click"` still does not activate. `Page::dispatch_mouse`

@@ -426,3 +426,59 @@ fn get_computed_style_accepts_a_null_pseudo_element() {
         "null"
     );
 }
+
+/// `CSS.escape` is CSSOM's "serialize an identifier", and its output is what
+/// makes an arbitrary id safe to splice into a selector.
+#[test]
+fn css_escape_serializes_an_identifier() {
+    assert_eq!(
+        eval(
+            DIV,
+            "[CSS.escape('1a#b.c'), CSS.escape('-'), CSS.escape('-1x'),\
+              CSS.escape('a\\x7fb'), CSS.escape('\\0') === '\\uFFFD',\
+              CSS.escape('\\uD834') === '\\uD834', CSS.escape.length].join('|')",
+        ),
+        "\\31 a\\#b\\.c|\\-|-\\31 x|a\\7f b|true|true|1"
+    );
+    assert_eq!(
+        eval(
+            DIV,
+            "const d = document.getElementById('d'); d.id = '1:x';\
+             String(document.querySelector('#' + CSS.escape('1:x')) === d)",
+        ),
+        "true"
+    );
+}
+
+/// `CSS.supports` in both overloads, answered by stylo's `@supports` evaluator.
+#[test]
+fn css_supports_both_forms() {
+    assert_eq!(
+        eval(
+            DIV,
+            "[CSS.supports('display', 'grid'), CSS.supports('DISPLAY', 'grid'),\
+              CSS.supports('display', 'nope'), CSS.supports('color', 'red !important'),\
+              CSS.supports('--x', '1'), CSS.supports('(display: flex)'),\
+              CSS.supports('display: flex'), CSS.supports('not (display: nope)'),\
+              CSS.supports('(display: flex) junk'), CSS.supports('bogus'),\
+              CSS.supports.length].join()",
+        ),
+        "true,true,false,false,true,true,true,true,false,false,1"
+    );
+}
+
+/// `CSS` is a WebIDL namespace: a non-enumerable global whose prototype is
+/// `Object.prototype`, and the native helper behind `supports` is not exposed.
+#[test]
+fn css_namespace_shape() {
+    assert_eq!(
+        eval(
+            DIV,
+            "[Object.prototype.toString.call(CSS),\
+              Object.getOwnPropertyDescriptor(window, 'CSS').enumerable,\
+              Object.getPrototypeOf(CSS) === Object.prototype,\
+              Object.keys(CSS).join('+'), typeof __oxide_cssSupports].join()",
+        ),
+        "[object CSS],false,true,escape+supports,undefined"
+    );
+}

@@ -88,15 +88,6 @@ const URL_SKIP: &[&str] = &["idlharness", "IdnaTestV2", "historical"];
 ///   these `el.style`, so they now reach the event wait instead of failing fast
 ///   at `elem.style.transition = …`, which is why their harness flipped
 ///   `OK`→`TIMEOUT`.)
-/// - `javascript-urls`: each subtest clicks an `<a href="javascript:…">` and
-///   awaits the navigation that executes it. Anchor activation now exists
-///   (ADR-0022), so the click *does* reach "follow the hyperlink" — but the
-///   `javascript:` scheme does not: evaluating a URL as script is a separate
-///   navigation mode this engine deliberately does not implement, so the
-///   activation warns and stops. The awaited promise therefore still never
-///   settles and the file waits out the harness budget. This is the
-///   animation-events story again: before `click()` existed the call threw and
-///   the file failed *fast*, which is the only reason it was not a TIMEOUT.
 const SKIP_SUBSTRINGS: &[&str] = &[
     "NodeList-static-length-getter-tampered",
     "Event-dispatch-on-disabled-elements",
@@ -104,20 +95,20 @@ const SKIP_SUBSTRINGS: &[&str] = &[
     "handler-count",
     "webkit-animation",
     "webkit-transition",
-    "javascript-urls",
-    // Surfaced once `.any.js`/`.window.js` files began running. Both need a
-    // *second* global (an iframe or `window.open`), which v1 does not have
-    // ("Iframes: not loaded", design §12), so they can only ever wait out the
-    // harness budget. `EventListener-addEventListener.sub` also needs WPT's
-    // server-side `.sub.` substitution, which `TestServer` does not implement.
-    "event-global-extra",
+    // Needs WPT's server-side `.sub.` substitution, which `TestServer` does not
+    // implement, so the file waits on a URL that never resolves.
+    //
+    // `javascript-urls`, `event-global-extra` and the iframe-driven files
+    // (`iframe`, `Frame`, `frameElement`, `elementsFromPoint-iframes`,
+    // `scrollIntoView-container`) used to be listed here. `javascript:` URLs
+    // landed with ADR-0023 and nested browsing contexts with ADR-0035, so every
+    // one of them now finishes. What still fails either fails fast or waits on
+    // a frame `load` the engine does not fire — and a page with nothing left
+    // to do settles at once, so the runner ends it in well under a second
+    // instead of at the budget. Both are deterministic outcomes, and those
+    // belong in the expectations, not in a list of files nobody runs.
     "EventListener-addEventListener.sub",
     // === css/cssom-view impossibilities in Phase 5 v1 (ADR-0006) ===
-    // No subdocuments: every iframe-driven test waits on a load that never
-    // fires and times out at the harness budget.
-    "iframe",
-    "Frame",
-    "frameElement",
     // Smooth scrolling is out of scope (ADR-0023): there is no animation
     // timeline, so these async tests wait for a scroll animation forever.
     // `scrollIntoView` itself is implemented and no longer skipped — it treats
@@ -125,16 +116,9 @@ const SKIP_SUBSTRINGS: &[&str] = &[
     "smooth-scroll",
     "scrollBy-scrollTo-arguments",
     "visualViewport",
-    // Requires window.open / multiple browsing contexts.
+    // A popup: `window.open` returns `null` without an embedder that opens one
+    // (ADR-0027), so a file that waits on the popup's load can only hang.
     "window-open",
-    "elementsFromPoint-iframes",
-    // `scrollIntoView` is implemented (ADR-0023) and its files run. This one
-    // is the exception: it asserts propagation to *outer frames*, so it waits
-    // on a subdocument load that never happens and can only time out. The
-    // writing-mode and smooth-scroll files are left running — they FAIL
-    // honestly against the engine's vertical-writing-mode and animation
-    // limits, and a FAIL belongs in the expectations, not in this list.
-    "scrollIntoView-container",
     // Drives the pointer through WPT's `test_driver` protocol, which needs a
     // browser-side driver the runner does not implement — so it waits forever.
     // `mouseEvent.html` itself needs no driver and runs.

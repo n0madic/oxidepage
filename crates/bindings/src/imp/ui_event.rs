@@ -85,10 +85,16 @@ pub(crate) fn member_node(
     name: &str,
 ) -> Option<crate::events::PinnedNode> {
     let value = member(cx, init, name)?;
+    node_arg(cx, &value)
+}
+
+/// An `EventTarget?` *argument* (the legacy `init*Event` methods take it
+/// positionally), with the same reading as [`member_node`].
+pub(crate) fn node_arg(cx: &BindCx<'_>, value: &JsValue) -> Option<crate::events::PinnedNode> {
     if value.is_nullish() {
         return None;
     }
-    let id = cx.this_node(&value).ok()?;
+    let id = cx.this_node(value).ok()?;
     Some(crate::events::PinnedNode::new(&cx.state.dom, id))
 }
 

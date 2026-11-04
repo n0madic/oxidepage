@@ -5417,6 +5417,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         1,
         gen_mouse_event_get_modifier_state,
     )?;
+    cx.define_method(
+        &proto_mouse_event,
+        "initMouseEvent",
+        1,
+        gen_mouse_event_init_mouse_event,
+    )?;
     cx.finish_interface(
         "MouseEvent",
         &proto_mouse_event,
@@ -5537,6 +5543,12 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "getModifierState",
         1,
         gen_keyboard_event_get_modifier_state,
+    )?;
+    cx.define_method(
+        &proto_keyboard_event,
+        "initKeyboardEvent",
+        1,
+        gen_keyboard_event_init_keyboard_event,
     )?;
     cx.finish_interface(
         "KeyboardEvent",
@@ -15865,6 +15877,29 @@ fn gen_mouse_event_get_modifier_state(
     )?))
 }
 
+fn gen_mouse_event_init_mouse_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_bool_or(call, 1, false);
+    let a2 = cx.arg_bool_or(call, 2, false);
+    let a3 = call.arg(3);
+    let a4 = cx.arg_i32_or(call, 4, 0)?;
+    let a5 = cx.arg_i32_or(call, 5, 0)?;
+    let a6 = cx.arg_i32_or(call, 6, 0)?;
+    let a7 = cx.arg_i32_or(call, 7, 0)?;
+    let a8 = cx.arg_i32_or(call, 8, 0)?;
+    let a9 = cx.arg_bool_or(call, 9, false);
+    let a10 = cx.arg_bool_or(call, 10, false);
+    let a11 = cx.arg_bool_or(call, 11, false);
+    let a12 = cx.arg_bool_or(call, 12, false);
+    let a13 = cx.arg_i32_or(call, 13, 0)?;
+    let a14 = call.arg(14);
+    imp::mouse_event::init_mouse_event(
+        cx, this, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14,
+    )?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_mouse_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
@@ -16008,6 +16043,25 @@ fn gen_keyboard_event_get_modifier_state(
     Ok(JsValue::Bool(imp::keyboard_event::get_modifier_state(
         cx, this, a0,
     )?))
+}
+
+fn gen_keyboard_event_init_keyboard_event(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_event(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let a1 = cx.arg_bool_or(call, 1, false);
+    let a2 = cx.arg_bool_or(call, 2, false);
+    let a3 = call.arg(3);
+    let a4 = cx.arg_dom_string_or(call, 4, "")?;
+    let a5 = cx.arg_u32_or(call, 5, 0)?;
+    let a6 = cx.arg_bool_or(call, 6, false);
+    let a7 = cx.arg_bool_or(call, 7, false);
+    let a8 = cx.arg_bool_or(call, 8, false);
+    let a9 = cx.arg_bool_or(call, 9, false);
+    imp::keyboard_event::init_keyboard_event(cx, this, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9)?;
+    Ok(JsValue::Undefined)
 }
 
 fn gen_keyboard_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

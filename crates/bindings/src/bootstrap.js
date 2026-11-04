@@ -862,6 +862,7 @@
         // deleted from the global so page script never sees the `__oxide_*`
         // surface. `randomBytes` backs `crypto`.
         const nativeRandomBytes = globalThis.__oxide_randomBytes;
+        const nativeCssSupports = globalThis.__oxide_cssSupports;
 
         const def = (target, name, value) => {
             reflectDefineProperty(target, name, {
@@ -917,6 +918,70 @@
                 { value: "Crypto", writable: false, enumerable: false, configurable: true });
             reflectDefineProperty(globalThis, "crypto", {
                 value: cryptoObj, writable: false, enumerable: true, configurable: true,
+            });
+        }
+
+        // === CSS namespace (escape + supports) ===
+        // A WebIDL `namespace`, which the codegen does not emit, so it is built
+        // here: a plain object off %Object.prototype%, a non-enumerable global,
+        // enumerable operations. `escape` is pure string work and lives in JS
+        // on purpose — it must see UTF-16 code units, and a lone surrogate has
+        // to come back unchanged, which a round trip through a Rust `String`
+        // would turn into U+FFFD. `supports` is stylo's own `@supports`
+        // evaluator, so the method and the at-rule cannot disagree.
+        if (typeof nativeCssSupports === "function" && globalThis.CSS === undefined) {
+            const hexEscape = (unit) => "\\" + unit.toString(16) + " ";
+            // CSSOM "serialize an identifier".
+            const escape = function escape(ident) {
+                if (arguments.length < 1) {
+                    throw new TypeError("CSS.escape: 1 argument required, but only 0 present.");
+                }
+                const s = StringCtor(ident);
+                const length = s.length;
+                const first = length > 0 ? s.charCodeAt(0) : 0;
+                let out = "";
+                for (let i = 0; i < length; i++) {
+                    const unit = s.charCodeAt(i);
+                    if (unit === 0) {
+                        out += "\uFFFD";
+                    } else if ((unit >= 0x01 && unit <= 0x1f) || unit === 0x7f
+                        || (i === 0 && unit >= 0x30 && unit <= 0x39)
+                        || (i === 1 && unit >= 0x30 && unit <= 0x39 && first === 0x2d)) {
+                        out += hexEscape(unit);
+                    } else if (i === 0 && length === 1 && unit === 0x2d) {
+                        out += "\\" + s[i];
+                    } else if (unit >= 0x80 || unit === 0x2d || unit === 0x5f
+                        || (unit >= 0x30 && unit <= 0x39)
+                        || (unit >= 0x41 && unit <= 0x5a)
+                        || (unit >= 0x61 && unit <= 0x7a)) {
+                        out += s[i];
+                    } else {
+                        out += "\\" + s[i];
+                    }
+                }
+                return out;
+            };
+            // Overloaded on argument count: `supports(property, value)` and
+            // `supports(conditionText)`. Both stringify like a DOMString. One
+            // declared parameter, because an overload set's `length` is its
+            // shortest form's required count.
+            const supports = function supports(propertyOrCondition) {
+                if (arguments.length < 1) {
+                    throw new TypeError("CSS.supports: 1 argument required, but only 0 present.");
+                }
+                const first = StringCtor(propertyOrCondition);
+                if (arguments.length === 1) {
+                    return nativeCssSupports(first, null);
+                }
+                return nativeCssSupports(first, StringCtor(arguments[1]));
+            };
+            const cssObj = objectCreate(ObjectProto);
+            def(cssObj, "escape", escape);
+            def(cssObj, "supports", supports);
+            reflectDefineProperty(cssObj, Symbol.toStringTag,
+                { value: "CSS", writable: false, enumerable: false, configurable: true });
+            reflectDefineProperty(globalThis, "CSS", {
+                value: cssObj, writable: true, enumerable: false, configurable: true,
             });
         }
 
@@ -1433,6 +1498,7 @@
 
         // The `__oxide_*` helpers have been captured into locals; hide them.
         reflectDeleteProperty(globalThis, "__oxide_randomBytes");
+        reflectDeleteProperty(globalThis, "__oxide_cssSupports");
     };
 
     // URLSearchParams pair iteration, built on a native `snapshot(params)`
