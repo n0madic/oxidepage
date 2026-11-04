@@ -5196,6 +5196,11 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.finish_interface("Storage", &proto_storage, CtorSpec::Illegal)?;
 
     let proto_window_proxy = cx.begin_interface("WindowProxy", None)?;
+    cx.define_getter(
+        &proto_window_proxy,
+        "document",
+        gen_window_proxy_get_document,
+    )?;
     cx.define_getter(&proto_window_proxy, "closed", gen_window_proxy_get_closed)?;
     cx.define_method(&proto_window_proxy, "close", 0, gen_window_proxy_close)?;
     cx.define_method(&proto_window_proxy, "focus", 0, gen_window_proxy_focus)?;
@@ -15946,6 +15951,11 @@ fn gen_storage_clear(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
     let this = cx.this_storage(&call.this)?;
     imp::storage::clear(cx, this)?;
     Ok(JsValue::Undefined)
+}
+
+fn gen_window_proxy_get_document(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_window_proxy(&call.this)?;
+    imp::window_proxy::document(cx, this)
 }
 
 fn gen_window_proxy_get_closed(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

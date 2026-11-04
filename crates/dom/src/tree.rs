@@ -655,6 +655,29 @@ impl DomTree {
         std::mem::take(&mut self.frame_updates)
     }
 
+    /// Whether an `<iframe>` was reported connected and not yet drained: the
+    /// cheap gate in front of creating its context synchronously.
+    #[must_use]
+    pub fn has_pending_frame_connect(&self) -> bool {
+        self.frame_updates
+            .iter()
+            .any(|u| matches!(u, FrameUpdate::Connected(_)))
+    }
+
+    /// The `<iframe>`s reported connected and not yet drained, in queue order.
+    /// The queue itself is left alone: its drain still owes each one its
+    /// initial navigation and its pin's release.
+    #[must_use]
+    pub fn pending_frame_connects(&self) -> Vec<NodeId> {
+        self.frame_updates
+            .iter()
+            .filter_map(|u| match u {
+                FrameUpdate::Connected(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Queues an `<iframe>` context transition, **pinning** the element until
     /// the drain releases it.
     ///

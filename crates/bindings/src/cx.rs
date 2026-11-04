@@ -105,6 +105,13 @@ fn native_inner(f: NativeFn, ce: bool) -> HostFn {
             // runs after the reactions so that records *they* queued (a
             // connectedCallback that mutates the DOM) join this same microtask.
             cx.queue_mutation_microtask()?;
+            // An `<iframe>` this call connected gets its browsing context
+            // before the script resumes, so `contentDocument` and
+            // `contentWindow` answer on the next line (ADR-0045). After the
+            // reactions: a `connectedCallback` may insert one too.
+            if cx.state.dom.borrow().has_pending_frame_connect() {
+                cx.state.frame.global.attach_connected_frames();
+            }
             // Apply wrapper retention for nodes this call connected/disconnected
             // *synchronously*: a later allocation in the same task could GC an
             // unretained wrapper — losing its expando state — before the event

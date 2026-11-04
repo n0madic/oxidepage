@@ -1030,6 +1030,9 @@ pub struct PageGlobal {
     /// edge would close the `Page -> WorldTable -> realm -> WorldState ->
     /// FrameShared -> PageGlobal` cycle and leak every runtime (D4).
     pub(crate) enter: RefCell<Weak<dyn WorldEnter>>,
+    /// Creates a frame's context from inside a host call (ADR-0045). Weak,
+    /// like `enter`.
+    frame_host: RefCell<Weak<dyn FrameHost>>,
     /// Every browsing context of the page, by its rendered document.
     ///
     /// This is how a member reaches the *right* engine for a node that is not
@@ -1137,6 +1140,7 @@ impl PageGlobal {
             next_object_id: Cell::new(0),
             object_worlds: RefCell::new(HashMap::new()),
             enter: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
+            frame_host: RefCell::new(Weak::<crate::state::NoWorlds>::new()),
             frames: RefCell::new(HashMap::new()),
             frames_by_id: RefCell::new(HashMap::new()),
             messages: RefCell::new(VecDeque::new()),
@@ -1329,6 +1333,21 @@ impl PageGlobal {
     /// main world exists — the table cannot exist before its first world does.
     pub fn set_world_enter(&self, enter: Weak<dyn WorldEnter>) {
         *self.enter.borrow_mut() = enter;
+    }
+
+    /// Installs the page's frame host (ADR-0045).
+    pub fn set_frame_host(&self, host: Weak<dyn FrameHost>) {
+        *self.frame_host.borrow_mut() = host;
+    }
+
+    /// Asks the page to create the contexts of newly connected `<iframe>`s.
+    pub(crate) fn attach_connected_frames(&self) {
+        // Upgraded and the `RefCell` released before the call: creating a
+        // context runs script, which may insert another `<iframe>`.
+        let host = self.frame_host.borrow().upgrade();
+        if let Some(host) = host {
+            host.attach_connected_frames();
+        }
     }
 
     /// Runs `f` in `world`. See [`WorldEnter::enter`] for when this is skipped.
@@ -2123,6 +2142,27 @@ impl FrameShared {
     /// no-table fallback for the life of the page.
     pub fn forget_worlds(&self) {
         self.worlds.borrow_mut().clear();
+    }
+}
+
+/// Gives an `<iframe>` its browsing context **now**, from inside the script
+/// that inserted it (ADR-0045).
+///
+/// HTML creates the context, with its initial `about:blank` document, during
+/// the insertion itself, so `appendChild(iframe)` followed by
+/// `iframe.contentDocument` reads a document. Building one evaluates
+/// `bootstrap.js` in a fresh realm and runs the driver's init scripts, which
+/// only the page can do; `bindings` reaches it through this trait, held as a
+/// [`Weak`] on [`PageGlobal`] for the same cycle reason as [`WorldEnter`].
+pub trait FrameHost {
+    /// Creates the context of every `<iframe>` the DOM reported connected that
+    /// does not have one yet. Navigation to `src`/`srcdoc` stays a task.
+    fn attach_connected_frames(&self);
+}
+
+impl FrameHost for NoWorlds {
+    fn attach_connected_frames(&self) {
+        match *self {}
     }
 }
 

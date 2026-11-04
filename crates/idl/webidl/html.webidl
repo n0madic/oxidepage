@@ -650,6 +650,9 @@ interface Storage {
 // write-only for the same reason a cross-origin `WindowProxy`'s is in a real
 // browser: navigating a sibling is allowed, reading its URL is not.
 interface WindowProxy {
+  // A same-origin frame's document, in the accessing realm's wrapper; the
+  // proxy cannot reach the frame's own global (ADR-0035 D4, ADR-0045).
+  readonly attribute any document;
   readonly attribute boolean closed;
   undefined close();
   undefined focus();

@@ -129,6 +129,10 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 crossbeam-channel = "0.5"
+# A scoped thread-local `&Page` while the page is inside JS, so a host call can
+# reach the page to create an `<iframe>`'s browsing context synchronously
+# (ADR-0045). The crate's own `unsafe` is what keeps ours at zero.
+scoped-tls = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "brotli", "zstd", "deflate"] }
 url = "2"
 # `url`'s own percent-decoder, used directly wherever a URL component has to be

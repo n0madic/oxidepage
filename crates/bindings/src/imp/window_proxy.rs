@@ -21,6 +21,25 @@ use oxidepage_js::{JsThrow, JsValue};
 use crate::cx::BindCx;
 use crate::window_open::{WindowOp, WindowProxyData};
 
+/// `window.document` through the proxy: a same-origin frame's current
+/// document, wrapped in the accessing realm as `iframe.contentDocument` is.
+/// Anything else is the cross-origin case and throws, as a browser does for a
+/// `WindowProxy` whose `document` it may not read. The frame's *other* globals
+/// stay out of reach: they live in another runtime (ADR-0035 D4).
+pub(crate) fn document(cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<JsValue, JsThrow> {
+    if let WindowProxyData::Frame(frame) = &*this
+        && let Some(state) = cx.frame_state(*frame)
+        && cx.same_origin_frame(&state)
+    {
+        return cx.node_to_js(state.document());
+    }
+    Err(cx.dom_throw(
+        DomExceptionKind::SecurityError,
+        "Failed to read the 'document' property from 'WindowProxy': \
+         blocked a frame from accessing a cross-origin frame",
+    ))
+}
+
 pub(crate) fn closed(cx: &BindCx<'_>, this: Rc<WindowProxyData>) -> Result<bool, JsThrow> {
     match &*this {
         WindowProxyData::Sibling(window) => Ok(window.closed.load(Ordering::Acquire)),

@@ -57,7 +57,7 @@ pub use preview::{
 };
 pub use script::is_classic_script_type;
 pub use state::{
-    BindingCall, FrameShared, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES,
+    BindingCall, FrameHost, FrameShared, HostHooks, InitScript, MAIN_WORLD, MAX_HISTORY_ENTRIES,
     NavigationBody, NavigatorData, PageGlobal, PendingMessage, PendingNavigation, ReadyState,
     Sandbox, ScreenData, SessionHistory, TimingMilestone, WorldEnter, WorldId, WorldState,
 };

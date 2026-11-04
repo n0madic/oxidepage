@@ -775,8 +775,6 @@ css/cssom-view/elementFromPoint-visibility-hidden-resizer.html	elementFromPoint 
 css/cssom-view/elementFromPoint.html	Fieldsets	FAIL
 css/cssom-view/elementFromPoint.html	Image Maps	FAIL
 css/cssom-view/elementFromPoint.html	__harness__	OK
-css/cssom-view/elementFromPoint.html	co-ordinates larger than the viewport from in iframe	FAIL
-css/cssom-view/elementFromPoint.html	no hit target at x,y	FAIL
 css/cssom-view/elementFromPoint.html	transformed element at x,y	FAIL
 css/cssom-view/elementFromPosition.html	__harness__	OK
 css/cssom-view/elementFromPosition.html	test some point of the element: bottom left corner	FAIL
@@ -832,7 +830,6 @@ css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points inside 
 css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points inside cells in a right-to-left table	FAIL
 css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points inside table cells	FAIL
 css/cssom-view/elementsFromPoint.html	__harness__	OK
-css/cssom-view/elementsFromPoint.html	co-ordinates larger than the viewport from in iframe	FAIL
 css/cssom-view/elementsFromPoint.html	no hit target at x,y	FAIL
 css/cssom-view/elementsFromPoint.html	transformed element at x,y	FAIL
 css/cssom-view/getBoundingClientRect-content-visibility-hidden.html	__harness__	TIMEOUT
@@ -1045,9 +1042,7 @@ css/cssom-view/scrollIntoView-container.html	scrollIntoView({container: 'nearest
 css/cssom-view/scrollIntoView-container.html	scrollIntoView({container: 'nearest'}) only scrolls nearest scroll container	FAIL
 css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	Element.scrollIntoView doesn't scroll a position:fixed element outside of the layout viewport	FAIL
 css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	__harness__	OK
-css/cssom-view/scrollIntoView-fixed.html	[Box A] scrollIntoView from unscrollable position:fixed	FAIL
 css/cssom-view/scrollIntoView-fixed.html	[Box B] scrollIntoView from unscrollable position:fixed in iframe	FAIL
-css/cssom-view/scrollIntoView-fixed.html	[Box C] scrollIntoView from scrollable position:fixed	FAIL
 css/cssom-view/scrollIntoView-fixed.html	[Box D] scrollIntoView from scrollable position:fixed in iframe	FAIL
 css/cssom-view/scrollIntoView-fixed.html	__harness__	OK
 css/cssom-view/scrollIntoView-horizontal-partially-visible.html	__harness__	OK
@@ -1368,7 +1363,6 @@ css/cssom/CSSStyleSheet-constructable.html	Adding non-constructed stylesheet to 
 css/cssom/CSSStyleSheet-constructable.html	Adopting a shadow host will empty adoptedStyleSheets if adopting to a different document	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Adopting a shadow host's ancestor will empty adoptedStyleSheets if adopting to a different document	FAIL
 css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace produces Promise<CSSStyleSheet>	FAIL
-css/cssom/CSSStyleSheet-constructable.html	Importing a shadow host will not copy shadow root, and also adoptedStyleSheets	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Stylesheet constructed on iframe cannot be used in the main Document	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Stylesheets constructed on the main Document cannot be used in iframes	FAIL
 css/cssom/CSSStyleSheet-constructable.html	__harness__	OK
@@ -3032,7 +3026,6 @@ dom/nodes/DOMImplementation-createDocumentType.html	createDocumentType("{", "", 
 dom/nodes/DOMImplementation-createDocumentType.html	createDocumentType("}", "", "") should work	FAIL
 dom/nodes/DOMImplementation-createDocumentType.html	createDocumentType("~", "", "") should work	FAIL
 dom/nodes/DOMImplementation-createHTMLDocument-with-saved-implementation.html	__harness__	OK
-dom/nodes/DOMImplementation-createHTMLDocument-with-saved-implementation.html	createHTMLDocument(): from a saved and detached implementation does not return null	FAIL
 dom/nodes/DOMImplementation-createHTMLDocument.html	__harness__	OK
 dom/nodes/DOMImplementation-createHTMLDocument.html	createHTMLDocument test 0: "","",""	FAIL
 dom/nodes/DOMImplementation-hasFeature.html	__harness__	OK
@@ -4545,9 +4538,6 @@ dom/nodes/MutationObserver-takeRecords.html	__harness__	OK
 dom/nodes/MutationObserver-textContent.html	__harness__	OK
 dom/nodes/Node-appendChild-cereactions-vs-script.window.js	Custom element reactions follow script execution	FAIL
 dom/nodes/Node-appendChild-cereactions-vs-script.window.js	__harness__	OK
-dom/nodes/Node-appendChild.html	Adopting a non-orphan	FAIL
-dom/nodes/Node-appendChild.html	Adopting an orphan	FAIL
-dom/nodes/Node-appendChild.html	Appending a document	FAIL
 dom/nodes/Node-appendChild.html	__harness__	OK
 dom/nodes/Node-baseURI.html	For attributes in elements belonging to document fragments in document, baseURI should be document URL	FAIL
 dom/nodes/Node-baseURI.html	For attributes in elements belonging to document fragments, baseURI should be document URL	FAIL
@@ -4586,7 +4576,6 @@ dom/nodes/Node-constants.html	__harness__	OK
 dom/nodes/Node-contains.html	__harness__	OK
 dom/nodes/Node-insertBefore.html	__harness__	OK
 dom/nodes/Node-isConnected-shadow-dom.html	__harness__	OK
-dom/nodes/Node-isConnected.html	Test with iframes	FAIL
 dom/nodes/Node-isConnected.html	__harness__	OK
 dom/nodes/Node-isEqualNode.html	__harness__	OK
 dom/nodes/Node-isSameNode.html	__harness__	OK
@@ -4601,15 +4590,6 @@ dom/nodes/Node-normalize.html	__harness__	OK
 dom/nodes/Node-parentElement.html	__harness__	OK
 dom/nodes/Node-parentNode.html	__harness__	OK
 dom/nodes/Node-properties.html	__harness__	OK
-dom/nodes/Node-removeChild.html	Calling removeChild on a comment from a frame document with no children should throw NOT_FOUND_ERR.	FAIL
-dom/nodes/Node-removeChild.html	Calling removeChild on a element from a frame document with no children should throw NOT_FOUND_ERR.	FAIL
-dom/nodes/Node-removeChild.html	Calling removeChild on a text from a frame document with no children should throw NOT_FOUND_ERR.	FAIL
-dom/nodes/Node-removeChild.html	Passing a detached comment from a frame document to removeChild should not affect it.	FAIL
-dom/nodes/Node-removeChild.html	Passing a detached element from a frame document to removeChild should not affect it.	FAIL
-dom/nodes/Node-removeChild.html	Passing a detached text from a frame document to removeChild should not affect it.	FAIL
-dom/nodes/Node-removeChild.html	Passing a non-detached comment from a frame document to removeChild should not affect it.	FAIL
-dom/nodes/Node-removeChild.html	Passing a non-detached element from a frame document to removeChild should not affect it.	FAIL
-dom/nodes/Node-removeChild.html	Passing a non-detached text from a frame document to removeChild should not affect it.	FAIL
 dom/nodes/Node-removeChild.html	__harness__	OK
 dom/nodes/Node-replaceChild.html	__harness__	OK
 dom/nodes/Node-textContent.html	__harness__	OK

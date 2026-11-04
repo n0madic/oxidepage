@@ -1683,6 +1683,19 @@ pub struct Page {
     shared: Rc<oxidepage_bindings::FrameShared>,
     /// Every browsing context of this page, the top-level one first.
     frames: Rc<frame::FrameTree>,
+    /// What `bindings` holds a `Weak` to for creating an `<iframe>`'s context
+    /// from inside a host call (ADR-0045). Owned here so the `Weak` lives as
+    /// long as the page.
+    _frame_host: Rc<EnteredPageFrameHost>,
+    /// Set while a browsing context is being built. A context built from a
+    /// host call runs init scripts, and an `<iframe>` they insert waits for
+    /// the task drain: building it then and there would announce the child
+    /// to a driver before its parent.
+    attaching_frame: Cell<bool>,
+    /// `<iframe>`s whose context a host call created ahead of the queued
+    /// [`oxidepage_dom::FrameUpdate::Connected`]. That entry still owes the
+    /// initial navigation, which stays a task.
+    attached_early: RefCell<HashSet<NodeId>>,
     worlds: Rc<worlds::WorldTable>,
     net: Rc<NetService>,
     net_rx: Receiver<NetEvent>,
@@ -1894,6 +1907,31 @@ pub struct WorldInfo {
     pub frame: oxidepage_base::FrameId,
 }
 
+scoped_tls::scoped_thread_local! {
+    /// The page whose JS is running on this thread, set for the extent of
+    /// every [`Page::with_cx`] / [`Page::with_cx_in`] (ADR-0045).
+    ///
+    /// Scoped, so it can hold a plain `&Page`: it is set only while that
+    /// borrow is live, and nothing can read it after. A host call that needs
+    /// the page itself — today only to create an `<iframe>`'s browsing
+    /// context — finds it here; `bindings` never sees the type.
+    static ENTERED_PAGE: Page
+}
+
+/// The [`oxidepage_bindings::FrameHost`] a page registers. Stateless: the page
+/// it acts on is whichever one is inside JS on this thread, and when none is
+/// (a host call reached some other way) the request is dropped and the queued
+/// update creates the context a turn later, as it always did.
+struct EnteredPageFrameHost;
+
+impl oxidepage_bindings::FrameHost for EnteredPageFrameHost {
+    fn attach_connected_frames(&self) {
+        if ENTERED_PAGE.is_set() {
+            ENTERED_PAGE.with(Page::attach_connected_frames_now);
+        }
+    }
+}
+
 impl Drop for Page {
     /// Releases every JS value while the runtime that owns it is still alive.
     ///
@@ -2046,6 +2084,10 @@ impl Page {
         shared
             .global
             .set_world_enter(Rc::downgrade(&world_table) as std::rc::Weak<dyn WorldEnter>);
+        let frame_host = Rc::new(EnteredPageFrameHost);
+        shared.global.set_frame_host(
+            Rc::downgrade(&frame_host) as std::rc::Weak<dyn oxidepage_bindings::FrameHost>
+        );
         state.set_whole_document_visible(whole_document_visible);
         hooks.adopt_time_origin(state.time_origin());
 
@@ -2094,6 +2136,9 @@ impl Page {
             state,
             shared,
             frames,
+            _frame_host: frame_host,
+            attaching_frame: Cell::new(false),
+            attached_early: RefCell::new(HashSet::new()),
             worlds: world_table,
             net,
             net_rx,
@@ -5627,7 +5672,10 @@ impl Page {
                     // A context first, then its initial navigation: an
                     // `<iframe src>` in the parsed markup gains both in one
                     // turn, in that order.
-                    let attached = self.attach_child_frame(owner);
+                    // Or already given one by the host call that inserted it
+                    // (ADR-0045), in which case only the navigation is owed.
+                    let attached = self.attach_child_frame(owner)
+                        || self.attached_early.borrow_mut().remove(&owner);
                     if attached {
                         navigated.insert(owner);
                     }
@@ -5642,6 +5690,7 @@ impl Page {
                     // A removed-and-reinserted element gets a new context,
                     // which its `Connected` will navigate.
                     navigated.remove(&owner);
+                    self.attached_early.borrow_mut().remove(&owner);
                     self.detach_child_frame(owner)
                 }
             };
@@ -5665,6 +5714,42 @@ impl Page {
         if self.frames.of_owner(owner).is_some() {
             return false;
         }
+        let was_attaching = self.attaching_frame.replace(true);
+        let attached = self.attach_child_frame_inner(owner);
+        self.attaching_frame.set(was_attaching);
+        attached
+    }
+
+    /// Creates the contexts of `<iframe>`s connected by the host call that is
+    /// returning to script (ADR-0045), so `contentDocument` and
+    /// `contentWindow` answer before the next statement — HTML creates the
+    /// context during the insertion itself.
+    ///
+    /// The queued `Connected` entries stay where they are: their drain still
+    /// navigates each frame to its `src`/`srcdoc` and releases its pin, and
+    /// [`Self::attached_early`] tells that drain the context already exists.
+    /// Nothing happens while another context is being built (see
+    /// [`Self::attaching_frame`]), or for an element no longer connected by the
+    /// time the call returned.
+    fn attach_connected_frames_now(&self) {
+        if self.attaching_frame.get() {
+            return;
+        }
+        let owners = self.state.dom.borrow().pending_frame_connects();
+        for owner in owners {
+            let connected = self
+                .state
+                .dom
+                .borrow()
+                .get(owner)
+                .is_some_and(oxidepage_dom::node::Node::is_connected);
+            if connected && self.attach_child_frame(owner) {
+                self.attached_early.borrow_mut().insert(owner);
+            }
+        }
+    }
+
+    fn attach_child_frame_inner(&self, owner: NodeId) -> bool {
         let Some(parent) = self.frame_of(owner) else {
             return false;
         };
@@ -7720,10 +7805,12 @@ impl Page {
         let owns_budget = self.script_budget.arm();
         let mut slot = None;
         let mut once = Some(f);
-        let entered = WorldEnter::enter(&*self.worlds, world, &mut |cx| {
-            if let Some(f) = once.take() {
-                slot = Some(f(cx));
-            }
+        let entered = ENTERED_PAGE.set(self, || {
+            WorldEnter::enter(&*self.worlds, world, &mut |cx| {
+                if let Some(f) = once.take() {
+                    slot = Some(f(cx));
+                }
+            })
         });
         if owns_budget {
             self.script_budget.disarm();
@@ -7741,6 +7828,10 @@ impl Page {
     /// Enters JS with the per-task script budget armed (a no-op when an outer
     /// `with_cx` already armed it, so a task keeps one deadline throughout).
     fn with_cx<T>(&self, f: impl FnOnce(&BindCx<'_>) -> T) -> T {
+        ENTERED_PAGE.set(self, || self.with_cx_entered(f))
+    }
+
+    fn with_cx_entered<T>(&self, f: impl FnOnce(&BindCx<'_>) -> T) -> T {
         let owns_budget = self.script_budget.arm();
         // Arms the main world's re-entry latch for the lifetime of this scope
         // (ADR-0033 D4). `with_cx` is the main world's only entry, so this is

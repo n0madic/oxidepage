@@ -865,7 +865,9 @@ HTML overloads work — `(message, targetOrigin, transfer)` and
 `window` itself, whose `postMessage` posts to its own listeners as a task with
 `event.source === window`. An object reached across a frame boundary carries the *accessing* realm's
 prototypes, and a child's globals (`contentWindow.myVar`) are unreachable —
-both deliberate (ADR-0035 D4). Indexed and named access to a child context
+both deliberate (ADR-0035 D4). The one exception is `contentWindow.document`,
+which is the frame's document in the accessing realm's wrapper, exactly what
+`contentDocument` returns, and a `SecurityError` cross-origin. Indexed and named access to a child context
 (`window[0]`, `window.frames[0]`, `window.frames['inner']`) is present and
 tree-ordered, and a `WindowProxy` is one object per (realm, context) so
 `event.source === iframe.contentWindow` holds. `window.name` and named targets
@@ -875,12 +877,18 @@ place rather than opening a page per click, `_blank` still opens one.
 An `about:blank` or `srcdoc` frame inherits its embedder's origin *and* base
 URL, which this engine spells as inheriting its URL — so such a frame reports
 the embedder's address as `location.href` where a browser says `about:blank`.
-Its initial document is a real empty HTML document, but the context is attached
-by the event loop rather than by `appendChild`, so `contentDocument` is null
-until the next turn — and for the same reason the `load` HTML fires for an
-`<iframe>` with no `src` (or an empty one) arrives in that turn rather than
-inside `appendChild`, so a handler assigned just after the insertion still
-runs where a browser would already have fired. Removing `src` later navigates
+Its initial document is a real empty HTML document, and a script-inserted
+`<iframe>` gets its context before the inserting call returns to script
+(ADR-0045), so `contentDocument`, `contentWindow` and its `document` answer on
+the next line. A context built while another one is being built (an init script
+inserting an `<iframe>`), or an insertion that reaches no page entry, waits for
+the event loop's turn instead. The navigation to `src`/`srcdoc` stays a task,
+and so does the `load` HTML fires for an `<iframe>` with no `src` (or an empty
+one): it arrives in that turn rather than inside `appendChild`, so a handler
+assigned just after the insertion still runs where a browser would already
+have fired. `contentDocument.open()`/`write()` from the embedder's realm is
+refused (the frame's parser belongs to the frame's realm), and removal still
+clears `contentDocument` a turn later. Removing `src` later navigates
 to `about:blank` and fires `load` again, and several source changes in one
 task are one navigation with one `load`, as a browser's cancellation makes
 them.

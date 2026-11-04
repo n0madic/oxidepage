@@ -972,3 +972,75 @@ fn scrolling_a_frame_from_its_parent_fires_scroll_in_the_frame() {
     page.settle(Duration::from_millis(500));
     assert_eq!(s(&page, "log.join(',')"), "frame:40");
 }
+
+#[test]
+fn an_inserted_iframe_has_its_context_before_the_script_resumes() {
+    // HTML creates the browsing context during the insertion itself
+    // (ADR-0045): the very next statement reads the initial document.
+    let page = page("<!doctype html><body></body>");
+    assert_eq!(
+        s(
+            &page,
+            "const f = document.createElement('iframe');\
+             const before = String(f.contentDocument);\
+             document.body.appendChild(f);\
+             const doc = f.contentDocument;\
+             const p = doc.createElement('p');\
+             doc.body.appendChild(p);\
+             const nested = doc.createElement('iframe');\
+             doc.body.appendChild(nested);\
+             [before, String(doc), doc.body.nodeName, p.isConnected,\
+              f.contentWindow.document === doc, frames.length,\
+              String(nested.contentDocument)].join('|')"
+        ),
+        "null|[object Document]|BODY|true|true|1|[object Document]"
+    );
+    page.settle(Duration::from_millis(500));
+    // The queued update found the context already there and made no second
+    // one: the page, the frame and its nested frame.
+    assert_eq!(rendered_roots_count(&page), 3);
+    assert_eq!(s(&page, "String(frames.length)"), "1");
+}
+
+#[test]
+fn an_early_context_still_navigates_and_loads_once() {
+    let page = page("<!doctype html><body></body>");
+    s(
+        &page,
+        "window.loads = 0;\
+         const f = document.createElement('iframe');\
+         f.onload = () => loads++;\
+         f.srcdoc = '<p id=x>from srcdoc</p>';\
+         document.body.appendChild(f);\
+         window.early = f.contentDocument.getElementById('x') === null;\
+         ''",
+    );
+    page.settle(Duration::from_millis(500));
+    assert_eq!(
+        s(
+            &page,
+            "[early, document.querySelector('iframe').contentDocument\
+               .getElementById('x').textContent, loads].join('|')"
+        ),
+        // The initial document is `about:blank`; `srcdoc` arrives as the
+        // navigation task, which fires the one `load`.
+        "true|from srcdoc|1"
+    );
+}
+
+#[test]
+fn window_proxy_document_follows_the_origin_check() {
+    let page = page(
+        "<!doctype html><iframe id=same></iframe>\
+         <iframe id=opaque sandbox srcdoc='<p>x</p>'></iframe>",
+    );
+    assert_eq!(
+        s(
+            &page,
+            "const read = w => { try { return String(w.document); } catch (e) { return e.name; } };\
+             [same.contentWindow.document === same.contentDocument,\
+              read(opaque.contentWindow)].join('|')"
+        ),
+        "true|SecurityError"
+    );
+}
