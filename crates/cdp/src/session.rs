@@ -211,6 +211,16 @@ pub struct Connection {
     /// removed when the target is destroyed, so a browser that opens and closes
     /// pages does not accumulate them.
     auto_attached: Mutex<std::collections::HashSet<String>>,
+    /// Targets this connection has reported with `Target.targetCreated`.
+    ///
+    /// Three paths announce a target — the event thread's `Created` signal,
+    /// the auto-attach winner, and `Target.setDiscoverTargets` enumerating what
+    /// already exists — and the signal is asynchronous, so it can arrive
+    /// *after* a command has already reported the same target. Without this
+    /// set that is a duplicate `targetCreated`, or (when the reporter is the
+    /// one that skips) none at all. Cleared when discovery is turned off,
+    /// since turning it back on re-reports every target, as Chrome does.
+    announced: Mutex<std::collections::HashSet<String>>,
 }
 
 /// The two sides of a deferred reply, under one lock.
@@ -278,6 +288,7 @@ impl Connection {
             streams: Mutex::new(HashMap::new()),
             awaits: Mutex::new(AwaitBook::default()),
             auto_attached: Mutex::new(std::collections::HashSet::new()),
+            announced: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -701,12 +712,35 @@ impl Connection {
         if self.auto_attach_claimed(&info.target_id) {
             return;
         }
-        if self.discover.load(Ordering::Relaxed) {
+        self.announce_created(&info);
+    }
+
+    /// Emits `Target.targetCreated` for `info` if discovery is on and this
+    /// connection has not reported the target yet.
+    ///
+    /// The event is sent **under** the lock: a thread that finds the target
+    /// already announced is then guaranteed the event is on the wire, so its
+    /// own `attachedToTarget` cannot overtake it.
+    pub fn announce_created(&self, info: &TargetInfo) {
+        if !self.discover.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut announced = self.announced.lock().unwrap_or_else(|e| e.into_inner());
+        if announced.insert(info.target_id.clone()) {
             self.emit(Event::browser(
                 "Target.targetCreated",
                 serde_json::json!({ "targetInfo": info }),
             ));
         }
+    }
+
+    /// Discovery was turned off: the next `setDiscoverTargets(true)` reports
+    /// every target afresh.
+    pub fn forget_announcements(&self) {
+        self.announced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// [`Self::auto_attach`], reporting whether this call owned the target.
@@ -758,16 +792,45 @@ impl Connection {
             return;
         };
         if announce_created {
-            self.emit(Event::browser(
-                "Target.targetCreated",
-                serde_json::json!({ "targetInfo": info }),
-            ));
+            self.announce_created(&info);
         }
         let _ = self.attach(target_id);
     }
 
+    /// `Target.setAutoAttach`'s half: attaches to a target that **already
+    /// existed** when auto-attach was turned on, through the same claim as
+    /// [`Self::auto_attach`].
+    ///
+    /// Attaching directly, outside the claim, was a double attach under load:
+    /// a target created just before `setAutoAttach` still has its `Created`
+    /// signal in flight to the event thread, and when that arrives the flag is
+    /// already on and nothing has claimed the target — so the event thread
+    /// attached it a second time, with a second session. A target the driver
+    /// attached to by hand is claimed too but not attached again, which keeps
+    /// that same late signal from adding a session to it either.
+    pub fn auto_attach_existing(&self, target_id: &str) -> Result<(), ProtocolError> {
+        // Lock order `auto_attached` → `sessions`, as everywhere else.
+        let mut claimed = self.auto_attached.lock().unwrap_or_else(|e| e.into_inner());
+        if !claimed.insert(target_id.to_owned()) {
+            return Ok(());
+        }
+        if !self.sessions_for(target_id).is_empty() {
+            return Ok(());
+        }
+        let Some(info) = self.registry.info(target_id) else {
+            claimed.remove(target_id);
+            return Ok(());
+        };
+        self.announce_created(&info);
+        self.attach(target_id).map(drop)
+    }
+
     fn on_target_destroyed(self: &Arc<Self>, target_id: &str) {
         self.auto_attached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(target_id);
+        self.announced
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(target_id);
@@ -834,6 +897,149 @@ mod tests {
                 ProtocolError::SERVER_ERROR
             );
         }
+    }
+
+    /// A browser-level command with parameters, dispatched synchronously.
+    fn run(connection: &Arc<Connection>, method: &str, params: serde_json::Value) {
+        let request: Request = serde_json::from_value(
+            serde_json::json!({ "id": 1, "method": method, "params": params }),
+        )
+        .expect("request");
+        let Deferrable::Ready(result) = connection.dispatch(&request) else {
+            panic!("{method} deferred");
+        };
+        result.expect(method);
+    }
+
+    /// A page target that exists **before** the connection has seen its
+    /// `Created` signal — the state a driver races into when it creates a
+    /// target and turns on discovery or auto-attach right away, while the
+    /// signal is still on its way to the event thread.
+    fn target_with_signal_in_flight(connection: &Arc<Connection>) -> TargetInfo {
+        let context = connection.registry.browser().default_context();
+        let target_id = connection
+            .registry
+            .create_page(&context, oxidepage_engine::NewPageOptions::default())
+            .expect("page");
+        connection.registry.info(&target_id).expect("info")
+    }
+
+    /// The methods of every event sent so far, in order.
+    fn event_methods(out: &mut mpsc::UnboundedReceiver<Outbound>) -> Vec<String> {
+        let mut methods = Vec::new();
+        while let Ok(message) = out.try_recv() {
+            if let Outbound::Event(event) = message {
+                methods.push(event.method);
+            }
+        }
+        methods
+    }
+
+    /// `setAutoAttach` attaches to the targets that already exist, and the
+    /// event thread attaches to a target whose `Created` signal arrives while
+    /// auto-attach is on. A signal that is merely *late* reaches both, and the
+    /// existing-target path used to bypass the claim set — so the target was
+    /// attached twice, with two sessions. That is what made
+    /// `auto_attach_attaches_to_existing_and_future_targets` flaky under load.
+    #[test]
+    fn a_late_created_signal_does_not_attach_a_target_twice() {
+        let (connection, mut out) = connection();
+        let info = target_with_signal_in_flight(&connection);
+        run(
+            &connection,
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+        );
+        connection.handle_signal(TargetSignal::Created(info.clone()));
+
+        assert_eq!(event_methods(&mut out), ["Target.attachedToTarget"]);
+        assert_eq!(connection.sessions_for(&info.target_id).len(), 1);
+    }
+
+    /// A target the driver attached to by hand is not given a second session
+    /// by a late signal once auto-attach is on.
+    #[test]
+    fn a_late_created_signal_does_not_attach_a_manually_attached_target() {
+        let (connection, mut out) = connection();
+        let info = target_with_signal_in_flight(&connection);
+        connection.attach(&info.target_id).expect("attach");
+        run(
+            &connection,
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+        );
+        connection.handle_signal(TargetSignal::Created(info.clone()));
+
+        assert_eq!(event_methods(&mut out), ["Target.attachedToTarget"]);
+        assert_eq!(connection.sessions_for(&info.target_id).len(), 1);
+    }
+
+    /// `setDiscoverTargets` reports the targets that already exist; a late
+    /// `Created` signal for one of them must not report it again.
+    #[test]
+    fn a_late_created_signal_does_not_announce_a_target_twice() {
+        let (connection, mut out) = connection();
+        let info = target_with_signal_in_flight(&connection);
+        run(
+            &connection,
+            "Target.setDiscoverTargets",
+            serde_json::json!({ "discover": true }),
+        );
+        connection.handle_signal(TargetSignal::Created(info));
+
+        assert_eq!(event_methods(&mut out), ["Target.targetCreated"]);
+    }
+
+    /// Discovery and auto-attach together, with the signal late: one
+    /// `targetCreated`, then one `attachedToTarget` — Chrome's order.
+    #[test]
+    fn discovery_and_auto_attach_report_a_late_target_once_and_in_order() {
+        let (connection, mut out) = connection();
+        let info = target_with_signal_in_flight(&connection);
+        run(
+            &connection,
+            "Target.setDiscoverTargets",
+            serde_json::json!({ "discover": true }),
+        );
+        run(
+            &connection,
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+        );
+        connection.handle_signal(TargetSignal::Created(info));
+
+        assert_eq!(
+            event_methods(&mut out),
+            ["Target.targetCreated", "Target.attachedToTarget"]
+        );
+    }
+
+    /// Turning discovery off and on again re-reports every target, as Chrome
+    /// does — the once-per-target record must not swallow the second report.
+    #[test]
+    fn rediscovery_reports_existing_targets_again() {
+        let (connection, mut out) = connection();
+        let _info = target_with_signal_in_flight(&connection);
+        run(
+            &connection,
+            "Target.setDiscoverTargets",
+            serde_json::json!({ "discover": true }),
+        );
+        run(
+            &connection,
+            "Target.setDiscoverTargets",
+            serde_json::json!({ "discover": false }),
+        );
+        run(
+            &connection,
+            "Target.setDiscoverTargets",
+            serde_json::json!({ "discover": true }),
+        );
+
+        assert_eq!(
+            event_methods(&mut out),
+            ["Target.targetCreated", "Target.targetCreated"]
+        );
     }
 
     #[test]
