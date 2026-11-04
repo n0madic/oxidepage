@@ -414,8 +414,9 @@ v1 limits.
   optional payload on `EventData` so a non-UI event pays a null pointer for them.
   `document.createEvent` accepts the legacy names (`"MouseEvents"`, `"UIEvents"`,
   `"textevent"`, …) plus `"MessageEvent"`, and the legacy initializers that make
-  the result usable exist — `initUIEvent`, `initMouseEvent` and
-  `initKeyboardEvent` — so the pre-constructor idiom
+  the result usable exist — `initUIEvent`, `initMouseEvent`,
+  `initKeyboardEvent` and `initMessageEvent` (without HTML's trailing `ports`
+  argument: there is no `MessagePort`) — so the pre-constructor idiom
   `createEvent("MouseEvents")` → `initMouseEvent("click", …)` → `dispatchEvent`
   produces a real, activating click. **Activation moved into `dispatch_event`**, triggered by the
   spec's real condition — a `click` carrying a mouse payload — so `.click()`,

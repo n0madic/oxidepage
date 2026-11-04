@@ -931,12 +931,16 @@
         // evaluator, so the method and the at-rule cannot disagree.
         if (typeof nativeCssSupports === "function" && globalThis.CSS === undefined) {
             const hexEscape = (unit) => "\\" + unit.toString(16) + " ";
+            // WebIDL's DOMString conversion, which throws on a Symbol. A
+            // template literal runs ToString; `String(x)` would not throw, and
+            // would turn `Symbol("a")` into the string "Symbol(a)".
+            const domString = (value) => `${value}`;
             // CSSOM "serialize an identifier".
             const escape = function escape(ident) {
                 if (arguments.length < 1) {
                     throw new TypeError("CSS.escape: 1 argument required, but only 0 present.");
                 }
-                const s = StringCtor(ident);
+                const s = domString(ident);
                 const length = s.length;
                 const first = length > 0 ? s.charCodeAt(0) : 0;
                 let out = "";
@@ -969,11 +973,11 @@
                 if (arguments.length < 1) {
                     throw new TypeError("CSS.supports: 1 argument required, but only 0 present.");
                 }
-                const first = StringCtor(propertyOrCondition);
+                const first = domString(propertyOrCondition);
                 if (arguments.length === 1) {
                     return nativeCssSupports(first, null);
                 }
-                return nativeCssSupports(first, StringCtor(arguments[1]));
+                return nativeCssSupports(first, domString(arguments[1]));
             };
             const cssObj = objectCreate(ObjectProto);
             def(cssObj, "escape", escape);

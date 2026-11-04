@@ -705,13 +705,19 @@ impl Connection {
     fn on_target_created(self: &Arc<Self>, info: TargetInfo) {
         // Auto-attach is what Puppeteer and Playwright both use in place of
         // discovering and then attaching by hand; a target created while it is
-        // on must arrive already attached. It announces `targetCreated` itself
-        // when it wins the claim, so the two events cannot be reordered — and
-        // the `already_claimed` answer is what stops this announcing a second
-        // copy after `Target.createTarget`'s lane got there first.
-        if self.auto_attach_claimed(&info.target_id) {
-            return;
-        }
+        // on must arrive already attached. Whoever wins the claim announces
+        // `targetCreated` itself before attaching, so the two events cannot be
+        // reordered.
+        //
+        // The announcement below is unconditional because it is once-only: if
+        // another path already reported the target it does nothing, and a
+        // claim lost to `Target.createTarget`'s lane cannot duplicate it. It
+        // is also what reports a target whose claim was taken *without* an
+        // announcement — `auto_attach_existing` on a target the driver had
+        // already attached to by hand — which skipping on a lost claim would
+        // leave unreported. A loser blocks on the claim lock until the winner
+        // has emitted both events, so this never overtakes an attach.
+        self.auto_attach(&info.target_id);
         self.announce_created(&info);
     }
 
@@ -721,11 +727,16 @@ impl Connection {
     /// The event is sent **under** the lock: a thread that finds the target
     /// already announced is then guaranteed the event is on the wire, so its
     /// own `attachedToTarget` cannot overtake it.
+    ///
+    /// The flag is read under the lock too. Read before it, a thread could
+    /// pass the check, lose the race to `setDiscoverTargets(false)` (which
+    /// stores the flag and then clears the set), and record the target after
+    /// the clear — so the next `setDiscoverTargets(true)` would skip it.
     pub fn announce_created(&self, info: &TargetInfo) {
+        let mut announced = self.announced.lock().unwrap_or_else(|e| e.into_inner());
         if !self.discover.load(Ordering::Relaxed) {
             return;
         }
-        let mut announced = self.announced.lock().unwrap_or_else(|e| e.into_inner());
         if announced.insert(info.target_id.clone()) {
             self.emit(Event::browser(
                 "Target.targetCreated",
@@ -741,15 +752,6 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-    }
-
-    /// [`Self::auto_attach`], reporting whether this call owned the target.
-    fn auto_attach_claimed(self: &Arc<Self>, target_id: &str) -> bool {
-        if !self.auto_attach.load(Ordering::Relaxed) {
-            return false;
-        }
-        self.auto_attach(target_id);
-        true
     }
 
     /// Attaches to a newly created target **once**, if this connection asked
@@ -768,9 +770,8 @@ impl Connection {
         // running discovery *and* auto-attach would otherwise be told about an
         // attach for a target it has not heard of — this path can outrun the
         // event thread that would have announced it. Emitted here rather than
-        // waited for, because the claim below is what makes it exactly once:
-        // whichever thread wins sends both, in order.
-        let announce_created = self.discover.load(Ordering::Relaxed);
+        // waited for: whichever thread wins the claim below sends both, in
+        // order, and `announce_created` keeps the first one once-only.
         // The guard is held **across the attach**, not just across the claim.
         // Releasing it in between leaves a window in which the loser sees the
         // target claimed and returns while the winner has not emitted yet — and
@@ -791,38 +792,47 @@ impl Connection {
             claimed.remove(target_id);
             return;
         };
-        if announce_created {
-            self.announce_created(&info);
-        }
+        self.announce_created(&info);
         let _ = self.attach(target_id);
     }
 
     /// `Target.setAutoAttach`'s half: attaches to a target that **already
-    /// existed** when auto-attach was turned on, through the same claim as
+    /// existed** when auto-attach was turned on, under the same claim as
     /// [`Self::auto_attach`].
     ///
-    /// Attaching directly, outside the claim, was a double attach under load:
-    /// a target created just before `setAutoAttach` still has its `Created`
-    /// signal in flight to the event thread, and when that arrives the flag is
-    /// already on and nothing has claimed the target — so the event thread
-    /// attached it a second time, with a second session. A target the driver
-    /// attached to by hand is claimed too but not attached again, which keeps
-    /// that same late signal from adding a session to it either.
+    /// Attaching outside the claim was a double attach under load: a target
+    /// created just before `setAutoAttach` still has its `Created` signal in
+    /// flight to the event thread, and when that arrived the flag was already
+    /// on and nothing had claimed the target, so the event thread attached it
+    /// a second time. Claiming here closes that.
+    ///
+    /// The claim only stops the *event thread* from attaching again; it is not
+    /// what decides this call. Whether the target has a session is, checked
+    /// under the claim lock so a concurrent winner has finished by then. So a
+    /// target attached by hand is left alone, and one claimed earlier but since
+    /// detached (`detachFromTarget`, then `setAutoAttach` off and on) is
+    /// attached again, as in Chrome. A failed attach gives the claim back, so a
+    /// later signal can still try.
     pub fn auto_attach_existing(&self, target_id: &str) -> Result<(), ProtocolError> {
         // Lock order `auto_attached` → `sessions`, as everywhere else.
         let mut claimed = self.auto_attached.lock().unwrap_or_else(|e| e.into_inner());
-        if !claimed.insert(target_id.to_owned()) {
-            return Ok(());
-        }
-        if !self.sessions_for(target_id).is_empty() {
-            return Ok(());
-        }
+        claimed.insert(target_id.to_owned());
         let Some(info) = self.registry.info(target_id) else {
             claimed.remove(target_id);
             return Ok(());
         };
+        // Before the session check: a target the driver attached to by hand
+        // must still be reported, and the late signal will not report it
+        // twice.
         self.announce_created(&info);
-        self.attach(target_id).map(drop)
+        if !self.sessions_for(target_id).is_empty() {
+            return Ok(());
+        }
+        let attached = self.attach(target_id).map(drop);
+        if attached.is_err() {
+            claimed.remove(target_id);
+        }
+        attached
     }
 
     fn on_target_destroyed(self: &Arc<Self>, target_id: &str) {
@@ -971,6 +981,59 @@ mod tests {
         connection.handle_signal(TargetSignal::Created(info.clone()));
 
         assert_eq!(event_methods(&mut out), ["Target.attachedToTarget"]);
+        assert_eq!(connection.sessions_for(&info.target_id).len(), 1);
+    }
+
+    /// The same, with discovery on from before the target existed: the target
+    /// is claimed without being attached, and the late signal finds it claimed.
+    /// It must still be reported exactly once. Losing the claim used to mean
+    /// losing the announcement too.
+    #[test]
+    fn a_manually_attached_late_target_is_still_announced() {
+        let (connection, mut out) = connection();
+        run(
+            &connection,
+            "Target.setDiscoverTargets",
+            serde_json::json!({ "discover": true }),
+        );
+        let info = target_with_signal_in_flight(&connection);
+        connection.attach(&info.target_id).expect("attach");
+        run(
+            &connection,
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+        );
+        connection.handle_signal(TargetSignal::Created(info.clone()));
+
+        let methods = event_methods(&mut out);
+        let count = |method: &str| methods.iter().filter(|m| *m == method).count();
+        assert_eq!(count("Target.targetCreated"), 1, "{methods:?}");
+        assert_eq!(count("Target.attachedToTarget"), 1, "{methods:?}");
+        assert_eq!(connection.sessions_for(&info.target_id).len(), 1);
+    }
+
+    /// A claim outlives the session it was taken for, so it must not decide
+    /// whether `setAutoAttach` attaches: a target the driver detached from is
+    /// attached again when auto-attach is turned off and back on, as in Chrome.
+    #[test]
+    fn re_enabling_auto_attach_reattaches_a_detached_target() {
+        let (connection, _out) = connection();
+        let info = target_with_signal_in_flight(&connection);
+        let auto_attach = |on: bool| {
+            run(
+                &connection,
+                "Target.setAutoAttach",
+                serde_json::json!({ "autoAttach": on, "waitForDebuggerOnStart": false, "flatten": true }),
+            );
+        };
+        auto_attach(true);
+        let sessions = connection.sessions_for(&info.target_id);
+        assert_eq!(sessions.len(), 1);
+        connection.detach(&sessions[0].id).expect("detach");
+        assert!(connection.sessions_for(&info.target_id).is_empty());
+
+        auto_attach(false);
+        auto_attach(true);
         assert_eq!(connection.sessions_for(&info.target_id).len(), 1);
     }
 

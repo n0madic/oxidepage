@@ -102,11 +102,12 @@ const SKIP_SUBSTRINGS: &[&str] = &[
     // (`iframe`, `Frame`, `frameElement`, `elementsFromPoint-iframes`,
     // `scrollIntoView-container`) used to be listed here. `javascript:` URLs
     // landed with ADR-0023 and nested browsing contexts with ADR-0035, so every
-    // one of them now finishes. What still fails either fails fast or waits on
-    // a frame `load` the engine does not fire — and a page with nothing left
-    // to do settles at once, so the runner ends it in well under a second
-    // instead of at the budget. Both are deterministic outcomes, and those
-    // belong in the expectations, not in a list of files nobody runs.
+    // one of them now finishes. What still fails, fails fast — mostly on what
+    // a child frame's `contentWindow` deliberately does not expose (ADR-0035
+    // D4) — or waits on something no task will ever deliver, and a page with
+    // nothing left to do settles at once, so the runner ends it in well under
+    // a second instead of at the budget. Both are deterministic outcomes, and
+    // those belong in the expectations, not in a list of files nobody runs.
     "EventListener-addEventListener.sub",
     // === css/cssom-view impossibilities in Phase 5 v1 (ADR-0006) ===
     // Smooth scrolling is out of scope (ADR-0023): there is no animation

@@ -1536,3 +1536,69 @@ fn create_event_message_event() {
         "true,\"\",,\"\","
     );
 }
+
+/// `initMessageEvent` is what makes a `createEvent("MessageEvent")` usable:
+/// it sets every member it names, and a dispatched listener sees them —
+/// `source === window` included, since the source is this realm's own window.
+#[test]
+fn init_message_event_initializes_and_dispatches() {
+    let page = page_with("<!doctype html>");
+    assert_eq!(
+        eval_string(
+            &page,
+            "const e = document.createEvent('MessageEvent');\
+             const payload = { n: 1 };\
+             e.initMessageEvent('message', true, true, payload, 'https://a.test', 'id7', window);\
+             let seen = '';\
+             window.addEventListener('message', (ev) => {\
+               seen = [ev.type, ev.bubbles, ev.cancelable, ev.data.n,\
+                       ev.origin, ev.lastEventId, ev.source === window].join();\
+             });\
+             window.dispatchEvent(e);\
+             seen",
+        ),
+        "message,true,true,1,https://a.test,id7,true"
+    );
+    assert_eq!(
+        eval_string(
+            &page,
+            "const bare = document.createEvent('MessageEvent');\
+             bare.initMessageEvent('m');\
+             [bare.type, bare.bubbles, bare.data, bare.origin === '', bare.source].join()",
+        ),
+        "m,false,,true,"
+    );
+}
+
+/// A receiver that is not a `MessageEvent` and a `source` that is not a window
+/// of this page both throw, before the event is touched; and on an event that
+/// is being dispatched the initializer changes nothing.
+#[test]
+fn init_message_event_errors_and_dispatch_flag() {
+    let page = page_with("<!doctype html>");
+    assert_eq!(
+        eval_string(
+            &page,
+            "const name = (f) => { try { f(); return 'ok'; } catch (err) { return err.name; } };\
+             const e = document.createEvent('MessageEvent');\
+             [name(() => MessageEvent.prototype.initMessageEvent.call(new Event('x'), 'y')),\
+              name(() => e.initMessageEvent('m', false, false, null, '', '', {})),\
+              e.type === ''].join()",
+        ),
+        "TypeError,TypeError,true"
+    );
+    assert_eq!(
+        eval_string(
+            &page,
+            "const live = new MessageEvent('message', { data: 1, origin: 'o' });\
+             let during = '';\
+             window.addEventListener('message', (ev) => {\
+               ev.initMessageEvent('other', true, true, 2, 'p');\
+               during = [ev.type, ev.data, ev.origin].join();\
+             });\
+             window.dispatchEvent(live);\
+             during",
+        ),
+        "message,1,o"
+    );
+}

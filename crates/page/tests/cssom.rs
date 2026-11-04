@@ -482,3 +482,20 @@ fn css_namespace_shape() {
         "[object CSS],false,true,escape+supports,undefined"
     );
 }
+
+/// Every argument is a `DOMString`, and WebIDL's conversion throws on a
+/// Symbol where `String(symbol)` would quietly stringify it.
+#[test]
+fn css_arguments_reject_a_symbol() {
+    assert_eq!(
+        eval(
+            DIV,
+            "const throws = (f) => { try { f(); return 'no'; } catch (e) { return e.name; } };\
+             [throws(() => CSS.escape(Symbol('a'))),\
+              throws(() => CSS.supports(Symbol())),\
+              throws(() => CSS.supports('color', Symbol())),\
+              CSS.escape(1.5), CSS.supports('width', 0)].join()",
+        ),
+        "TypeError,TypeError,TypeError,\\31 \\.5,true"
+    );
+}
