@@ -4671,7 +4671,24 @@ impl Page {
         !self.hooks.has_live_timer()
             && !self.hooks.has_pending_raf()
             && self.in_flight.get() == 0
-            && self.state.net_pending() == 0
+            && !self.script_net_pending()
+    }
+
+    /// Whether *any* world has a script-initiated `fetch`/XHR in flight.
+    ///
+    /// The bookkeeping is per world — the promise and the `XMLHttpRequest`
+    /// wrapper are that world's values (ADR-0033 D5) — so a request started
+    /// inside an `<iframe>`, or from an isolated world, lives in that world's
+    /// `pending_net`, not the top-level main world's. Asking only
+    /// `self.state` let `settle` declare the page idle while a frame's XHR was
+    /// still on the wire: the caller then read state the response had not yet
+    /// written, a race that showed up only under load.
+    fn script_net_pending(&self) -> bool {
+        self.worlds
+            .all()
+            .iter()
+            .filter_map(|world| world.state())
+            .any(|state| state.net_pending() != 0)
     }
 
     /// Drives the page from `rx` until the channel closes or a control job
