@@ -1056,12 +1056,14 @@ fn install_viewport(cx: &BindCx<'_>, global: &JsObject) -> Result<(), JsThrow> {
 }
 
 fn window_inner_width(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    crate::imp::geometry_support::size_frame_to_owner(cx, &cx.state.frame);
     Ok(JsValue::Number(f64::from(
         cx.state.layout.borrow().viewport().width,
     )))
 }
 
 fn window_inner_height(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValue, JsThrow> {
+    crate::imp::geometry_support::size_frame_to_owner(cx, &cx.state.frame);
     Ok(JsValue::Number(f64::from(
         cx.state.layout.borrow().viewport().height,
     )))
@@ -1281,22 +1283,16 @@ fn window_scroll_by(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow
 }
 
 /// The `(x, y)` scroll offset behind `Element.scrollTop`/`scrollLeft` and the
-/// method forms `scroll`/`scrollTo`/`scrollBy`: the viewport's scroll for the
-/// document element (CSSOM-View's `documentElement` special case), else the
-/// element's own scroll-container offset. `imp::element::scroll_top`/
-/// `scroll_left` make the same split one axis at a time; this is the
-/// two-axis-at-once version the method forms need.
+/// method forms `scroll`/`scrollTo`/`scrollBy`: the viewport's scroll where
+/// the element stands for it (CSSOM-View: the root in standards mode, the body
+/// in quirks mode), else the element's own scroll-container offset
+/// (`geometry_support::scroll_target` decides, for every scroll member).
 fn element_scroll_offset(
     dom: &oxidepage_dom::DomTree,
     layout: &oxidepage_layout::LayoutEngine,
     this: oxidepage_base::NodeId,
 ) -> (f32, f32) {
-    let p = if imp::geometry_support::is_document_element(dom, this) {
-        layout.viewport_scroll()
-    } else {
-        layout.scroll_offset(this)
-    };
-    (p.x, p.y)
+    imp::geometry_support::scroll_offset_of(dom, layout, this)
 }
 
 /// Sets both axes of `this`'s scroll offset in a single reflow, reusing the
@@ -1309,11 +1305,7 @@ fn set_element_scroll_offset(
     x: f32,
     y: f32,
 ) -> (Option<oxidepage_base::NodeId>, bool) {
-    if imp::geometry_support::is_document_element(dom, this) {
-        (None, layout.set_viewport_scroll(x, y).changed)
-    } else {
-        (Some(this), layout.set_scroll_offset(this, x, y).changed)
-    }
+    imp::geometry_support::set_scroll_offset_of(dom, layout, this, x, y)
 }
 
 /// `Element.scroll()`/`scrollTo()`: sets the element's scroll offsets
@@ -1324,15 +1316,13 @@ fn set_element_scroll_offset(
 /// scope, ADR-0006).
 fn element_scroll_to(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
-    let current =
-        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |dom, layout| {
-            element_scroll_offset(dom, layout, this)
-        });
+    let current = imp::geometry_support::flush_layout(cx, this, |dom, layout| {
+        element_scroll_offset(dom, layout, this)
+    });
     let (x, y) = scroll_args(cx, call, current)?;
-    let (target, changed) =
-        imp::geometry_support::flush_layout_mut(cx, cx.state.frame.document(), |dom, layout| {
-            set_element_scroll_offset(dom, layout, this, x, y)
-        });
+    let (target, changed) = imp::geometry_support::flush_layout_mut(cx, this, |dom, layout| {
+        set_element_scroll_offset(dom, layout, this, x, y)
+    });
     imp::geometry_support::note_scroll(cx, target, changed);
     Ok(JsValue::Undefined)
 }
@@ -1340,16 +1330,14 @@ fn element_scroll_to(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
 /// `Element.scrollBy()`: adds to the element's current scroll offsets.
 fn element_scroll_by(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
-    let current =
-        imp::geometry_support::flush_layout(cx, cx.state.frame.document(), |dom, layout| {
-            element_scroll_offset(dom, layout, this)
-        });
+    let current = imp::geometry_support::flush_layout(cx, this, |dom, layout| {
+        element_scroll_offset(dom, layout, this)
+    });
     // For scrollBy, options members default to a **delta** of zero.
     let (dx, dy) = scroll_args(cx, call, (0.0, 0.0))?;
-    let (target, changed) =
-        imp::geometry_support::flush_layout_mut(cx, cx.state.frame.document(), |dom, layout| {
-            set_element_scroll_offset(dom, layout, this, current.0 + dx, current.1 + dy)
-        });
+    let (target, changed) = imp::geometry_support::flush_layout_mut(cx, this, |dom, layout| {
+        set_element_scroll_offset(dom, layout, this, current.0 + dx, current.1 + dy)
+    });
     imp::geometry_support::note_scroll(cx, target, changed);
     Ok(JsValue::Undefined)
 }

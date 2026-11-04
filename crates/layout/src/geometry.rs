@@ -684,6 +684,19 @@ impl LayoutEngine {
         )
     }
 
+    /// The size of `node`'s padding box, the root's included: what
+    /// `clientWidth`/`clientHeight` report for an element that does not stand
+    /// for the viewport (the root in quirks mode is one).
+    #[must_use]
+    pub fn padding_box_size(&self, node: NodeId) -> Option<(f32, f32)> {
+        let box_id = self.tree().box_for_node(node)?;
+        let layout = &self.tree().box_(box_id).final_layout;
+        Some((
+            layout.size.width - layout.border.left - layout.border.right,
+            layout.size.height - layout.border.top - layout.border.bottom,
+        ))
+    }
+
     /// `clientLeft/Top/Width/Height`. The `documentElement` reports the
     /// viewport size (CSSOM-View special case).
     #[must_use]
@@ -1260,37 +1273,25 @@ impl LayoutEngine {
 
     fn max_viewport_scroll(&self) -> (f32, f32) {
         let viewport = self.viewport();
-        let Some(root) = self.tree().root() else {
-            return (0.0, 0.0);
-        };
-        let root_box = self.tree().box_(root);
-        // The overflow pass unions every descendant into the root's scrollable
-        // overflow regardless of the root's own `overflow` (clipping only trims
-        // what a box contributes to its *parent*, and the root has none). So a
-        // non-scrollable `overflow` on the root has to be honored here, or
-        // `<html style="overflow:hidden">` would still scroll the document.
-        // `scroll`/`auto` keep scrolling; only `hidden`/`clip` pin the document.
-        let scrollable = |overflow: taffy::Overflow| {
-            !matches!(overflow, taffy::Overflow::Hidden | taffy::Overflow::Clip)
-        };
+        // No `overflow` pins this. The viewport is always a scroll container
+        // (a `visible` root means `auto`, `clip` means `hidden`), and CSS
+        // Overflow lets script scroll a `hidden` one. Only the user is
+        // stopped, in [`Self::scroll_viewport_by_user`].
         let (content_x, content_y) = self.document_content_extent();
-        // A non-scrollable axis reports the viewport extent, so its max scroll
-        // clamps to zero. (`scrollWidth`/`scrollHeight` still see the real
-        // overflow — that is a separate query.)
-        let extent_x = if scrollable(root_box.style.overflow.x) {
-            content_x
-        } else {
-            viewport.width
-        };
-        let extent_y = if scrollable(root_box.style.overflow.y) {
-            content_y
-        } else {
-            viewport.height
-        };
         (
-            (extent_x - viewport.width).max(0.0),
-            (extent_y - viewport.height).max(0.0),
+            (content_x - viewport.width).max(0.0),
+            (content_y - viewport.height).max(0.0),
         )
+    }
+
+    /// Scrolls the viewport by a *user* gesture (a wheel), which a viewport
+    /// whose propagated `overflow` is `hidden` refuses on that axis.
+    pub fn scroll_viewport_by_user(&mut self, dx: f32, dy: f32) -> ScrollResult {
+        let (user_x, user_y) = self.viewport_user_scrollable;
+        let offset = self.viewport_scroll();
+        let x = if user_x { offset.x + dx } else { offset.x };
+        let y = if user_y { offset.y + dy } else { offset.y };
+        self.set_viewport_scroll(x, y)
     }
 
     /// Sets the viewport scroll (clamped); `window.scrollTo` and
@@ -1317,22 +1318,6 @@ impl LayoutEngine {
         self.tree()
             .box_for_node(node)
             .map(|b| self.tree().box_(b).position)
-    }
-
-    /// Whether `node`'s box has the initial `overflow: visible` on *both*
-    /// axes — `None` when `node` has no box. Used by `document.scrollingElement`
-    /// (CSSOM-View "potentially scrollable"): quirks mode's root↔body overflow
-    /// propagation is not modeled anywhere in the cascade here, so the
-    /// bindings layer reads each element's own (unpropagated) overflow via
-    /// this and applies the propagation rule itself.
-    #[must_use]
-    pub fn overflow_is_visible(&self, node: NodeId) -> Option<bool> {
-        let box_id = self.tree().box_for_node(node)?;
-        let b = self.tree().box_(box_id);
-        Some(
-            b.style.overflow.x == taffy::Overflow::Visible
-                && b.style.overflow.y == taffy::Overflow::Visible,
-        )
     }
 
     // === scrollParent ===

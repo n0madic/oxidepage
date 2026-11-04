@@ -143,6 +143,10 @@ pub struct LayoutEngine {
     /// vs. patched it in place.
     rebuild_count: u64,
     patch_count: u64,
+    /// Whether the *user* may scroll the viewport on each axis: false where
+    /// the viewport's propagated overflow is `hidden` (or `clip`). Script
+    /// scrolls it regardless, as it does any `hidden` scroll container.
+    pub(crate) viewport_user_scrollable: (bool, bool),
 }
 
 impl LayoutEngine {
@@ -173,6 +177,7 @@ impl LayoutEngine {
             budget_limit: Duration::MAX,
             rebuild_count: 0,
             patch_count: 0,
+            viewport_user_scrollable: (true, true),
         }
     }
 
@@ -483,26 +488,27 @@ impl LayoutEngine {
         self.stamp = None;
     }
 
-    /// Viewport overflow propagation (CSS Overflow §3.3): when the root element's
-    /// used overflow is `visible`, the HTML `<body>`'s scrollable overflow is
-    /// applied to the viewport instead and the body's own used overflow becomes
-    /// `visible`.
+    /// Viewport overflow propagation (CSS Overflow §3.3): the root element's
+    /// `overflow` applies to the viewport, and where it is `visible` the HTML
+    /// `<body>`'s applies instead, after which the body's own used overflow is
+    /// `visible` on that axis.
     ///
     /// Without it, `body { height: 100vh; overflow: auto }` — a common SPA shell
     /// (angular.dev) — makes the body a scroll container that clips the whole
     /// document to one viewport: its real height never reaches `documentElement`,
-    /// so `scrollHeight` and `--full-page` capture a single screen. Applied per
-    /// axis and only for `scroll`/`auto` (a `hidden` body keeps clipping, the
-    /// conservative pre-existing behaviour). The viewport still scrolls because
-    /// the visible root is itself scrollable ([`Self::max_viewport_scroll`]).
+    /// so `scrollHeight` and `--full-page` capture a single screen. A `hidden`
+    /// body propagates the same way (the scroll-lock idiom of an open modal):
+    /// the document keeps its full extent and stays scrollable by script, and
+    /// only the user's scrolling stops ([`Self::viewport_user_scrollable`]).
+    ///
+    /// The body's overflow is read from its *computed* style, not its box: an
+    /// earlier pass may already have rewritten the box to `visible`, and the
+    /// box survives an incremental reflow.
     fn propagate_body_overflow(&mut self, dom: &DomTree) {
         let Some(root) = self.tree.root() else {
             return;
         };
         let root_overflow = self.tree.box_(root).style.overflow;
-        // CSS `overflow: auto` maps to `taffy::Overflow::Scroll` (stylo_taffy has
-        // no `Auto`), so `Scroll` covers both scrollable values.
-        let scrollable = |o: taffy::Overflow| matches!(o, taffy::Overflow::Scroll);
         let body = self
             .tree
             .box_(root)
@@ -516,18 +522,43 @@ impl LayoutEngine {
                         .is_some_and(|el| el.is_html_element() && &*el.name.local == "body")
                 })
             });
-        let Some(body) = body else {
+        let body_computed = body
+            .and_then(|b| self.tree.box_(b).dom_node)
+            .and_then(|n| dom.primary_style(n))
+            .map(|style| taffy::Point {
+                x: stylo_taffy::convert::overflow(style.clone_overflow_x()),
+                y: stylo_taffy::convert::overflow(style.clone_overflow_y()),
+            });
+        let visible = taffy::Overflow::Visible;
+        // The viewport's own overflow, per axis.
+        let viewport_axis = |root_axis: taffy::Overflow, body_axis: Option<taffy::Overflow>| {
+            if root_axis == visible {
+                body_axis.unwrap_or(visible)
+            } else {
+                root_axis
+            }
+        };
+        let viewport = taffy::Point {
+            x: viewport_axis(root_overflow.x, body_computed.map(|o| o.x)),
+            y: viewport_axis(root_overflow.y, body_computed.map(|o| o.y)),
+        };
+        // `hidden` and `clip` (which the viewport treats as `hidden`) stop
+        // the user; `visible` on the viewport means `auto`.
+        let user =
+            |o: taffy::Overflow| !matches!(o, taffy::Overflow::Hidden | taffy::Overflow::Clip);
+        self.viewport_user_scrollable = (user(viewport.x), user(viewport.y));
+
+        let (Some(body), Some(body_overflow)) = (body, body_computed) else {
             return;
         };
-        let body_overflow = self.tree.box_(body).style.overflow;
         let mut propagated = body_overflow;
-        if root_overflow.x == taffy::Overflow::Visible && scrollable(body_overflow.x) {
-            propagated.x = taffy::Overflow::Visible;
+        if root_overflow.x == visible {
+            propagated.x = visible;
         }
-        if root_overflow.y == taffy::Overflow::Visible && scrollable(body_overflow.y) {
-            propagated.y = taffy::Overflow::Visible;
+        if root_overflow.y == visible {
+            propagated.y = visible;
         }
-        if propagated != body_overflow {
+        if self.tree.box_(body).style.overflow != propagated {
             self.tree.box_mut(body).style.overflow = propagated;
         }
     }

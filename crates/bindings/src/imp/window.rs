@@ -47,6 +47,8 @@ pub(crate) fn match_media(
     _this: EventTargetKey,
     query: String,
 ) -> Result<JsValue, JsThrow> {
+    // A frame answers for its own size, which it may not have been given yet.
+    super::geometry_support::size_frame_to_owner(cx, &cx.state.frame);
     let matches = cx.state.style.borrow().media_query_matches(&query);
     cx.new_media_query_list(query, matches)
 }

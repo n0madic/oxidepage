@@ -101,7 +101,17 @@ v1 limits.
   `getBoundingClientRect`/`getClientRects` (per-line rects for inline
   elements), `offset*`/`client*`/`scroll*`, `elementFromPoint`, the `DOMRect`
   family, `window.innerWidth`/`scrollX`/`scrollTo`, and used values in
-  `getComputedStyle` for the layout-backed properties. `ex`/`ch` units
+  `getComputedStyle` for the layout-backed properties. The element scroll
+  members follow CSSOM-View's root/body split in both modes: the root stands
+  for the viewport in standards mode and scrolls nothing in quirks mode, where
+  the body stands for it unless it is potentially scrollable (and
+  `clientWidth`/`clientHeight` report the viewport for that same element).
+  Viewport overflow propagation applies any non-`visible` body `overflow`
+  (CSS Overflow §3.3), so `body { overflow: hidden }` stops clipping the
+  document at the body and only stops the *user*: script, `scrollIntoView`
+  and the driver still scroll a `hidden` viewport, as browsers do, and a
+  wheel does not. A frame's script measures its own viewport, sized from its
+  `<iframe>` on demand, even before the page's layout walk has reached it. `ex`/`ch` units
   resolve through a parley/skrifa font-metrics provider; the WPT **Ahem**
   font is bundled so metric tests are deterministic across platforms.
   `oxidepage dump <file|url> [--viewport WxH]` prints the box tree.

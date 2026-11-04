@@ -668,14 +668,16 @@ pub(crate) fn elements_from_point(
 
 /// `document.scrollingElement`. Standards mode: always the document element.
 /// Quirks mode: the body element, unless it is "potentially scrollable"
-/// (CSSOM-View) — the root element's own overflow is the initial `visible`
-/// on both axes (so it propagates the body's overflow to the viewport,
-/// leaving the body's own box `overflow: visible`), or, when the root's
-/// overflow is *not* visible (no propagation), the body's own overflow is
-/// visible on both axes. Otherwise `null` (nothing propagates the body's
-/// scroll to the viewport, and the body itself no longer represents it).
+/// (CSSOM-View: both it and the root have a non-`visible` overflow, so the
+/// body scrolls itself rather than the viewport), and then `null`. The same
+/// test decides what the body's own scroll members address
+/// (`geometry_support::scroll_target`), so the two cannot disagree.
+///
+/// Any rendered document answers, not only this realm's: `iframe.
+/// contentDocument.scrollingElement` asks about the frame's viewport, and the
+/// layout flush below already routes to the frame that renders `this`.
 pub(crate) fn scrolling_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<NodeId>, JsThrow> {
-    if !is_page_document(cx, this) {
+    if cx.state.frame.global.frame_of_document(this).is_none() {
         // No viewport, and layout must not be flushed for a document outside it.
         return Ok(None);
     }
@@ -687,19 +689,7 @@ pub(crate) fn scrolling_element(cx: &BindCx<'_>, this: NodeId) -> Result<Option<
     };
     let potentially_scrollable =
         crate::imp::geometry_support::flush_layout(cx, this, |dom, layout| {
-            let root_visible = dom
-                .document_element()
-                .and_then(|root| layout.overflow_is_visible(root))
-                .unwrap_or(true);
-            if root_visible {
-                // Propagation: the root's overflow governs the viewport, and the
-                // body's own box behaves as `overflow: visible`.
-                false
-            } else {
-                layout
-                    .overflow_is_visible(body)
-                    .is_some_and(|visible| !visible)
-            }
+            crate::imp::geometry_support::body_is_potentially_scrollable(dom, layout, body)
         });
     Ok((!potentially_scrollable).then_some(body))
 }

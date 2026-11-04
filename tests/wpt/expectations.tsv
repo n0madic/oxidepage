@@ -621,9 +621,6 @@ css/cssom-view/Element-currentCSSZoom.html	Element.currentCSSZoom basic test	FAI
 css/cssom-view/Element-currentCSSZoom.html	Element.currentCSSZoom reacts to style changes	FAIL
 css/cssom-view/Element-currentCSSZoom.html	__harness__	OK
 css/cssom-view/GetBoundingRect.html	__harness__	OK
-css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	When body not potentially scrollable, document.body.scrollHeight always equals window.innerHeight in quirks. (cond. scroll, visible)	FAIL
-css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	When body not potentially scrollable, document.body.scrollHeight always equals window.innerHeight in quirks. (cond. visible, scroll)	FAIL
-css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	When body not potentially scrollable, document.body.scrollHeight always equals window.innerHeight in quirks. (cond. visible, visible)	FAIL
 css/cssom-view/HTMLBody-ScrollArea_quirksmode.html	__harness__	OK
 css/cssom-view/HTMLImageElement-x-and-y-ignore-transforms.html	__harness__	OK
 css/cssom-view/MediaQueryList-addListener-handleEvent.html	__harness__	OK
@@ -1085,8 +1082,6 @@ css/cssom-view/scrollIntoView-nearest-oversized-element.html	__harness__	OK
 css/cssom-view/scrollIntoView-nearest-oversized-element.html	scrollIntoView nearest aligns an oversized target before the scrollport to its closest (right/bottom) edge	FAIL
 css/cssom-view/scrollIntoView-nearest-visible-element.html	__harness__	OK
 css/cssom-view/scrollIntoView-root-overflow-clip.html	__harness__	OK
-css/cssom-view/scrollIntoView-root-overflow-clip.html	scrollIntoView scrolls the viewport when overflow-x: clip is applied to the root element	FAIL
-css/cssom-view/scrollIntoView-root-overflow-clip.html	scrollIntoView scrolls the viewport when overflow-y: clip is applied to the root element	FAIL
 css/cssom-view/scrollIntoView-scrollMargin.html	__harness__	OK
 css/cssom-view/scrollIntoView-scrollMargin.html	scrollIntoView({block: "center", inline: "center"})	FAIL
 css/cssom-view/scrollIntoView-scrollMargin.html	scrollIntoView({block: "end", inline: "end"})	FAIL
@@ -1233,30 +1228,7 @@ css/cssom-view/scrollWidthHeight-overflow-visible-margin-collapsing.html	__harne
 css/cssom-view/scrollWidthHeight-overflow-visible-negative-margins.html	__harness__	OK
 css/cssom-view/scrolling-no-browsing-context.html	__harness__	OK
 css/cssom-view/scrolling-quirks-vs-nonquirks.html	__harness__	OK
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the HTML body element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the HTML body element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the root element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	clientWidth/clientHeight on the root element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scroll() on the HTML body element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scroll() on the root element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollBy() on the HTML body element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollBy() on the root element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollRight of the content in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollRight of the content in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollTop on the HTML body element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollTop on the root element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollLeft/scrollTop on the root element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the HTML body element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the HTML body element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the root element in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollWidth/scrollHeight on the root element in quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollingElement in non-quirks mode	FAIL
-css/cssom-view/scrolling-quirks-vs-nonquirks.html	scrollingElement in quirks mode	FAIL
 css/cssom-view/scrollingElement.html	__harness__	OK
-css/cssom-view/scrollingElement.html	scrollingElement in no-quirks mode 	FAIL
-css/cssom-view/scrollingElement.html	scrollingElement in no-quirks mode  (body table)	FAIL
-css/cssom-view/scrollingElement.html	scrollingElement in no-quirks mode  (root table)	FAIL
-css/cssom-view/scrollingElement.html	scrollingElement in no-quirks mode  (root table, body table)	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in quirks mode	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in quirks mode (body table)	FAIL
 css/cssom-view/scrollingElement.html	scrollingElement in quirks mode (root table)	FAIL
@@ -1265,14 +1237,6 @@ css/cssom-view/scrollintoview-containingblock-chain.html	__harness__	OK
 css/cssom-view/scrollintoview-zero-height-item.html	__harness__	OK
 css/cssom-view/scrollintoview-zero-height-item.html	scrollIntoView on zero height item	FAIL
 css/cssom-view/scrollintoview.html	__harness__	OK
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at left,bottom	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at left,top	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at right,bottom	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "center", inline: "center"}) starting at right,top	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at left,bottom	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at left,top	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at right,bottom	FAIL
-css/cssom-view/scrollintoview.html	scrollIntoView({block: "start", inline: "start"}) starting at right,top	FAIL
 css/cssom-view/table-border-collapse-client-width-height.html	__harness__	OK
 css/cssom-view/table-border-separate-client-width-height.html	__harness__	OK
 css/cssom-view/table-client-props.html	Flex-level table with collapsed border	FAIL

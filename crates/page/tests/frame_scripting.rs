@@ -925,3 +925,27 @@ fn a_duplicate_context_name_resolves_in_tree_order() {
         );
     }
 }
+
+/// A frame's script measures its own viewport, not the page's, even while the
+/// page has not laid out yet: the frame is sized from its `<iframe>` on demand.
+#[test]
+fn a_frame_script_sees_its_own_viewport() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <script>window.r = 'none'; addEventListener('message', e => { window.r = e.data; });</script>\
+         <iframe style='width:300px;height:200px;border:0;padding:5px' srcdoc=\"<!DOCTYPE html>\
+           <body style='margin:0'><div style='height:1000px'></div><script>\
+           const root = document.documentElement;\
+           const r = [innerWidth, innerHeight, root.clientWidth, root.clientHeight,\
+             document.body.offsetWidth, matchMedia('(max-width: 300px)').matches,\
+             document.scrollingElement === root];\
+           scrollTo(0, 50);\
+           r.push(scrollY, root.scrollTop, document.body.getBoundingClientRect().top);\
+           parent.postMessage(r.join('|'), '*');\
+           </script>\"></iframe></body>",
+    );
+    assert_eq!(
+        s(&page, "window.r"),
+        "300|200|300|200|300|true|true|50|50|-50"
+    );
+}

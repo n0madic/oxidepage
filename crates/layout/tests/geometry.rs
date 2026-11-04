@@ -376,18 +376,37 @@ fn hit_test_clips_children_at_the_padding_edge() {
     assert_eq!(layout.element_from_point(&dom, 20.0, 20.0), Some(inner));
 }
 
-/// Regression: the root's `scrollable_overflow` is the union of all descendants
-/// regardless of its own `overflow`, so `<html style="overflow:hidden">` used to
-/// report a positive max scroll and `scrollTo` moved the viewport.
+/// `overflow: hidden` on the root stops the *user* scrolling the document, not
+/// script: CSS Overflow lets a program scroll any `hidden` scroll container, the
+/// viewport included, as browsers do.
 #[test]
-fn overflow_hidden_root_does_not_scroll() {
+fn overflow_hidden_root_scrolls_for_script_but_not_the_user() {
     let (_dom, _s, mut layout) = setup(
         "<html style='overflow: hidden'><body style='margin: 0'>\
          <div style='width: 10px; height: 2000px'></div></body></html>",
     );
-    let result = layout.set_viewport_scroll(0.0, 500.0);
-    assert_eq!(result.y, 0.0, "a hidden-overflow root pins the document");
+    let result = layout.scroll_viewport_by_user(0.0, 500.0);
+    assert_eq!(result.y, 0.0, "a hidden viewport ignores a wheel");
     assert!(!result.changed);
+    let result = layout.set_viewport_scroll(0.0, 500.0);
+    assert_eq!(result.y, 500.0, "script still scrolls it");
+    assert!(result.changed);
+}
+
+/// A `hidden` body propagates to the viewport (CSS Overflow §3.3): the body
+/// stops clipping, so the document keeps its full extent on both axes, and the
+/// user cannot scroll it while script can.
+#[test]
+fn a_hidden_body_propagates_to_the_viewport() {
+    let (dom, _s, mut layout) = setup(
+        "<body style='margin: 0; overflow: hidden'>\
+         <div style='width: 2000px; height: 2000px'></div></body>",
+    );
+    let root = dom.document_element().unwrap();
+    assert_eq!(layout.scroll_size(root), Some((2000.0, 2000.0)));
+    assert!(!layout.scroll_viewport_by_user(30.0, 40.0).changed);
+    let result = layout.set_viewport_scroll(30.0, 40.0);
+    assert_eq!((result.x, result.y), (30.0, 40.0));
 }
 
 /// `overflow: scroll` on the root keeps scrolling (only `hidden`/`clip` pin it).

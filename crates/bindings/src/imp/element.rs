@@ -670,7 +670,8 @@ pub(crate) fn insert_adjacent_html(
 // === CSSOM-View geometry (Phase 5) ===
 
 use crate::imp::geometry_support::{
-    flush_layout, flush_layout_mut, is_document_element, note_scroll, rect_data,
+    ScrollTarget, client_is_viewport, flush_layout, flush_layout_mut, is_document_element,
+    note_scroll, rect_data, scroll_offset_of, scroll_target, set_scroll_offset_of,
 };
 /// `block`/`inline` alignment: `layout`'s, so the enum the Web API parses into
 /// is the one the scroll algorithm matches on.
@@ -701,24 +702,15 @@ pub(crate) fn get_bounding_client_rect(cx: &BindCx<'_>, this: NodeId) -> Result<
 
 pub(crate) fn scroll_top(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
     Ok(flush_layout(cx, this, |dom, layout| {
-        if is_document_element(dom, this) {
-            f64::from(layout.viewport_scroll().y)
-        } else {
-            f64::from(layout.scroll_offset(this).y)
-        }
+        f64::from(scroll_offset_of(dom, layout, this).1)
     }))
 }
 
 pub(crate) fn set_scroll_top(cx: &BindCx<'_>, this: NodeId, value: f64) -> Result<(), JsThrow> {
     let value = if value.is_finite() { value as f32 } else { 0.0 };
     let (target, changed) = flush_layout_mut(cx, this, |dom, layout| {
-        if is_document_element(dom, this) {
-            let x = layout.viewport_scroll().x;
-            (None, layout.set_viewport_scroll(x, value).changed)
-        } else {
-            let x = layout.scroll_offset(this).x;
-            (Some(this), layout.set_scroll_offset(this, x, value).changed)
-        }
+        let (x, _) = scroll_offset_of(dom, layout, this);
+        set_scroll_offset_of(dom, layout, this, x, value)
     });
     note_scroll(cx, target, changed);
     Ok(())
@@ -726,45 +718,43 @@ pub(crate) fn set_scroll_top(cx: &BindCx<'_>, this: NodeId, value: f64) -> Resul
 
 pub(crate) fn scroll_left(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
     Ok(flush_layout(cx, this, |dom, layout| {
-        if is_document_element(dom, this) {
-            f64::from(layout.viewport_scroll().x)
-        } else {
-            f64::from(layout.scroll_offset(this).x)
-        }
+        f64::from(scroll_offset_of(dom, layout, this).0)
     }))
 }
 
 pub(crate) fn set_scroll_left(cx: &BindCx<'_>, this: NodeId, value: f64) -> Result<(), JsThrow> {
     let value = if value.is_finite() { value as f32 } else { 0.0 };
     let (target, changed) = flush_layout_mut(cx, this, |dom, layout| {
-        if is_document_element(dom, this) {
-            let y = layout.viewport_scroll().y;
-            (None, layout.set_viewport_scroll(value, y).changed)
-        } else {
-            let y = layout.scroll_offset(this).y;
-            (Some(this), layout.set_scroll_offset(this, value, y).changed)
-        }
+        let (_, y) = scroll_offset_of(dom, layout, this);
+        set_scroll_offset_of(dom, layout, this, value, y)
     });
     note_scroll(cx, target, changed);
     Ok(())
 }
 
+/// `scrollWidth`/`scrollHeight`. A body that stands for the viewport in
+/// quirks mode reports the viewport's scrolling area, as the root does in
+/// standards mode (the root's own box already spans it).
+fn scroll_size_of(cx: &BindCx<'_>, this: NodeId) -> Option<(f32, f32)> {
+    flush_layout(cx, this, |dom, layout| {
+        if !is_document_element(dom, this)
+            && scroll_target(dom, layout, this) == ScrollTarget::Viewport
+        {
+            let root = dom
+                .containing_document(this)
+                .and_then(|doc| dom.document_element_of(doc))?;
+            return layout.scroll_size(root);
+        }
+        layout.scroll_size(this)
+    })
+}
+
 pub(crate) fn scroll_width(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, this, |_, layout| {
-        layout
-            .scroll_size(this)
-            .map(|(w, _)| f64::from(w).round())
-            .unwrap_or(0.0)
-    }))
+    Ok(scroll_size_of(cx, this).map_or(0.0, |(w, _)| f64::from(w).round()))
 }
 
 pub(crate) fn scroll_height(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    Ok(flush_layout(cx, this, |_, layout| {
-        layout
-            .scroll_size(this)
-            .map(|(_, h)| f64::from(h).round())
-            .unwrap_or(0.0)
-    }))
+    Ok(scroll_size_of(cx, this).map_or(0.0, |(_, h)| f64::from(h).round()))
 }
 
 fn client_box_field(
@@ -788,12 +778,30 @@ pub(crate) fn client_left(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow>
     client_box_field(cx, this, |b| b.left)
 }
 
+/// `clientWidth`/`clientHeight`: the viewport for the root in standards mode
+/// and for the body in quirks mode (CSSOM-View), the padding box otherwise —
+/// including the root in quirks mode.
+fn client_size_of(cx: &BindCx<'_>, this: NodeId) -> (f64, f64) {
+    flush_layout(cx, this, |dom, layout| {
+        if layout.tree().box_for_node(this).is_none() {
+            return (0.0, 0.0);
+        }
+        let (w, h) = if client_is_viewport(dom, this) {
+            let viewport = layout.viewport();
+            (viewport.width, viewport.height)
+        } else {
+            layout.padding_box_size(this).unwrap_or((0.0, 0.0))
+        };
+        (f64::from(w).round(), f64::from(h).round())
+    })
+}
+
 pub(crate) fn client_width(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    client_box_field(cx, this, |b| b.width)
+    Ok(client_size_of(cx, this).0)
 }
 
 pub(crate) fn client_height(cx: &BindCx<'_>, this: NodeId) -> Result<f64, JsThrow> {
-    client_box_field(cx, this, |b| b.height)
+    Ok(client_size_of(cx, this).1)
 }
 
 /// `checkVisibility()`. Per spec: false if `this` has no associated box —

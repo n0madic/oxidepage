@@ -876,9 +876,7 @@ fn scroll_nearest(cx: &BindCx<'_>, node: NodeId, dx: f32, dy: f32) {
                 (Some(container), result.changed)
             }
             oxidepage_layout::ScrollParent::DocumentScrollingElement => {
-                let mut layout = cx.state.layout.borrow_mut();
-                let offset = layout.viewport_scroll();
-                let result = layout.set_viewport_scroll(offset.x + dx, offset.y + dy);
+                let result = cx.state.layout.borrow_mut().scroll_viewport_by_user(dx, dy);
                 (None, result.changed)
             }
         };
