@@ -949,3 +949,26 @@ fn a_frame_script_sees_its_own_viewport() {
         "300|200|300|200|300|true|true|50|50|-50"
     );
 }
+
+/// A parent script that scrolls a frame's root through `contentDocument`
+/// scrolls the *frame's* viewport, so the `scroll` event fires at the frame's
+/// document, and nothing fires at the parent's.
+#[test]
+fn scrolling_a_frame_from_its_parent_fires_scroll_in_the_frame() {
+    let page = page(
+        "<!DOCTYPE html><body style='margin:0'>\
+         <iframe id='f' style='width:200px;height:100px;border:0' srcdoc=\"<!DOCTYPE html>\
+           <body style='margin:0'><div style='height:1000px'></div><script>\
+           document.addEventListener('scroll', () => parent.postMessage('frame:' + scrollY, '*'));\
+           </script>\"></iframe></body>",
+    );
+    s(
+        &page,
+        "window.log = [];\
+         addEventListener('message', e => log.push(e.data));\
+         document.addEventListener('scroll', () => log.push('parent'));\
+         document.getElementById('f').contentDocument.documentElement.scrollTop = 40; 'ok'",
+    );
+    page.settle(Duration::from_millis(500));
+    assert_eq!(s(&page, "log.join(',')"), "frame:40");
+}

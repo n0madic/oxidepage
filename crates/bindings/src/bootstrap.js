@@ -465,29 +465,48 @@
     // the style engine refused.
     const adoptedSheetsProxy = (owner, sync, initial) => {
         const target = Array.isArray(initial) ? Array.prototype.slice.call(initial) : [];
+        const write = (t, key, value) => {
+            if (key === "length") {
+                const length = +value;
+                if (!(length >>> 0 === length)) throw new RangeError("Invalid array length");
+                if (length > t.length) return false;
+                // `push`/`unshift` end by re-setting the length they already
+                // reached; syncing again would restyle every scope twice.
+                if (length === t.length) return true;
+                t.length = length;
+                sync(owner, t);
+                return true;
+            }
+            const i = indexOf(key);
+            if (i > t.length) return false;
+            const replaced = i < t.length;
+            const old = t[i];
+            t[i] = value;
+            try {
+                sync(owner, t);
+            } catch (e) {
+                if (replaced) t[i] = old; else t.length = i;
+                throw e;
+            }
+            return true;
+        };
+        const managed = (key) => key === "length" || indexOf(key) !== null;
         return new Proxy(target, {
             set(t, key, value, receiver) {
-                if (key === "length") {
-                    const length = +value;
-                    if (!(length >>> 0 === length)) throw new RangeError("Invalid array length");
-                    if (length > t.length) return false;
-                    t.length = length;
-                    sync(owner, t);
-                    return true;
-                }
-                const i = indexOf(key);
-                if (i === null) return Reflect.set(t, key, value, receiver);
-                if (i > t.length) return false;
-                const replaced = i < t.length;
-                const old = t[i];
-                t[i] = value;
-                try {
-                    sync(owner, t);
-                } catch (e) {
-                    if (replaced) t[i] = old; else t.length = i;
-                    throw e;
-                }
-                return true;
+                if (!managed(key)) return Reflect.set(t, key, value, receiver);
+                return write(t, key, value);
+            },
+            // `Object.defineProperty(list, 0, {value})` is a write too, and
+            // must not slip a value past `sync`. An accessor, or a descriptor
+            // that would make an entry read-only or hidden, is refused: the
+            // list's entries stay plain data the engine mirrors.
+            defineProperty(t, key, desc) {
+                if (!managed(key)) return Reflect.defineProperty(t, key, desc);
+                if ("get" in desc || "set" in desc || desc.writable === false) return false;
+                if (key !== "length"
+                    && (desc.enumerable === false || desc.configurable === false)) return false;
+                if (!("value" in desc)) return true;
+                return write(t, key, desc.value);
             },
             deleteProperty(t, key) {
                 const i = indexOf(key);

@@ -20,19 +20,42 @@ use crate::cx::BindCx;
 use crate::imp::css_style_declaration::flush_inline_styles;
 use crate::state::{FrameShared, RectData};
 
+/// Gives a nested browsing context the viewport of its `<iframe>`'s content
+/// box, at `dpr` (the page's).
+///
+/// The one place the rule lives: the page's pre-order layout walk
+/// (ADR-0035 D6) and [`size_frame_to_owner`] both call it. Both engines or
+/// neither: the layout engine lays out to the viewport and the stylist's
+/// `Device` evaluates media queries against it, so a frame that moved only
+/// one answers `@media (max-width: …)` for the size it used to be. An engine
+/// already borrowed is left alone (it is being laid out higher up the stack,
+/// and that pass sizes it).
+pub fn fit_frame_viewport(frame: &FrameShared, content: oxidepage_base::Rect, dpr: f32) {
+    let (Ok(mut style), Ok(mut layout)) =
+        (frame.style.try_borrow_mut(), frame.layout.try_borrow_mut())
+    else {
+        return;
+    };
+    let viewport = Viewport {
+        width: content.size.width,
+        height: content.size.height,
+        dpr,
+    };
+    if layout.viewport() != viewport {
+        layout.set_viewport(viewport);
+        style.set_viewport(viewport);
+    }
+}
+
 /// Sizes a nested browsing context's viewport to its `<iframe>`'s content
 /// box, reflowing its ancestors to find that box.
 ///
-/// The page does this in its own pre-order layout walk (ADR-0035 D6), but a
-/// frame's script can ask for its geometry before the page has walked: a
-/// script parsed in the frame's document runs while the page is still
-/// loading it. Without this, `innerWidth` and the root's `clientWidth` answer
-/// the size the frame's engine was created with, the page's viewport, and
-/// its layout wraps to that width too.
-///
-/// An ancestor engine that is already borrowed is left alone, and so is this
-/// frame's viewport: it is being laid out higher up the stack, which will
-/// size this frame itself when it gets here.
+/// The page does this in its own pre-order layout walk, but a frame's script
+/// can ask for its geometry before the page has walked: a script parsed in
+/// the frame's document runs while the page is still loading it. Without
+/// this, `innerWidth` and the root's `clientWidth` answer the size the
+/// frame's engine was created with, the page's viewport, and its layout wraps
+/// to that width too.
 pub(crate) fn size_frame_to_owner(cx: &BindCx<'_>, frame: &Rc<FrameShared>) {
     let owner = cx
         .state
@@ -47,7 +70,7 @@ pub(crate) fn size_frame_to_owner(cx: &BindCx<'_>, frame: &Rc<FrameShared>) {
         return;
     }
     size_frame_to_owner(cx, &parent);
-    let content = {
+    let (content, dpr) = {
         let (Ok(mut style), Ok(mut layout)) = (
             parent.style.try_borrow_mut(),
             parent.layout.try_borrow_mut(),
@@ -57,26 +80,11 @@ pub(crate) fn size_frame_to_owner(cx: &BindCx<'_>, frame: &Rc<FrameShared>) {
         let mut dom = cx.state.dom.borrow_mut();
         // An aborted parent reflow has no boxes, so no content box either.
         let _ = layout.reflow(&mut dom, &mut style);
-        layout.content_box(owner)
+        // The parent was sized just above, so its dpr is the page's.
+        (layout.content_box(owner), layout.viewport().dpr)
     };
-    let Some(content) = content else {
-        return;
-    };
-    let (Ok(mut style), Ok(mut layout)) =
-        (frame.style.try_borrow_mut(), frame.layout.try_borrow_mut())
-    else {
-        return;
-    };
-    let viewport = Viewport {
-        width: content.size.width,
-        height: content.size.height,
-        dpr: layout.viewport().dpr,
-    };
-    if layout.viewport() != viewport {
-        // Both engines, as the page's walk does: the stylist's `Device`
-        // answers media queries for the same size layout lays out to.
-        layout.set_viewport(viewport);
-        style.set_viewport(viewport);
+    if let Some(content) = content {
+        fit_frame_viewport(frame, content, dpr);
     }
 }
 
@@ -137,10 +145,20 @@ pub(crate) fn rect_data(rect: oxidepage_base::Rect) -> RectData {
 /// Queues a `scroll` event for `target` (`None` = the viewport/document) if
 /// the scroll position actually changed; the page's event loop drains the
 /// queue and dispatches the events as tasks.
-pub(crate) fn note_scroll(cx: &BindCx<'_>, target: Option<NodeId>, changed: bool) {
+///
+/// `scrolled` is the node whose engine moved, and picks the queue: the
+/// browsing context rendering it, not the caller's. A parent script scrolling
+/// `iframe.contentDocument.documentElement` moves the frame's viewport, so the
+/// `scroll` event belongs to the frame's document, and `None` in the parent's
+/// queue would fire it at the parent's.
+pub(crate) fn note_scroll(
+    cx: &BindCx<'_>,
+    scrolled: NodeId,
+    target: Option<NodeId>,
+    changed: bool,
+) {
     if changed {
-        cx.state
-            .frame
+        cx.frame_for(scrolled)
             .pending_scroll_targets
             .borrow_mut()
             .push(target);
@@ -157,25 +175,11 @@ pub(crate) fn is_document_element(dom: &DomTree, node: NodeId) -> bool {
         == Some(node)
 }
 
-/// The HTML body element of `node`'s document (the first `<body>` or
-/// `<frameset>` child of its root `<html>`), when `node` is it.
+/// Whether `node` is the body element of its document (`document.body`).
 fn is_the_body_element(dom: &DomTree, node: NodeId) -> bool {
-    let is_html = |n: NodeId, names: &[&str]| {
-        dom.get(n)
-            .and_then(|n| n.as_element())
-            .is_some_and(|el| el.is_html_element() && names.contains(&&*el.name.local))
-    };
-    let Some(root) = dom
-        .containing_document(node)
-        .and_then(|doc| dom.document_element_of(doc))
-    else {
-        return false;
-    };
-    is_html(root, &["html"])
-        && dom
-            .children(root)
-            .find(|&c| is_html(c, &["body", "frameset"]))
-            == Some(node)
+    dom.containing_document(node).is_some_and(|doc| {
+        super::document::html_child_of_root_in(dom, doc, &["body", "frameset"]) == Some(node)
+    })
 }
 
 /// Whether `node`'s document is in quirks mode.

@@ -594,7 +594,17 @@ pub(crate) fn html_child_of_root(
     document: NodeId,
     names: &[&str],
 ) -> Option<NodeId> {
-    let dom = cx.state.dom.borrow();
+    html_child_of_root_in(&cx.state.dom.borrow(), document, names)
+}
+
+/// The first HTML child of `document`'s root element named one of `names`:
+/// `["body", "frameset"]` is "the body element", the one definition both
+/// `document.body` and the CSSOM-View scroll members use.
+pub(crate) fn html_child_of_root_in(
+    dom: &oxidepage_dom::DomTree,
+    document: NodeId,
+    names: &[&str],
+) -> Option<NodeId> {
     let root = dom.document_element_of(document)?;
     dom.children(root).find(|&c| {
         dom.node(c)

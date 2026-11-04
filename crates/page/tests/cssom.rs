@@ -656,11 +656,18 @@ fn a_rule_outliving_its_constructed_sheet_wrapper() {
         "globalThis.rule = (() => {\
            const sheet = new CSSStyleSheet();\
            sheet.replaceSync('p { color: red }');\
+           globalThis.weak = new WeakRef(sheet);\
            return sheet.cssRules[0];\
          })(); 'ok'",
     )
     .unwrap();
     page.collect_garbage();
+    // The precondition that makes this test mean anything: the rule did not
+    // keep its sheet's wrapper alive, so the fallback below really runs.
+    assert_eq!(
+        page.eval_to_string("String(weak.deref())").unwrap(),
+        "undefined"
+    );
     assert_eq!(
         page.eval_to_string(
             "const p = rule.parentStyleSheet;\
@@ -668,5 +675,26 @@ fn a_rule_outliving_its_constructed_sheet_wrapper() {
         )
         .unwrap(),
         "true|1|p"
+    );
+}
+
+/// `Object.defineProperty` on the adopted list is a write like any other: it
+/// is validated, synced into the cascade, and cannot make an entry read-only.
+#[test]
+fn adopted_sheets_define_property_is_validated_and_synced() {
+    assert_eq!(
+        eval(
+            DIV,
+            "const sheet = new CSSStyleSheet();\
+             sheet.replaceSync('#d { color: rgb(1, 2, 3) }');\
+             const list = document.adoptedStyleSheets;\
+             let bad = '';\
+             try { Object.defineProperty(list, 0, { value: 'x' }); } catch (e) { bad = e.name; }\
+             const frozen = Reflect.defineProperty(list, 0, { value: sheet, writable: false });\
+             Object.defineProperty(list, 0, { value: sheet });\
+             [bad, frozen, list.length,\
+              getComputedStyle(document.getElementById('d')).color].join('|')",
+        ),
+        "TypeError|false|1|rgb(1, 2, 3)"
     );
 }

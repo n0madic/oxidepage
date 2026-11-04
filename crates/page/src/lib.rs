@@ -8122,21 +8122,8 @@ impl Page {
         let Some(content) = parent.shared().layout.borrow().content_box(owner) else {
             return;
         };
-        let viewport = Viewport {
-            width: content.size.width,
-            height: content.size.height,
-            dpr: self.viewport.get().dpr,
-        };
-        let shared = frame.shared();
-        if shared.layout.borrow().viewport() == viewport {
-            return;
-        }
-        // Both engines or neither: the layout engine lays out to the viewport
-        // and the stylist's `Device` evaluates media queries against it, so a
-        // frame that moved only one answers `@media (max-width: …)` for the
-        // size it used to be.
-        shared.layout.borrow_mut().set_viewport(viewport);
-        shared.style.borrow_mut().set_viewport(viewport);
+        // The same rule a frame's own geometry read applies on demand.
+        oxidepage_bindings::fit_frame_viewport(frame.shared(), content, self.viewport.get().dpr);
     }
 
     /// The current layout viewport, including its device pixel ratio.

@@ -111,7 +111,8 @@ v1 limits.
   document at the body and only stops the *user*: script, `scrollIntoView`
   and the driver still scroll a `hidden` viewport, as browsers do, and a
   wheel does not. A frame's script measures its own viewport, sized from its
-  `<iframe>` on demand, even before the page's layout walk has reached it. `ex`/`ch` units
+  `<iframe>` on demand, even before the page's layout walk has reached it
+  (ADR-0043). `ex`/`ch` units
   resolve through a parley/skrifa font-metrics provider; the WPT **Ahem**
   font is bundled so metric tests are deterministic across platforms.
   `oxidepage dump <file|url> [--viewport WxH]` prints the box tree.

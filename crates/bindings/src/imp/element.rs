@@ -712,7 +712,7 @@ pub(crate) fn set_scroll_top(cx: &BindCx<'_>, this: NodeId, value: f64) -> Resul
         let (x, _) = scroll_offset_of(dom, layout, this);
         set_scroll_offset_of(dom, layout, this, x, value)
     });
-    note_scroll(cx, target, changed);
+    note_scroll(cx, this, target, changed);
     Ok(())
 }
 
@@ -728,7 +728,7 @@ pub(crate) fn set_scroll_left(cx: &BindCx<'_>, this: NodeId, value: f64) -> Resu
         let (_, y) = scroll_offset_of(dom, layout, this);
         set_scroll_offset_of(dom, layout, this, value, y)
     });
-    note_scroll(cx, target, changed);
+    note_scroll(cx, this, target, changed);
     Ok(())
 }
 
@@ -913,7 +913,7 @@ pub(crate) fn scroll_into_view(cx: &BindCx<'_>, this: NodeId, arg: JsValue) -> R
         oxidepage_layout::scroll_into_view(layout, dom, this, None, block, inline)
     });
     for target in scrolled {
-        note_scroll(cx, target, true);
+        note_scroll(cx, this, target, true);
     }
     Ok(())
 }

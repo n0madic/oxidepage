@@ -856,7 +856,7 @@ fn scroll_nearest(cx: &BindCx<'_>, node: NodeId, dx: f32, dy: f32) {
                 .changed
         };
         if changed {
-            crate::imp::geometry_support::note_scroll(cx, Some(node), true);
+            crate::imp::geometry_support::note_scroll(cx, node, Some(node), true);
             return;
         }
     }
@@ -881,7 +881,7 @@ fn scroll_nearest(cx: &BindCx<'_>, node: NodeId, dx: f32, dy: f32) {
             }
         };
         if changed {
-            crate::imp::geometry_support::note_scroll(cx, target, true);
+            crate::imp::geometry_support::note_scroll(cx, node, target, true);
             return;
         }
         // This container could not move; try the next one out.
