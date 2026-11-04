@@ -179,7 +179,7 @@ fn atomic_inline_boxes_inside_ifc() {
     let ifc = div_box.ifc.as_ref().unwrap();
     assert_eq!(ifc.layout.inline_boxes().len(), 1);
     assert_eq!(
-        ifc.layout.inline_boxes()[0].id,
+        ifc.layout.inline_boxes().next().unwrap().id,
         div_box.children[0].index() as u64
     );
     assert_eq!(ifc.text, "ac");

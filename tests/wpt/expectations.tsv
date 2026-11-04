@@ -776,9 +776,7 @@ css/cssom-view/elementFromPoint-subpixel.html	__harness__	OK
 css/cssom-view/elementFromPoint-visibility-hidden-resizer.html	__harness__	OK
 css/cssom-view/elementFromPoint-visibility-hidden-resizer.html	elementFromPoint on resizer area of an element with visibility:hidden	FAIL
 css/cssom-view/elementFromPoint.html	Fieldsets	FAIL
-css/cssom-view/elementFromPoint.html	First element to get mouse events with pointer-events css	FAIL
 css/cssom-view/elementFromPoint.html	Image Maps	FAIL
-css/cssom-view/elementFromPoint.html	Return first element that is the target for hit testing	FAIL
 css/cssom-view/elementFromPoint.html	__harness__	OK
 css/cssom-view/elementFromPoint.html	co-ordinates larger than the viewport from in iframe	FAIL
 css/cssom-view/elementFromPoint.html	no hit target at x,y	FAIL
@@ -833,8 +831,6 @@ css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points between
 css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points inside cells in a flipped (writing-mode:vertical-lr) table	FAIL
 css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points inside cells in a right-to-left table	FAIL
 css/cssom-view/elementsFromPoint-table.html	elementsFromPoint for points inside table cells	FAIL
-css/cssom-view/elementsFromPoint.html	First element to get mouse events with pointer-events css	FAIL
-css/cssom-view/elementsFromPoint.html	Return first element that is the target for hit testing	FAIL
 css/cssom-view/elementsFromPoint.html	__harness__	OK
 css/cssom-view/elementsFromPoint.html	co-ordinates larger than the viewport from in iframe	FAIL
 css/cssom-view/elementsFromPoint.html	no hit target at x,y	FAIL
@@ -887,7 +883,6 @@ css/cssom-view/getClientRects-inline-atomic-child.html	getClientRects-inline-ato
 css/cssom-view/getClientRects-inline-atomic-child.html	getClientRects-inline-atomic-child 1	FAIL
 css/cssom-view/getClientRects-inline-atomic-child.html	getClientRects-inline-atomic-child 2	FAIL
 css/cssom-view/getClientRects-inline-inline-child.html	__harness__	OK
-css/cssom-view/getClientRects-inline-inline-child.html	getClientRects-inline-inline-child	FAIL
 css/cssom-view/getClientRects-inline-with-block-child.html	__harness__	OK
 css/cssom-view/getClientRects-inline-with-block-child.html	getClientRects-inline-with-block-child	FAIL
 css/cssom-view/getClientRects-zoom.html	__harness__	OK
@@ -964,9 +959,6 @@ css/cssom-view/scroll-behavior-default-css.html	Smooth scrolling of an element w
 css/cssom-view/scroll-behavior-default-css.html	__harness__	OK
 css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scroll() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scrollBy() with smooth behavior	FAIL
-css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scrollIntoView() with auto behavior	FAIL
-css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scrollIntoView() with default behavior	FAIL
-css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scrollIntoView() with instant behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scrollIntoView() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with auto scroll-behavior ; scrollTo() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scroll() with auto behavior	FAIL
@@ -977,7 +969,6 @@ css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior 
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollBy() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollIntoView() with auto behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollIntoView() with default behavior	FAIL
-css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollIntoView() with instant behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollIntoView() with smooth behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollTo() with auto behavior	FAIL
 css/cssom-view/scroll-behavior-element.html	Element with smooth scroll-behavior ; scrollTo() with default behavior	FAIL
@@ -1028,10 +1019,6 @@ css/cssom-view/scroll-behavior-smooth-navigation.html	Make sure the page is read
 css/cssom-view/scroll-behavior-smooth-navigation.html	Smooth scrolling while doing history navigation.	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	__harness__	OK
 css/cssom-view/scroll-behavior-smooth-positions.html	Make sure the page is ready for animation.	FAIL
-css/cssom-view/scroll-behavior-smooth-positions.html	Scroll positions when performing smooth scrolling from (0, 0) to (500, 250) using scrollIntoView() 	FAIL
-css/cssom-view/scroll-behavior-smooth-positions.html	Scroll positions when performing smooth scrolling from (0, 500) to (500, 250) using scrollIntoView() 	FAIL
-css/cssom-view/scroll-behavior-smooth-positions.html	Scroll positions when performing smooth scrolling from (1000, 0) to (500, 250) using scrollIntoView() 	FAIL
-css/cssom-view/scroll-behavior-smooth-positions.html	Scroll positions when performing smooth scrolling from (1000, 500) to (500, 250) using scrollIntoView() 	FAIL
 css/cssom-view/scroll-behavior-smooth-positions.html	__harness__	OK
 css/cssom-view/scroll-behavior-smooth.html	BODY element scroll-behavior should not propagate to viewport	NOTRUN
 css/cssom-view/scroll-behavior-smooth.html	HTML element scroll-behavior should propagate to viewport	NOTRUN

@@ -16,11 +16,6 @@ use crate::display_list::{
     BorderRadii, Brush, Color, DisplayItem, FontId, FontResource, PositionedGlyph,
 };
 
-/// Converts a parley F2Dot14 normalized coordinate to a float in `[-1, 1]`.
-fn f2dot14_to_f32(v: i16) -> f32 {
-    f32::from(v) / 16384.0
-}
-
 /// Which slice of an IFC to paint. CSS 2.1 Appendix E paints in-flow inline
 /// content (step 5) *before* positioned descendants (steps 6–8), and a
 /// `position: relative` inline element is a positioned descendant — its text
@@ -247,11 +242,7 @@ fn paint_glyph_run(
         data: font.data.clone(),
     });
 
-    let normalized_coords: Vec<f32> = run
-        .normalized_coords()
-        .iter()
-        .map(|&c| f2dot14_to_f32(c))
-        .collect();
+    let normalized_coords: Vec<f32> = run.normalized_coords().iter().map(|c| c.to_f32()).collect();
 
     let glyphs: Vec<PositionedGlyph> = glyph_run
         .positioned_glyphs()
@@ -282,7 +273,7 @@ fn paint_glyph_run(
         let baseline = glyph_run.baseline();
         let x = content_origin.x + glyph_run.offset();
         let advance = glyph_run.advance();
-        let metrics = run.metrics();
+        let metrics = run.font_metrics();
         let mut decoration = |top_from_baseline: f32, thickness: f32| {
             if thickness > 0.0 && advance > 0.0 {
                 builder.push(DisplayItem::Fill {

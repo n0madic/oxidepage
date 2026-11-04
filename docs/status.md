@@ -82,7 +82,9 @@ v1 limits.
 - **Phase 5 — Layout & geometry (taffy + parley)**: done. A box tree separate
   from the DOM (anonymous boxes live only there), taffy for block/flex/grid,
   parley inline formatting contexts (shaping + line breaking, atomic inlines,
-  `<br>`, `text-transform`, white-space collapsing), `::before`/`::after`
+  `<br>`, `text-transform`, all four `white-space-collapse` modes collapsed
+  across span boundaries, CSS line-box sizing and `vertical-align` via
+  parley 0.12, ADR-0040), `::before`/`::after`
   boxes with string `content`, tables laid out as CSS grid (col/rowspan), and
   scrollable overflow with real, clamped scroll offsets (`scroll` events
   dispatched as tasks). The whole CSSOM-View geometry surface is scripted:

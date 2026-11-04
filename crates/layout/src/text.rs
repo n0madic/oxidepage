@@ -12,6 +12,8 @@ pub(crate) mod stylo {
     pub(crate) use style::computed_values::text_wrap_mode::T as TextWrapMode;
     pub(crate) use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
     pub(crate) use style::properties::ComputedValues;
+    pub(crate) use style::values::computed::AlignmentBaseline;
+    pub(crate) use style::values::computed::BaselineShift;
     pub(crate) use style::values::computed::OverflowWrap;
     pub(crate) use style::values::computed::WordBreak;
     pub(crate) use style::values::computed::font::FontStretch;
@@ -21,6 +23,7 @@ pub(crate) mod stylo {
     pub(crate) use style::values::computed::font::GenericFontFamily;
     pub(crate) use style::values::computed::font::LineHeight;
     pub(crate) use style::values::computed::font::SingleFontFamily;
+    pub(crate) use style::values::generics::box_::BaselineShiftKeyword;
 }
 
 pub(crate) mod parley {
@@ -98,11 +101,41 @@ pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::
     match input {
         stylo::WhiteSpaceCollapse::Collapse => parley::WhiteSpaceCollapse::Collapse,
         stylo::WhiteSpaceCollapse::Preserve => parley::WhiteSpaceCollapse::Preserve,
-
-        // TODO: Implement PreserveBreaks and BreakSpaces modes
-        stylo::WhiteSpaceCollapse::PreserveBreaks => parley::WhiteSpaceCollapse::Preserve,
-        stylo::WhiteSpaceCollapse::BreakSpaces => parley::WhiteSpaceCollapse::Preserve,
+        stylo::WhiteSpaceCollapse::PreserveBreaks => parley::WhiteSpaceCollapse::PreserveBreaks,
+        stylo::WhiteSpaceCollapse::BreakSpaces => parley::WhiteSpaceCollapse::BreakSpaces,
     }
+}
+
+/// Converts the `vertical-align` longhands (`alignment-baseline` +
+/// `baseline-shift`) to parley's equivalent. `line_height` is the element's
+/// own used line-height in px, which a percentage shift resolves against
+/// (CSS 2.1 §10.8.1).
+pub(crate) fn vertical_align(
+    style: &stylo::ComputedValues,
+    line_height: f32,
+) -> parley::VerticalAlign {
+    let box_styles = style.get_box();
+    let alignment = match box_styles.alignment_baseline {
+        stylo::AlignmentBaseline::Baseline => parley::AlignmentBaseline::Baseline,
+        stylo::AlignmentBaseline::TextBottom => parley::AlignmentBaseline::TextBottom,
+        stylo::AlignmentBaseline::Middle => parley::AlignmentBaseline::Middle,
+        stylo::AlignmentBaseline::TextTop => parley::AlignmentBaseline::TextTop,
+    };
+    let shift = match &box_styles.baseline_shift {
+        stylo::BaselineShift::Keyword(keyword) => match keyword {
+            stylo::BaselineShiftKeyword::Sub => parley::BaselineShift::Sub,
+            stylo::BaselineShiftKeyword::Super => parley::BaselineShift::Super,
+            stylo::BaselineShiftKeyword::Top => parley::BaselineShift::Top,
+            stylo::BaselineShiftKeyword::Bottom => parley::BaselineShift::Bottom,
+            // css-inline-3's `center` (line-relative centring) has no parley
+            // counterpart; it stays on the baseline.
+            stylo::BaselineShiftKeyword::Center => parley::BaselineShift::Length(0.0),
+        },
+        stylo::BaselineShift::Length(length) => {
+            parley::BaselineShift::Length(length.resolve(Length::new(line_height)).px())
+        }
+    };
+    parley::VerticalAlign::new(alignment, shift)
 }
 
 /// `line-height: normal` factor. Matches blitz-dom's 1.2× approximation
@@ -120,6 +153,23 @@ pub(crate) fn resolve_line_height(line_height: parley::LineHeight, font_size: f3
     }
 }
 
+/// Converts a computed `line-height` to parley's representation.
+pub(crate) fn line_height(style: &stylo::ComputedValues) -> parley::LineHeight {
+    match style.get_font().line_height {
+        stylo::LineHeight::Normal => parley::LineHeight::FontSizeRelative(NORMAL_LINE_HEIGHT),
+        stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),
+        stylo::LineHeight::Length(value) => parley::LineHeight::Absolute(value.0.px()),
+    }
+}
+
+/// An element's own used `line-height` in CSS px.
+pub(crate) fn style_line_height(style: &stylo::ComputedValues) -> f32 {
+    resolve_line_height(
+        line_height(style),
+        style.get_font().font_size.used_size.0.px(),
+    )
+}
+
 /// Builds the parley text style for a text span owned by `brush`'s node.
 pub(crate) fn style(
     brush: TextBrush,
@@ -130,11 +180,9 @@ pub(crate) fn style(
 
     // Convert font size and line height
     let font_size = font_styles.font_size.used_size.0.px();
-    let line_height = match font_styles.line_height {
-        stylo::LineHeight::Normal => parley::LineHeight::FontSizeRelative(NORMAL_LINE_HEIGHT),
-        stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),
-        stylo::LineHeight::Length(value) => parley::LineHeight::Absolute(value.0.px()),
-    };
+    let line_height = self::line_height(style);
+
+    let vertical_align = self::vertical_align(style, resolve_line_height(line_height, font_size));
 
     let letter_spacing = itext_styles
         .letter_spacing
@@ -218,6 +266,11 @@ pub(crate) fn style(
         text_wrap_mode,
         overflow_wrap,
         word_break,
+        white_space_collapse: self::white_space_collapse(itext_styles.white_space_collapse),
+        // stylo's servo engine does not ship `line-break`, so every span
+        // keeps the UAX #14 default.
+        line_break: Default::default(),
+        vertical_align,
 
         // Contains the owning NodeId
         brush,

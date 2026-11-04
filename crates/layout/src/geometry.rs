@@ -613,11 +613,14 @@ impl LayoutEngine {
                         if !brush_node.is_some_and(is_self_or_descendant) {
                             continue;
                         }
+                        // The line's typographic content extent (ascent +
+                        // descent, inline boxes included), not the line box:
+                        // leading is not part of an inline's fragment.
                         Rect::from_xywh(
                             run.offset(),
-                            metrics.baseline - metrics.ascent,
+                            metrics.content_block_min_coord,
                             run.advance(),
-                            metrics.ascent + metrics.descent,
+                            metrics.content_block_max_coord - metrics.content_block_min_coord,
                         )
                     }
                     parley::PositionedLayoutItem::InlineBox(ibox) => {
@@ -1096,8 +1099,8 @@ impl LayoutEngine {
                 );
                 'lines: for line in ifc.layout.lines() {
                     let metrics = line.metrics();
-                    let line_top = metrics.baseline - metrics.ascent;
-                    let line_bottom = metrics.baseline + metrics.descent;
+                    let line_top = metrics.content_block_min_coord;
+                    let line_bottom = metrics.content_block_max_coord;
                     if content_pt.y < line_top || content_pt.y >= line_bottom {
                         continue;
                     }
