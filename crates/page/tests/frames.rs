@@ -324,6 +324,88 @@ fn load_fires_on_the_iframe_element() {
     assert_eq!(s(&page, "window.loaded"), "1");
 }
 
+/// An `<iframe>` with no `src` and no `srcdoc` keeps its initial `about:blank`
+/// document, and HTML still runs the iframe load event steps for it — whether
+/// it came from the markup (rendered or `display: none`) or from
+/// `createElement` + `appendChild`. It used to get none, so every page waiting
+/// on that `load` to script a fresh frame waited forever.
+#[test]
+fn load_fires_for_an_iframe_without_a_source() {
+    let page = page(
+        "<!DOCTYPE html><body>\
+         <script>window.log = []; function L(s) { log.push(s); }</script>\
+         <iframe onload=\"L('markup')\"></iframe>\
+         <iframe style='display: none' onload=\"L('hidden')\"></iframe>\
+         <iframe src='' onload=\"L('empty-src')\"></iframe>\
+         <script>\
+           const f = document.createElement('iframe');\
+           f.onload = () => L('created:' + !!f.contentDocument.body);\
+           document.body.appendChild(f);\
+           addEventListener('load', () => L('window'));\
+         </script></body>",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+    assert_eq!(
+        s(&page, "log.join()"),
+        "markup,hidden,empty-src,created:true,window",
+        "one load per frame, each before the embedder's own load"
+    );
+}
+
+/// Removing `src` later is a navigation to `about:blank`: the frame's document
+/// is replaced and the element gets a fresh `load`.
+#[test]
+fn removing_src_navigates_to_about_blank() {
+    let page =
+        page("<!DOCTYPE html><body><iframe id='f' srcdoc='<p id=old>x</p>'></iframe></body>");
+    page.settle(std::time::Duration::from_millis(500));
+    s(
+        &page,
+        "window.loads = 0; const f = document.getElementById('f');\
+         f.onload = () => { window.loads += 1; };\
+         f.removeAttribute('srcdoc'); 0",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+    assert_eq!(s(&page, "String(window.loads)"), "1");
+    assert_eq!(
+        s(
+            &page,
+            "String(document.getElementById('f').contentDocument.getElementById('old'))"
+        ),
+        "null",
+        "the srcdoc document was replaced by an empty one"
+    );
+}
+
+/// Two source changes in one task are one navigation, as in a browser, where
+/// the second cancels the first. Each queued change reads the attributes as
+/// they are when it is drained, so the second used to navigate to the very
+/// same place again and fire a second `load`.
+#[test]
+fn source_changes_in_one_task_navigate_once() {
+    let page = page("<!DOCTYPE html><body><iframe id='f'></iframe></body>");
+    page.settle(std::time::Duration::from_millis(500));
+    s(
+        &page,
+        "window.loads = []; const f = document.getElementById('f');\
+         f.onload = () => loads.push(f.contentDocument.body.textContent);\
+         f.srcdoc = 'first'; f.srcdoc = 'second'; 0",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+    assert_eq!(s(&page, "loads.join()"), "second");
+
+    // And an insertion plus a `srcdoc` in the same task: the `Connected`
+    // navigation already read the final attribute.
+    s(
+        &page,
+        "window.loads2 = []; const g = document.createElement('iframe');\
+         g.onload = () => loads2.push(g.contentDocument.body.textContent);\
+         document.body.appendChild(g); g.srcdoc = 'only'; 0",
+    );
+    page.settle(std::time::Duration::from_millis(500));
+    assert_eq!(s(&page, "loads2.join()"), "only");
+}
+
 /// An `<iframe>` is a replaced element: 300×150 by CSS default, and its size
 /// comes from CSS and its attributes, never from what it contains. That is
 /// what makes one reflow pass enough — the child cannot resize its embedder.

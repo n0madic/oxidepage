@@ -5033,8 +5033,12 @@ impl Page {
     /// A task source, never a step of the attribute setter (ADR-0035 D5): a
     /// load re-enters the event loop, and the setter holds a `dom` borrow.
     ///
+    /// `initial_insertion` is HTML's flag of the same name: true for the
+    /// navigation that follows creating the context, false for a later `src` /
+    /// `srcdoc` change. It only matters when the element names no source.
+    ///
     /// Returns whether anything happened, so the loop counts it as progress.
-    fn navigate_frame(&self, owner: NodeId) -> bool {
+    fn navigate_frame(&self, owner: NodeId, initial_insertion: bool) -> bool {
         let Some(frame) = self.frames.of_owner(owner) else {
             return false;
         };
@@ -5067,10 +5071,30 @@ impl Page {
             return true;
         }
 
+        // An absent or empty `src` means `about:blank` — HTML's "shared
+        // attribute processing steps" — and what that costs depends on when.
         let Some(src) = src.filter(|s| !s.trim().is_empty()) else {
-            // No source: the context keeps the `about:blank` it was born with,
-            // and HTML fires `load` on the element for it.
-            return false;
+            if initial_insertion {
+                // On insertion the context keeps the `about:blank` it was born
+                // with, and HTML runs the iframe load event steps for it: the
+                // element still gets its `load`. Returning without one is how
+                // `<iframe onload=…>` and `createElement('iframe')` +
+                // `appendChild` waited forever — the commonest way a page (and
+                // a test harness) learns a fresh frame is ready to script.
+                //
+                // HTML fires it synchronously inside the insertion. Here it is
+                // the task that created the context (ADR-0035 D5), so a handler
+                // assigned just *after* `appendChild` still runs, where a
+                // browser would have fired before it existed.
+                self.fire_frame_event(owner, "load");
+            } else {
+                // Afterwards — `src` removed or emptied — it is a navigation
+                // to `about:blank` like any other, replacing whatever the frame
+                // shows and firing `load` when it commits.
+                let inherited = self.inherited_blank_url(owner);
+                self.load_frame_document(&frame, owner, "", &inherited);
+            }
+            return true;
         };
         let Ok(url) = url::Url::parse(&parent_url).and_then(|base| base.join(src.trim())) else {
             self.fire_frame_event(owner, "error");
@@ -5533,6 +5557,13 @@ impl Page {
     fn drain_frame_updates(&self) -> bool {
         let updates = self.state.dom.borrow_mut().take_frame_updates();
         let mut progressed = false;
+        // Elements already navigated by this batch. `navigate_frame` reads the
+        // attributes as they are *now*, not as they were when the update was
+        // queued, so a second `SourceChanged` for the same element in one
+        // batch would navigate to the very same place again and fire a second
+        // `load`. `a.src = x; a.src = y` is one navigation in a browser (the
+        // second cancels the first), and so is `appendChild(a); a.src = x`.
+        let mut navigated: HashSet<NodeId> = HashSet::new();
         for update in updates {
             progressed |= match update {
                 oxidepage_dom::FrameUpdate::Connected(owner) => {
@@ -5540,11 +5571,22 @@ impl Page {
                     // `<iframe src>` in the parsed markup gains both in one
                     // turn, in that order.
                     let attached = self.attach_child_frame(owner);
-                    attached && self.navigate_frame(owner)
+                    if attached {
+                        navigated.insert(owner);
+                    }
+                    attached && self.navigate_frame(owner, /* initial_insertion */ true)
                 }
-                oxidepage_dom::FrameUpdate::SourceChanged(owner) => self.navigate_frame(owner),
+                oxidepage_dom::FrameUpdate::SourceChanged(owner) => {
+                    navigated.insert(owner)
+                        && self.navigate_frame(owner, /* initial_insertion */ false)
+                }
                 oxidepage_dom::FrameUpdate::Renamed(owner) => self.rename_frame(owner),
-                oxidepage_dom::FrameUpdate::Disconnected(owner) => self.detach_child_frame(owner),
+                oxidepage_dom::FrameUpdate::Disconnected(owner) => {
+                    // A removed-and-reinserted element gets a new context,
+                    // which its `Connected` will navigate.
+                    navigated.remove(&owner);
+                    self.detach_child_frame(owner)
+                }
             };
             // The queue's pin (`push_frame_update`), released only after the
             // transition is done — the disconnect path reaches the element to

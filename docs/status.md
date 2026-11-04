@@ -822,7 +822,13 @@ URL, which this engine spells as inheriting its URL — so such a frame reports
 the embedder's address as `location.href` where a browser says `about:blank`.
 Its initial document is a real empty HTML document, but the context is attached
 by the event loop rather than by `appendChild`, so `contentDocument` is null
-until the next turn.
+until the next turn — and for the same reason the `load` HTML fires for an
+`<iframe>` with no `src` (or an empty one) arrives in that turn rather than
+inside `appendChild`, so a handler assigned just after the insertion still
+runs where a browser would already have fired. Removing `src` later navigates
+to `about:blank` and fires `load` again, and several source changes in one
+task are one navigation with one `load`, as a browser's cancellation makes
+them.
 `sandbox` enforces **`allow-scripts` and `allow-same-origin` only** — the rest
 of HTML's tokens are not implemented and the attribute reflects as a string
 rather than a `DOMTokenList`, so nothing can appear to grant one of them. A
