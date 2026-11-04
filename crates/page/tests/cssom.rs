@@ -698,3 +698,29 @@ fn adopted_sheets_define_property_is_validated_and_synced() {
         "TypeError|false|1|rgb(1, 2, 3)"
     );
 }
+
+#[test]
+fn computed_style_of_an_element_outside_the_flat_tree_is_empty() {
+    // CSSOM: no declarations unless the element is connected and in the flat
+    // tree; the object is live, so it fills in on insertion and empties again
+    // on removal (where the node still holds its last cascade data).
+    assert_eq!(
+        eval(
+            DIV,
+            "const e = document.createElement('div');\
+             const cs = getComputedStyle(e);\
+             const before = [cs.length, cs.display, cs.item(0)].join(',');\
+             document.body.append(e);\
+             const inserted = [cs.length > 0, cs.display].join(',');\
+             e.remove();\
+             const removed = [cs.length, cs.display].join(',');\
+             const host = document.getElementById('d');\
+             host.attachShadow({mode: 'open'});\
+             const light = document.createElement('p');\
+             host.append(light);\
+             const unslotted = getComputedStyle(light).display;\
+             [before, inserted, removed, unslotted].join('|')",
+        ),
+        "0,,|true,block|0,|"
+    );
+}

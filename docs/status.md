@@ -30,8 +30,19 @@ v1 limits.
   HTMLMetaElement, HTMLFormElement, HTMLScriptElement, Event,
   CustomEvent, MutationObserver/MutationRecord, DOMException. Document base URL
   (`<base href>`) backs URL reflection, `baseURI`, and subresource resolution.
-  `querySelector*`/`matches`/`closest` via the `selectors` crate over the
-  arena. Event loop v1: timers (min-heap), microtask checkpoints, observer
+  `querySelector*`/`matches`/`closest` (and the legacy
+  `webkitMatchesSelector` alias) via the `selectors` crate over the arena;
+  `:lang()` matches the nearest declared `xml:lang`/`lang` (crossing a shadow
+  root to its host) by RFC 4647 extended filtering, in queries and in the
+  cascade alike. The document's default language (`<meta
+  http-equiv=content-language>`, the HTTP header) is not tracked. Every
+  generated operation, constructor and setter applies WebIDL's argument-count
+  check, so a missing required argument is a `TypeError` rather than the
+  string `"undefined"`. `HTMLElement` reflects `title`, `lang`, `translate`,
+  `dir`, `hidden` (with `"until-found"`), `inert`, `accessKey`, `autofocus`
+  and `tabIndex` (with HTML's per-element defaults); `innerText`,
+  `draggable`, `spellcheck`, `contentEditable` and `popover` are not
+  installed. Event loop v1: timers (min-heap), microtask checkpoints, observer
   delivery, the `document.readyState` /
   `readystatechange` / `DOMContentLoaded` / `load` lifecycle, inline classic
   scripts executing at parser suspension points. `console`, `window`, minimal
@@ -73,7 +84,9 @@ v1 limits.
   a synchronous blocking loader), media queries, and incremental restyle driven
   from the single DOM mutation path (snapshots + `dirty_descendants`). One
   pointer-sized element handle backs both `querySelector` and the cascade.
-  `getComputedStyle` returns computed values, and the CSSOM is scripted:
+  `getComputedStyle` returns computed values (an empty declaration list for
+  an element outside a rendered document's flat tree, re-checked on every read
+  since the object is live), and the CSSOM is scripted:
   `el.style` (camelCase/dashed/indexed via a proxy), `getComputedStyle`,
   `document.styleSheets`, `<style>.sheet`/`<link>.sheet` (the same objects,
   and the list and `sheet` both see a `<style>` inserted or removed earlier

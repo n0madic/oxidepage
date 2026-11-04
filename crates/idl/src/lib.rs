@@ -1183,6 +1183,13 @@ fn emit_args(
     context: &str,
 ) -> Result<Vec<String>, CodegenError> {
     let mut names = Vec::new();
+    // WebIDL overload resolution: fewer arguments than the operation requires
+    // is a `TypeError`, before any argument is converted. Without it a missing
+    // `DOMString` reads as the string "undefined".
+    let required = required_len(args);
+    if required > 0 {
+        let _ = writeln!(body, "    cx.require_args(call, {required}, {context:?})?;");
+    }
     for (i, arg) in args.iter().enumerate() {
         let var = format!("a{i}");
         let expr = match (&arg.kind, arg.optional, &arg.default) {

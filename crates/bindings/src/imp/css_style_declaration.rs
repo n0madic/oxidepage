@@ -212,6 +212,34 @@ fn resolved_layout_value(cx: &BindCx<'_>, element: NodeId, name: &str) -> Option
     })
 }
 
+/// CSSOM `getComputedStyle` step 6: the declarations are the longhands only
+/// while the element is connected (to a rendered document) and part of the
+/// flat tree; otherwise the list is empty and every read answers `""`.
+///
+/// Checked per read, not at creation: the object is live, so the same view
+/// fills in once the element is inserted and empties again when it leaves. A
+/// removed element keeps its last cascade data on the node, which is exactly
+/// the stale answer this gate keeps out.
+fn has_computed_style(cx: &BindCx<'_>, element: NodeId) -> bool {
+    let dom = cx.state.dom.borrow();
+    if !dom.get(element).is_some_and(|n| n.is_connected()) {
+        return false;
+    }
+    // Climb the flat tree to the document: an unassigned light child of a
+    // shadow host (or anything under one) never reaches it.
+    let mut current = element;
+    loop {
+        match dom.flat_tree_parent(current) {
+            Some(parent) => current = parent,
+            None => {
+                return dom
+                    .get(current)
+                    .is_some_and(|n| n.data().kind() == oxidepage_dom::node::NodeKind::Document);
+            }
+        }
+    }
+}
+
 /// A computed value serialized for `getComputedStyle` reads. The resolved
 /// `ComputedValues` are cached on the view and reused until the author-style
 /// (`engine.version`) or DOM (`style_version`) counters change, so reading many
@@ -224,6 +252,9 @@ fn computed_value(
     name: &str,
 ) -> String {
     flush_inline_styles(cx);
+    if !has_computed_style(cx, element) {
+        return String::new();
+    }
     if pseudo.is_none()
         && let Some(resolved) = resolved_layout_value(cx, element, name)
     {
@@ -334,7 +365,13 @@ pub(crate) fn length(cx: &BindCx<'_>, this: Rc<StyleDeclData>) -> Result<f64, Js
             cssom::block_names(&inline_block_cached(cx, *element, block)).len()
         }
         StyleDeclData::Rule { rule, .. } => rule_names(cx, rule).len(),
-        StyleDeclData::Computed { .. } => longhand_names_sorted().len(),
+        StyleDeclData::Computed { element, .. } => {
+            if has_computed_style(cx, *element) {
+                longhand_names_sorted().len()
+            } else {
+                0
+            }
+        }
     };
     Ok(n as f64)
 }
@@ -352,7 +389,9 @@ pub(crate) fn item(
                 .cloned()
         }
         StyleDeclData::Rule { rule, .. } => rule_names(cx, rule).get(i).cloned(),
-        StyleDeclData::Computed { .. } => longhand_names_sorted().get(i).map(|s| (*s).to_owned()),
+        StyleDeclData::Computed { element, .. } => has_computed_style(cx, *element)
+            .then(|| longhand_names_sorted().get(i).map(|s| (*s).to_owned()))
+            .flatten(),
     };
     Ok(name.unwrap_or_default())
 }

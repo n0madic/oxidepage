@@ -365,6 +365,15 @@ pub(crate) fn matches(cx: &BindCx<'_>, this: NodeId, selectors: String) -> Resul
     Ok(cx.state.dom.borrow().element_matches(this, &list))
 }
 
+/// `webkitMatchesSelector`: the DOM standard's legacy alias of `matches`.
+pub(crate) fn webkit_matches_selector(
+    cx: &BindCx<'_>,
+    this: NodeId,
+    selectors: String,
+) -> Result<bool, JsThrow> {
+    matches(cx, this, selectors)
+}
+
 pub(crate) fn closest(
     cx: &BindCx<'_>,
     this: NodeId,

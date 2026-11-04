@@ -1598,8 +1598,14 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         2,
         gen_element_has_attribute_ns,
     )?;
-    cx.define_method(&proto_element, "matches", 1, gen_element_matches)?;
     cx.define_method(&proto_element, "closest", 1, gen_element_closest)?;
+    cx.define_method(&proto_element, "matches", 1, gen_element_matches)?;
+    cx.define_method(
+        &proto_element,
+        "webkitMatchesSelector",
+        1,
+        gen_element_webkit_matches_selector,
+    )?;
     cx.define_method(
         &proto_element,
         "getElementsByTagName",
@@ -2767,9 +2773,57 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
     cx.define_accessor_ce(
         &proto_html_element,
+        "title",
+        gen_html_element_get_title,
+        gen_html_element_set_title,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "lang",
+        gen_html_element_get_lang,
+        gen_html_element_set_lang,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "translate",
+        gen_html_element_get_translate,
+        gen_html_element_set_translate,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
         "dir",
         gen_html_element_get_dir,
         gen_html_element_set_dir,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "hidden",
+        gen_html_element_get_hidden,
+        gen_html_element_set_hidden,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "inert",
+        gen_html_element_get_inert,
+        gen_html_element_set_inert,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "accessKey",
+        gen_html_element_get_access_key,
+        gen_html_element_set_access_key,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "autofocus",
+        gen_html_element_get_autofocus,
+        gen_html_element_set_autofocus,
+    )?;
+    cx.define_accessor_ce(
+        &proto_html_element,
+        "tabIndex",
+        gen_html_element_get_tab_index,
+        gen_html_element_set_tab_index,
     )?;
     cx.define_getter(&proto_html_element, "dataset", gen_html_element_get_dataset)?;
     cx.define_method(&proto_html_element, "click", 0, gen_html_element_click)?;
@@ -5990,6 +6044,7 @@ fn gen_font_face_set_get_status(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_font_face_set_load(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_font_face_set(&call.this)?;
+    cx.require_args(call, 1, "FontFaceSet.load")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string_or(call, 1, " ")?;
     imp::font_face_set::load(cx, this, a0, a1)
@@ -6010,6 +6065,7 @@ fn gen_css_style_declaration_set_css_text(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_decl(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleDeclaration.cssText setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::css_style_declaration::set_css_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6027,6 +6083,7 @@ fn gen_css_style_declaration_get_length(
 
 fn gen_css_style_declaration_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_decl(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleDeclaration.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     Ok(JsValue::String(imp::css_style_declaration::item(
         cx, this, a0,
@@ -6038,6 +6095,7 @@ fn gen_css_style_declaration_get_property_value(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_decl(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleDeclaration.getPropertyValue")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::String(
         imp::css_style_declaration::get_property_value(cx, this, a0)?,
@@ -6049,6 +6107,7 @@ fn gen_css_style_declaration_get_property_priority(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_decl(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleDeclaration.getPropertyPriority")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::String(
         imp::css_style_declaration::get_property_priority(cx, this, a0)?,
@@ -6060,6 +6119,7 @@ fn gen_css_style_declaration_set_property(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_decl(&call.this)?;
+    cx.require_args(call, 2, "CSSStyleDeclaration.setProperty")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = cx.arg_dom_string_or(call, 2, "")?;
@@ -6072,6 +6132,7 @@ fn gen_css_style_declaration_remove_property(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_decl(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleDeclaration.removeProperty")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::String(
         imp::css_style_declaration::remove_property(cx, this, a0)?,
@@ -6128,6 +6189,7 @@ fn gen_style_sheet_get_disabled(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_style_sheet_set_disabled(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_sheet(&call.this)?;
+    cx.require_args(call, 1, "StyleSheet.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::style_sheet::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6148,6 +6210,7 @@ fn gen_css_style_sheet_get_css_rules(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_css_style_sheet_insert_rule(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_sheet(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleSheet.insertRule")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_u32_or(call, 1, 0)?;
     Ok(JsValue::Number(imp::css_style_sheet::insert_rule(
@@ -6157,6 +6220,7 @@ fn gen_css_style_sheet_insert_rule(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_css_style_sheet_delete_rule(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_sheet(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleSheet.deleteRule")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::css_style_sheet::delete_rule(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6164,12 +6228,14 @@ fn gen_css_style_sheet_delete_rule(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_css_style_sheet_replace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_sheet(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleSheet.replace")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::css_style_sheet::replace(cx, this, a0)
 }
 
 fn gen_css_style_sheet_replace_sync(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_sheet(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleSheet.replaceSync")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::css_style_sheet::replace_sync(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6182,6 +6248,7 @@ fn gen_css_style_sheet_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_style_sheet_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_style_sheet_list(&call.this)?;
+    cx.require_args(call, 1, "StyleSheetList.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::style_sheet_list::item(cx, this, a0)
 }
@@ -6193,6 +6260,7 @@ fn gen_style_sheet_list_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_css_rule_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_css_rule_list(&call.this)?;
+    cx.require_args(call, 1, "CSSRuleList.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::css_rule_list::item(cx, this, a0)
 }
@@ -6214,6 +6282,7 @@ fn gen_css_rule_get_css_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_css_rule_set_css_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_css_rule(&call.this)?;
+    cx.require_args(call, 1, "CSSRule.cssText setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::css_rule::set_css_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6247,6 +6316,7 @@ fn gen_css_style_rule_set_selector_text(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_css_rule(&call.this)?;
+    cx.require_args(call, 1, "CSSStyleRule.selectorText setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::css_style_rule::set_selector_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6272,6 +6342,7 @@ fn gen_css_page_rule_set_selector_text(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_css_rule(&call.this)?;
+    cx.require_args(call, 1, "CSSPageRule.selectorText setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::css_page_rule::set_selector_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6287,6 +6358,7 @@ fn gen_custom_element_registry_define(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_custom_element_registry(&call.this)?;
+    cx.require_args(call, 2, "CustomElementRegistry.define")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     let a2 = call.arg(2);
@@ -6295,6 +6367,7 @@ fn gen_custom_element_registry_define(
 
 fn gen_custom_element_registry_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_custom_element_registry(&call.this)?;
+    cx.require_args(call, 1, "CustomElementRegistry.get")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::custom_element_registry::get(cx, this, a0)
 }
@@ -6304,6 +6377,7 @@ fn gen_custom_element_registry_get_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_custom_element_registry(&call.this)?;
+    cx.require_args(call, 1, "CustomElementRegistry.getName")?;
     let a0 = call.arg(0);
     imp::custom_element_registry::get_name(cx, this, a0)
 }
@@ -6313,6 +6387,7 @@ fn gen_custom_element_registry_when_defined(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_custom_element_registry(&call.this)?;
+    cx.require_args(call, 1, "CustomElementRegistry.whenDefined")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::custom_element_registry::when_defined(cx, this, a0)
 }
@@ -6322,6 +6397,7 @@ fn gen_custom_element_registry_upgrade(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_custom_element_registry(&call.this)?;
+    cx.require_args(call, 1, "CustomElementRegistry.upgrade")?;
     let a0 = call.arg(0);
     imp::custom_element_registry::upgrade(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6370,6 +6446,7 @@ fn gen_event_get_cancel_bubble(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_event_set_cancel_bubble(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "Event.cancelBubble setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::event::set_cancel_bubble(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6401,6 +6478,7 @@ fn gen_event_get_return_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_event_set_return_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "Event.returnValue setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::event::set_return_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6434,6 +6512,7 @@ fn gen_event_get_time_stamp(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
 
 fn gen_event_init_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "Event.initEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let a2 = cx.arg_bool_or(call, 2, false);
@@ -6442,6 +6521,7 @@ fn gen_event_init_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 }
 
 fn gen_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "Event constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::event::constructor(cx, call, a0, a1)
@@ -6457,6 +6537,7 @@ fn gen_custom_event_init_custom_event(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "CustomEvent.initCustomEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let a2 = cx.arg_bool_or(call, 2, false);
@@ -6466,6 +6547,7 @@ fn gen_custom_event_init_custom_event(
 }
 
 fn gen_custom_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "CustomEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::custom_event::constructor(cx, call, a0, a1)
@@ -6476,6 +6558,7 @@ fn gen_event_target_add_event_listener(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event_target(&call.this)?;
+    cx.require_args(call, 2, "EventTarget.addEventListener")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     let a2 = call.arg(2);
@@ -6488,6 +6571,7 @@ fn gen_event_target_remove_event_listener(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event_target(&call.this)?;
+    cx.require_args(call, 2, "EventTarget.removeEventListener")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     let a2 = call.arg(2);
@@ -6497,6 +6581,7 @@ fn gen_event_target_remove_event_listener(
 
 fn gen_event_target_dispatch_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event_target(&call.this)?;
+    cx.require_args(call, 1, "EventTarget.dispatchEvent")?;
     let a0 = cx.arg_event_value(call, 0)?;
     Ok(JsValue::Bool(imp::event_target::dispatch_event(
         cx, this, a0,
@@ -6546,6 +6631,7 @@ fn gen_abort_signal_get_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_abort_signal_set_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_abort_signal(&call.this)?;
+    cx.require_args(call, 1, "AbortSignal.onabort setter")?;
     let a0 = call.arg(0);
     imp::abort_signal::set_onabort(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6553,6 +6639,7 @@ fn gen_abort_signal_set_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_node_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node_list(&call.this)?;
+    cx.require_args(call, 1, "NodeList.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     let ret = imp::node_list::item(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -6570,6 +6657,7 @@ fn gen_html_collection_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_collection_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_collection(&call.this)?;
+    cx.require_args(call, 1, "HTMLCollection.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     let ret = imp::html_collection::item(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -6577,6 +6665,7 @@ fn gen_html_collection_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
 
 fn gen_html_collection_named_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_collection(&call.this)?;
+    cx.require_args(call, 1, "HTMLCollection.namedItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::html_collection::named_item(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -6584,12 +6673,14 @@ fn gen_html_collection_named_item(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_named_node_map_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_named_node_map(&call.this)?;
+    cx.require_args(call, 1, "NamedNodeMap.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::named_node_map::item(cx, this, a0)
 }
 
 fn gen_named_node_map_get_named_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_named_node_map(&call.this)?;
+    cx.require_args(call, 1, "NamedNodeMap.getNamedItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::named_node_map::get_named_item(cx, this, a0)
 }
@@ -6599,6 +6690,7 @@ fn gen_named_node_map_get_named_item_ns(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_named_node_map(&call.this)?;
+    cx.require_args(call, 2, "NamedNodeMap.getNamedItemNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::named_node_map::get_named_item_ns(cx, this, a0, a1)
@@ -6642,6 +6734,7 @@ fn gen_attr_get_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_attr_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_attr(&call.this)?;
+    cx.require_args(call, 1, "Attr.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::attr::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6655,6 +6748,7 @@ fn gen_attr_get_owner_element(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_mutation_observer_observe(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_observer(&call.this)?;
+    cx.require_args(call, 1, "MutationObserver.observe")?;
     let a0 = cx.arg_node(call, 0)?;
     let a1 = call.arg(1);
     imp::mutation_observer::observe(cx, this, a0, a1)?;
@@ -6676,6 +6770,7 @@ fn gen_mutation_observer_take_records(
 }
 
 fn gen_mutation_observer_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "MutationObserver constructor")?;
     let a0 = call.arg(0);
     imp::mutation_observer::constructor(cx, call, a0)
 }
@@ -6844,6 +6939,7 @@ fn gen_node_get_node_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, 
 
 fn gen_node_set_node_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.nodeValue setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::node::set_node_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6859,6 +6955,7 @@ fn gen_node_get_text_content(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_node_set_text_content(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.textContent setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::node::set_text_content(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -6879,12 +6976,14 @@ fn gen_node_clone_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsTh
 
 fn gen_node_is_equal_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.isEqualNode")?;
     let a0 = cx.arg_nullable_node(call, 0)?;
     Ok(JsValue::Bool(imp::node::is_equal_node(cx, this, a0)?))
 }
 
 fn gen_node_is_same_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.isSameNode")?;
     let a0 = cx.arg_nullable_node(call, 0)?;
     Ok(JsValue::Bool(imp::node::is_same_node(cx, this, a0)?))
 }
@@ -6894,6 +6993,7 @@ fn gen_node_compare_document_position(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.compareDocumentPosition")?;
     let a0 = cx.arg_node(call, 0)?;
     Ok(JsValue::Number(imp::node::compare_document_position(
         cx, this, a0,
@@ -6902,12 +7002,14 @@ fn gen_node_compare_document_position(
 
 fn gen_node_contains(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.contains")?;
     let a0 = cx.arg_nullable_node(call, 0)?;
     Ok(JsValue::Bool(imp::node::contains(cx, this, a0)?))
 }
 
 fn gen_node_lookup_prefix(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.lookupPrefix")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     Ok(match imp::node::lookup_prefix(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -6917,6 +7019,7 @@ fn gen_node_lookup_prefix(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_node_lookup_namespace_uri(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.lookupNamespaceURI")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     Ok(match imp::node::lookup_namespace_uri(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -6926,6 +7029,7 @@ fn gen_node_lookup_namespace_uri(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_node_is_default_namespace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.isDefaultNamespace")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::node::is_default_namespace(
         cx, this, a0,
@@ -6934,6 +7038,7 @@ fn gen_node_is_default_namespace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_node_insert_before(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 2, "Node.insertBefore")?;
     let a0 = cx.arg_node(call, 0)?;
     let a1 = cx.arg_nullable_node(call, 1)?;
     let ret = imp::node::insert_before(cx, this, a0, a1)?;
@@ -6942,6 +7047,7 @@ fn gen_node_insert_before(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_node_append_child(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.appendChild")?;
     let a0 = cx.arg_node(call, 0)?;
     let ret = imp::node::append_child(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -6949,6 +7055,7 @@ fn gen_node_append_child(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
 
 fn gen_node_replace_child(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 2, "Node.replaceChild")?;
     let a0 = cx.arg_node(call, 0)?;
     let a1 = cx.arg_node(call, 1)?;
     let ret = imp::node::replace_child(cx, this, a0, a1)?;
@@ -6957,6 +7064,7 @@ fn gen_node_replace_child(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_node_remove_child(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_node(&call.this)?;
+    cx.require_args(call, 1, "Node.removeChild")?;
     let a0 = cx.arg_node(call, 0)?;
     let ret = imp::node::remove_child(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -6985,6 +7093,7 @@ fn gen_document_set_adopted_style_sheets(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.adoptedStyleSheets setter")?;
     let a0 = call.arg(0);
     imp::document::set_adopted_style_sheets(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -7058,6 +7167,7 @@ fn gen_document_get_elements_by_tag_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.getElementsByTagName")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::document::get_elements_by_tag_name(cx, this, a0)
 }
@@ -7067,6 +7177,7 @@ fn gen_document_get_elements_by_tag_name_ns(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 2, "Document.getElementsByTagNameNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::document::get_elements_by_tag_name_ns(cx, this, a0, a1)
@@ -7077,12 +7188,14 @@ fn gen_document_get_elements_by_class_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.getElementsByClassName")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::document::get_elements_by_class_name(cx, this, a0)
 }
 
 fn gen_document_create_element(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.createElement")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     let ret = imp::document::create_element(cx, this, a0, a1)?;
@@ -7091,6 +7204,7 @@ fn gen_document_create_element(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_document_create_element_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 2, "Document.createElementNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let ret = imp::document::create_element_ns(cx, this, a0, a1)?;
@@ -7108,6 +7222,7 @@ fn gen_document_create_document_fragment(
 
 fn gen_document_create_text_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.createTextNode")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::document::create_text_node(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -7115,6 +7230,7 @@ fn gen_document_create_text_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_document_create_cdata_section(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.createCDATASection")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::document::create_cdata_section(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -7122,6 +7238,7 @@ fn gen_document_create_cdata_section(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_document_create_comment(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.createComment")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::document::create_comment(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -7132,6 +7249,7 @@ fn gen_document_create_processing_instruction(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 2, "Document.createProcessingInstruction")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let ret = imp::document::create_processing_instruction(cx, this, a0, a1)?;
@@ -7140,6 +7258,7 @@ fn gen_document_create_processing_instruction(
 
 fn gen_document_import_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.importNode")?;
     let a0 = cx.arg_node(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let ret = imp::document::import_node(cx, this, a0, a1)?;
@@ -7148,6 +7267,7 @@ fn gen_document_import_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
 
 fn gen_document_adopt_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.adoptNode")?;
     let a0 = cx.arg_node(call, 0)?;
     let ret = imp::document::adopt_node(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -7155,12 +7275,14 @@ fn gen_document_adopt_node(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, 
 
 fn gen_document_create_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.createEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::document::create_event(cx, this, a0)
 }
 
 fn gen_document_element_from_point(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 2, "Document.elementFromPoint")?;
     let a0 = cx.arg_f64(call, 0)?;
     let a1 = cx.arg_f64(call, 1)?;
     let ret = imp::document::element_from_point(cx, this, a0, a1)?;
@@ -7169,6 +7291,7 @@ fn gen_document_element_from_point(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_document_elements_from_point(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 2, "Document.elementsFromPoint")?;
     let a0 = cx.arg_f64(call, 0)?;
     let a1 = cx.arg_f64(call, 1)?;
     imp::document::elements_from_point(cx, this, a0, a1)
@@ -7211,6 +7334,7 @@ fn gen_document_set_onreadystatechange(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.onreadystatechange setter")?;
     let a0 = call.arg(0);
     imp::document::set_onreadystatechange(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -7229,6 +7353,7 @@ fn gen_document_get_title(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_document_set_title(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.title setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::document::set_title(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -7274,6 +7399,7 @@ fn gen_document_writeln(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_document_get_element_by_id(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.getElementById")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::non_element_parent_node::get_element_by_id(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -7347,6 +7473,7 @@ fn gen_document_replace_children(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_document_query_selector(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.querySelector")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::parent_node::query_selector(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -7354,6 +7481,7 @@ fn gen_document_query_selector(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_document_query_selector_all(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_document(&call.this)?;
+    cx.require_args(call, 1, "Document.querySelectorAll")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::parent_node::query_selector_all(cx, this, a0)
 }
@@ -8231,6 +8359,7 @@ fn gen_dom_implementation_create_document_type(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_implementation(&call.this)?;
+    cx.require_args(call, 3, "DOMImplementation.createDocumentType")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = cx.arg_dom_string(call, 2)?;
@@ -8243,6 +8372,7 @@ fn gen_dom_implementation_create_document(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_implementation(&call.this)?;
+    cx.require_args(call, 2, "DOMImplementation.createDocument")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_nullable_dom_string(call, 1)?;
     let a2 = cx.arg_nullable_node(call, 2)?;
@@ -8272,6 +8402,7 @@ fn gen_dom_implementation_has_feature(
 
 fn gen_dom_parser_parse_from_string(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_parser(&call.this)?;
+    cx.require_args(call, 2, "DOMParser.parseFromString")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let ret = imp::dom_parser::parse_from_string(cx, this, a0, a1)?;
@@ -8287,6 +8418,7 @@ fn gen_xml_serializer_serialize_to_string(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xml_serializer(&call.this)?;
+    cx.require_args(call, 1, "XMLSerializer.serializeToString")?;
     let a0 = cx.arg_node(call, 0)?;
     Ok(JsValue::String(imp::xml_serializer::serialize_to_string(
         cx, this, a0,
@@ -8356,6 +8488,7 @@ fn gen_document_fragment_get_element_by_id(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document_fragment(&call.this)?;
+    cx.require_args(call, 1, "DocumentFragment.getElementById")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::non_element_parent_node::get_element_by_id(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -8438,6 +8571,7 @@ fn gen_document_fragment_query_selector(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document_fragment(&call.this)?;
+    cx.require_args(call, 1, "DocumentFragment.querySelector")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::parent_node::query_selector(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -8448,6 +8582,7 @@ fn gen_document_fragment_query_selector_all(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_document_fragment(&call.this)?;
+    cx.require_args(call, 1, "DocumentFragment.querySelectorAll")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::parent_node::query_selector_all(cx, this, a0)
 }
@@ -8474,6 +8609,7 @@ fn gen_shadow_root_get_inner_html(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_shadow_root_set_inner_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_shadow_root(&call.this)?;
+    cx.require_args(call, 1, "ShadowRoot.innerHTML setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::shadow_root::set_inner_html(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8492,6 +8628,7 @@ fn gen_shadow_root_set_adopted_style_sheets(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_shadow_root(&call.this)?;
+    cx.require_args(call, 1, "ShadowRoot.adoptedStyleSheets setter")?;
     let a0 = call.arg(0);
     imp::shadow_root::set_adopted_style_sheets(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8521,6 +8658,7 @@ fn gen_element_get_part(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_element_set_part(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.part setter")?;
     let a0 = call.arg(0);
     imp::element::set_part(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8559,6 +8697,7 @@ fn gen_element_get_id(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_element_set_id(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.id setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::set_id(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8571,6 +8710,7 @@ fn gen_element_get_class_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_element_set_class_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.className setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::set_class_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8598,6 +8738,7 @@ fn gen_element_get_attribute_names(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_element_get_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.getAttribute")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(match imp::element::get_attribute(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -8607,6 +8748,7 @@ fn gen_element_get_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_element_get_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.getAttributeNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     Ok(match imp::element::get_attribute_ns(cx, this, a0, a1)? {
@@ -8617,6 +8759,7 @@ fn gen_element_get_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_element_set_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.setAttribute")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::element::set_attribute(cx, this, a0, a1)?;
@@ -8625,6 +8768,7 @@ fn gen_element_set_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_element_set_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 3, "Element.setAttributeNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = cx.arg_dom_string(call, 2)?;
@@ -8634,6 +8778,7 @@ fn gen_element_set_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_element_remove_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.removeAttribute")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::remove_attribute(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8641,6 +8786,7 @@ fn gen_element_remove_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_element_remove_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.removeAttributeNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::element::remove_attribute_ns(cx, this, a0, a1)?;
@@ -8649,6 +8795,7 @@ fn gen_element_remove_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_element_toggle_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.toggleAttribute")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_opt_bool(call, 1);
     Ok(JsValue::Bool(imp::element::toggle_attribute(
@@ -8658,12 +8805,14 @@ fn gen_element_toggle_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_element_has_attribute(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.hasAttribute")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::element::has_attribute(cx, this, a0)?))
 }
 
 fn gen_element_has_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.hasAttributeNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     Ok(JsValue::Bool(imp::element::has_attribute_ns(
@@ -8671,17 +8820,31 @@ fn gen_element_has_attribute_ns(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
     )?))
 }
 
+fn gen_element_closest(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.closest")?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    let ret = imp::element::closest(cx, this, a0)?;
+    cx.opt_node_to_js(ret)
+}
+
 fn gen_element_matches(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.matches")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::element::matches(cx, this, a0)?))
 }
 
-fn gen_element_closest(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+fn gen_element_webkit_matches_selector(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.webkitMatchesSelector")?;
     let a0 = cx.arg_dom_string(call, 0)?;
-    let ret = imp::element::closest(cx, this, a0)?;
-    cx.opt_node_to_js(ret)
+    Ok(JsValue::Bool(imp::element::webkit_matches_selector(
+        cx, this, a0,
+    )?))
 }
 
 fn gen_element_get_elements_by_tag_name(
@@ -8689,6 +8852,7 @@ fn gen_element_get_elements_by_tag_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.getElementsByTagName")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::get_elements_by_tag_name(cx, this, a0)
 }
@@ -8698,6 +8862,7 @@ fn gen_element_get_elements_by_tag_name_ns(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.getElementsByTagNameNS")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::element::get_elements_by_tag_name_ns(cx, this, a0, a1)
@@ -8708,6 +8873,7 @@ fn gen_element_get_elements_by_class_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.getElementsByClassName")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::get_elements_by_class_name(cx, this, a0)
 }
@@ -8717,6 +8883,7 @@ fn gen_element_insert_adjacent_element(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.insertAdjacentElement")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_element(call, 1)?;
     let ret = imp::element::insert_adjacent_element(cx, this, a0, a1)?;
@@ -8725,6 +8892,7 @@ fn gen_element_insert_adjacent_element(
 
 fn gen_element_insert_adjacent_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.insertAdjacentText")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::element::insert_adjacent_text(cx, this, a0, a1)?;
@@ -8751,6 +8919,7 @@ fn gen_element_get_scroll_top(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_element_set_scroll_top(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.scrollTop setter")?;
     let a0 = cx.arg_f64(call, 0)?;
     imp::element::set_scroll_top(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8763,6 +8932,7 @@ fn gen_element_get_scroll_left(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_element_set_scroll_left(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.scrollLeft setter")?;
     let a0 = cx.arg_f64(call, 0)?;
     imp::element::set_scroll_left(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8824,6 +8994,7 @@ fn gen_element_get_inner_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_element_set_inner_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.innerHTML setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::set_inner_html(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8836,6 +9007,7 @@ fn gen_element_get_outer_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_element_set_outer_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.outerHTML setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::element::set_outer_html(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -8843,6 +9015,7 @@ fn gen_element_set_outer_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_element_insert_adjacent_html(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 2, "Element.insertAdjacentHTML")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::element::insert_adjacent_html(cx, this, a0, a1)?;
@@ -8917,6 +9090,7 @@ fn gen_element_replace_children(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_element_query_selector(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.querySelector")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let ret = imp::parent_node::query_selector(cx, this, a0)?;
     cx.opt_node_to_js(ret)
@@ -8924,6 +9098,7 @@ fn gen_element_query_selector(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_element_query_selector_all(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "Element.querySelectorAll")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::parent_node::query_selector_all(cx, this, a0)
 }
@@ -8992,6 +9167,7 @@ fn gen_character_data_get_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_character_data_set_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_character_data(&call.this)?;
+    cx.require_args(call, 1, "CharacterData.data setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::character_data::set_data(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9004,6 +9180,7 @@ fn gen_character_data_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_character_data_substring_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_character_data(&call.this)?;
+    cx.require_args(call, 2, "CharacterData.substringData")?;
     let a0 = cx.arg_u32(call, 0)?;
     let a1 = cx.arg_u32(call, 1)?;
     Ok(JsValue::String(imp::character_data::substring_data(
@@ -9013,6 +9190,7 @@ fn gen_character_data_substring_data(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_character_data_append_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_character_data(&call.this)?;
+    cx.require_args(call, 1, "CharacterData.appendData")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::character_data::append_data(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9020,6 +9198,7 @@ fn gen_character_data_append_data(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_character_data_insert_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_character_data(&call.this)?;
+    cx.require_args(call, 2, "CharacterData.insertData")?;
     let a0 = cx.arg_u32(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::character_data::insert_data(cx, this, a0, a1)?;
@@ -9028,6 +9207,7 @@ fn gen_character_data_insert_data(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_character_data_delete_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_character_data(&call.this)?;
+    cx.require_args(call, 2, "CharacterData.deleteData")?;
     let a0 = cx.arg_u32(call, 0)?;
     let a1 = cx.arg_u32(call, 1)?;
     imp::character_data::delete_data(cx, this, a0, a1)?;
@@ -9036,6 +9216,7 @@ fn gen_character_data_delete_data(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_character_data_replace_data(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_character_data(&call.this)?;
+    cx.require_args(call, 3, "CharacterData.replaceData")?;
     let a0 = cx.arg_u32(call, 0)?;
     let a1 = cx.arg_u32(call, 1)?;
     let a2 = cx.arg_dom_string(call, 2)?;
@@ -9102,6 +9283,7 @@ fn gen_character_data_remove(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_text_split_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_text(&call.this)?;
+    cx.require_args(call, 1, "Text.splitText")?;
     let a0 = cx.arg_u32(call, 0)?;
     let ret = imp::text::split_text(cx, this, a0)?;
     cx.node_to_js(ret)
@@ -9139,6 +9321,7 @@ fn gen_dom_token_list_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_dom_token_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_token_list(&call.this)?;
+    cx.require_args(call, 1, "DOMTokenList.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     Ok(match imp::dom_token_list::item(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -9148,6 +9331,7 @@ fn gen_dom_token_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, 
 
 fn gen_dom_token_list_contains(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_token_list(&call.this)?;
+    cx.require_args(call, 1, "DOMTokenList.contains")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::dom_token_list::contains(cx, this, a0)?))
 }
@@ -9168,6 +9352,7 @@ fn gen_dom_token_list_remove(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_dom_token_list_toggle(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_token_list(&call.this)?;
+    cx.require_args(call, 1, "DOMTokenList.toggle")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_opt_bool(call, 1);
     Ok(JsValue::Bool(imp::dom_token_list::toggle(
@@ -9177,6 +9362,7 @@ fn gen_dom_token_list_toggle(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_dom_token_list_replace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_token_list(&call.this)?;
+    cx.require_args(call, 2, "DOMTokenList.replace")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     Ok(JsValue::Bool(imp::dom_token_list::replace(
@@ -9186,6 +9372,7 @@ fn gen_dom_token_list_replace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_dom_token_list_supports(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_token_list(&call.this)?;
+    cx.require_args(call, 1, "DOMTokenList.supports")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::dom_token_list::supports(cx, this, a0)?))
 }
@@ -9197,6 +9384,7 @@ fn gen_dom_token_list_get_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_dom_token_list_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_token_list(&call.this)?;
+    cx.require_args(call, 1, "DOMTokenList.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::dom_token_list::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9204,6 +9392,7 @@ fn gen_dom_token_list_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_form_data_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
+    cx.require_args(call, 2, "FormData.append")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     let a2 = cx.arg_opt_dom_string(call, 2)?;
@@ -9213,6 +9402,7 @@ fn gen_form_data_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_form_data_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
+    cx.require_args(call, 1, "FormData.delete")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::form_data::delete(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9220,24 +9410,28 @@ fn gen_form_data_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_form_data_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
+    cx.require_args(call, 1, "FormData.get")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::form_data::get(cx, this, a0)
 }
 
 fn gen_form_data_get_all(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
+    cx.require_args(call, 1, "FormData.getAll")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::form_data::get_all(cx, this, a0)
 }
 
 fn gen_form_data_has(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
+    cx.require_args(call, 1, "FormData.has")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::form_data::has(cx, this, a0)?))
 }
 
 fn gen_form_data_set(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_form_data(&call.this)?;
+    cx.require_args(call, 2, "FormData.set")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     let a2 = cx.arg_opt_dom_string(call, 2)?;
@@ -9252,6 +9446,7 @@ fn gen_form_data_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_headers_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_headers(&call.this)?;
+    cx.require_args(call, 2, "Headers.append")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::headers::append(cx, this, a0, a1)?;
@@ -9260,6 +9455,7 @@ fn gen_headers_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_headers_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_headers(&call.this)?;
+    cx.require_args(call, 1, "Headers.delete")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::headers::delete(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9267,6 +9463,7 @@ fn gen_headers_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_headers_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_headers(&call.this)?;
+    cx.require_args(call, 1, "Headers.get")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(match imp::headers::get(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -9276,12 +9473,14 @@ fn gen_headers_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow>
 
 fn gen_headers_has(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_headers(&call.this)?;
+    cx.require_args(call, 1, "Headers.has")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::headers::has(cx, this, a0)?))
 }
 
 fn gen_headers_set(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_headers(&call.this)?;
+    cx.require_args(call, 2, "Headers.set")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::headers::set(cx, this, a0, a1)?;
@@ -9290,6 +9489,7 @@ fn gen_headers_set(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow>
 
 fn gen_headers_for_each(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_headers(&call.this)?;
+    cx.require_args(call, 1, "Headers.forEach")?;
     let a0 = call.arg(0);
     imp::headers::for_each(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9386,6 +9586,7 @@ fn gen_request_clone(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
 }
 
 fn gen_request_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "Request constructor")?;
     let a0 = call.arg(0);
     let a1 = call.arg(1);
     imp::request::constructor(cx, call, a0, a1)
@@ -9502,6 +9703,7 @@ fn gen_file_get_last_modified(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 }
 
 fn gen_file_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 2, "File constructor")?;
     let a0 = call.arg(0);
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = call.arg(2);
@@ -9515,12 +9717,14 @@ fn gen_file_list_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
 
 fn gen_file_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_list(&call.this)?;
+    cx.require_args(call, 1, "FileList.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::file_list::item(cx, this, a0)
 }
 
 fn gen_file_reader_read_as_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.readAsText")?;
     let a0 = call.arg(0);
     let a1 = cx.arg_opt_dom_string(call, 1)?;
     imp::file_reader::read_as_text(cx, this, a0, a1)?;
@@ -9529,6 +9733,7 @@ fn gen_file_reader_read_as_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_file_reader_read_as_data_url(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.readAsDataURL")?;
     let a0 = call.arg(0);
     imp::file_reader::read_as_data_url(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9539,6 +9744,7 @@ fn gen_file_reader_read_as_array_buffer(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.readAsArrayBuffer")?;
     let a0 = call.arg(0);
     imp::file_reader::read_as_array_buffer(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9572,6 +9778,7 @@ fn gen_file_reader_get_onloadstart(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_file_reader_set_onloadstart(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.onloadstart setter")?;
     let a0 = call.arg(0);
     imp::file_reader::set_onloadstart(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9584,6 +9791,7 @@ fn gen_file_reader_get_onprogress(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_file_reader_set_onprogress(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.onprogress setter")?;
     let a0 = call.arg(0);
     imp::file_reader::set_onprogress(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9596,6 +9804,7 @@ fn gen_file_reader_get_onload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 
 fn gen_file_reader_set_onload(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.onload setter")?;
     let a0 = call.arg(0);
     imp::file_reader::set_onload(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9608,6 +9817,7 @@ fn gen_file_reader_get_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_file_reader_set_onabort(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.onabort setter")?;
     let a0 = call.arg(0);
     imp::file_reader::set_onabort(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9620,6 +9830,7 @@ fn gen_file_reader_get_onerror(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_file_reader_set_onerror(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.onerror setter")?;
     let a0 = call.arg(0);
     imp::file_reader::set_onerror(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9632,6 +9843,7 @@ fn gen_file_reader_get_onloadend(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_file_reader_set_onloadend(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_file_reader(&call.this)?;
+    cx.require_args(call, 1, "FileReader.onloadend setter")?;
     let a0 = call.arg(0);
     imp::file_reader::set_onloadend(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9704,6 +9916,7 @@ fn gen_dom_rect_get_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_dom_rect_set_x(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_rect(&call.this)?;
+    cx.require_args(call, 1, "DOMRect.x setter")?;
     let a0 = cx.arg_f64(call, 0)?;
     imp::dom_rect::set_x(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9716,6 +9929,7 @@ fn gen_dom_rect_get_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_dom_rect_set_y(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_rect(&call.this)?;
+    cx.require_args(call, 1, "DOMRect.y setter")?;
     let a0 = cx.arg_f64(call, 0)?;
     imp::dom_rect::set_y(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9728,6 +9942,7 @@ fn gen_dom_rect_get_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_dom_rect_set_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_rect(&call.this)?;
+    cx.require_args(call, 1, "DOMRect.width setter")?;
     let a0 = cx.arg_f64(call, 0)?;
     imp::dom_rect::set_width(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9740,6 +9955,7 @@ fn gen_dom_rect_get_height(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, 
 
 fn gen_dom_rect_set_height(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_rect(&call.this)?;
+    cx.require_args(call, 1, "DOMRect.height setter")?;
     let a0 = cx.arg_f64(call, 0)?;
     imp::dom_rect::set_height(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9760,6 +9976,7 @@ fn gen_dom_rect_list_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_dom_rect_list_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_dom_rect_list(&call.this)?;
+    cx.require_args(call, 1, "DOMRectList.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::dom_rect_list::item(cx, this, a0)
 }
@@ -9771,6 +9988,7 @@ fn gen_window_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsTh
 
 fn gen_window_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window(&call.this)?;
+    cx.require_args(call, 1, "Window.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::window::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -9789,6 +10007,7 @@ fn gen_window_close(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow
 
 fn gen_window_match_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window(&call.this)?;
+    cx.require_args(call, 1, "Window.matchMedia")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::window::match_media(cx, this, a0)
 }
@@ -9826,6 +10045,7 @@ fn gen_window_prompt(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThro
 
 fn gen_window_post_message(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window(&call.this)?;
+    cx.require_args(call, 1, "Window.postMessage")?;
     let a0 = call.arg(0);
     let a1 = call.arg(1);
     let a2 = call.arg(2);
@@ -10921,6 +11141,45 @@ fn gen_html_element_get_offset_height(
     Ok(JsValue::Number(imp::html_element::offset_height(cx, this)?))
 }
 
+fn gen_html_element_get_title(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_element::title(cx, this)?))
+}
+
+fn gen_html_element_set_title(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.title setter")?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_element::set_title(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_lang(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_element::lang(cx, this)?))
+}
+
+fn gen_html_element_set_lang(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.lang setter")?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_element::set_lang(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_translate(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::Bool(imp::html_element::translate(cx, this)?))
+}
+
+fn gen_html_element_set_translate(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.translate setter")?;
+    let a0 = cx.arg_bool(call, 0);
+    imp::html_element::set_translate(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
 fn gen_html_element_get_dir(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
     Ok(JsValue::String(imp::html_element::dir(cx, this)?))
@@ -10928,8 +11187,74 @@ fn gen_html_element_get_dir(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
 
 fn gen_html_element_set_dir(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.dir setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_element::set_dir(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_hidden(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    imp::html_element::hidden(cx, this)
+}
+
+fn gen_html_element_set_hidden(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.hidden setter")?;
+    let a0 = call.arg(0);
+    imp::html_element::set_hidden(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_inert(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::Bool(imp::html_element::inert(cx, this)?))
+}
+
+fn gen_html_element_set_inert(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.inert setter")?;
+    let a0 = cx.arg_bool(call, 0);
+    imp::html_element::set_inert(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_access_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::String(imp::html_element::access_key(cx, this)?))
+}
+
+fn gen_html_element_set_access_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.accessKey setter")?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::html_element::set_access_key(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_autofocus(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::Bool(imp::html_element::autofocus(cx, this)?))
+}
+
+fn gen_html_element_set_autofocus(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.autofocus setter")?;
+    let a0 = cx.arg_bool(call, 0);
+    imp::html_element::set_autofocus(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_html_element_get_tab_index(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    Ok(JsValue::Number(imp::html_element::tab_index(cx, this)?))
+}
+
+fn gen_html_element_set_tab_index(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLElement.tabIndex setter")?;
+    let a0 = cx.arg_i32(call, 0)?;
+    imp::html_element::set_tab_index(cx, this, a0)?;
     Ok(JsValue::Undefined)
 }
 
@@ -12173,6 +12498,7 @@ fn gen_html_meta_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_meta_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLMetaElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_meta_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12193,6 +12519,7 @@ fn gen_html_meta_element_set_http_equiv(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLMetaElement.httpEquiv setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_meta_element::set_http_equiv(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12205,6 +12532,7 @@ fn gen_html_meta_element_get_content(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_meta_element_set_content(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLMetaElement.content setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_meta_element::set_content(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12217,6 +12545,7 @@ fn gen_html_meta_element_get_media(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_meta_element_set_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLMetaElement.media setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_meta_element::set_media(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12243,6 +12572,7 @@ fn gen_htmli_frame_element_get_src(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_htmli_frame_element_set_src(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.src setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_src(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12261,6 +12591,7 @@ fn gen_htmli_frame_element_set_srcdoc(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.srcdoc setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_srcdoc(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12273,6 +12604,7 @@ fn gen_htmli_frame_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_htmli_frame_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12293,6 +12625,7 @@ fn gen_htmli_frame_element_set_sandbox(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.sandbox setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_sandbox(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12305,6 +12638,7 @@ fn gen_htmli_frame_element_get_width(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_htmli_frame_element_set_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.width setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_width(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12323,6 +12657,7 @@ fn gen_htmli_frame_element_set_height(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.height setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_height(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12343,6 +12678,7 @@ fn gen_htmli_frame_element_set_referrer_policy(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLIFrameElement.referrerPolicy setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::htmli_frame_element::set_referrer_policy(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12370,6 +12706,7 @@ fn gen_html_canvas_element_get_context(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLCanvasElement.getContext")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::html_canvas_element::get_context(cx, this, a0, a1)
@@ -12382,6 +12719,7 @@ fn gen_html_slot_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_slot_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSlotElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_slot_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12412,6 +12750,7 @@ fn gen_html_script_element_get_src(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_script_element_set_src(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.src setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_script_element::set_src(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12424,6 +12763,7 @@ fn gen_html_script_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_script_element_set_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.type setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_script_element::set_type(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12436,6 +12776,7 @@ fn gen_html_script_element_get_async(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_script_element_set_async(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.async setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_script_element::set_async(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12448,6 +12789,7 @@ fn gen_html_script_element_get_defer(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_script_element_set_defer(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.defer setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_script_element::set_defer(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12468,6 +12810,7 @@ fn gen_html_script_element_set_no_module(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.noModule setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_script_element::set_no_module(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12489,6 +12832,7 @@ fn gen_html_script_element_set_cross_origin(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.crossOrigin setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::html_script_element::set_cross_origin(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12501,6 +12845,7 @@ fn gen_html_script_element_get_text(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_script_element_set_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_script_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLScriptElement.text setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_script_element::set_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12519,6 +12864,7 @@ fn gen_html_anchor_element_set_target(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.target setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_target(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12539,6 +12885,7 @@ fn gen_html_anchor_element_set_download(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.download setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_download(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12551,6 +12898,7 @@ fn gen_html_anchor_element_get_rel(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_anchor_element_set_rel(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.rel setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_rel(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12579,6 +12927,7 @@ fn gen_html_anchor_element_set_hreflang(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.hreflang setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_hreflang(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12591,6 +12940,7 @@ fn gen_html_anchor_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_anchor_element_set_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.type setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_type(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12603,6 +12953,7 @@ fn gen_html_anchor_element_get_text(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_anchor_element_set_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.text setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12623,6 +12974,7 @@ fn gen_html_anchor_element_set_referrer_policy(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.referrerPolicy setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_anchor_element::set_referrer_policy(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12637,6 +12989,7 @@ fn gen_html_anchor_element_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_anchor_element_set_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.href setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_href(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12667,6 +13020,7 @@ fn gen_html_anchor_element_set_protocol(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.protocol setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_protocol(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12687,6 +13041,7 @@ fn gen_html_anchor_element_set_username(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.username setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_username(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12707,6 +13062,7 @@ fn gen_html_anchor_element_set_password(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.password setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_password(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12721,6 +13077,7 @@ fn gen_html_anchor_element_get_host(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_anchor_element_set_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.host setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_host(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12741,6 +13098,7 @@ fn gen_html_anchor_element_set_hostname(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.hostname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_hostname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12755,6 +13113,7 @@ fn gen_html_anchor_element_get_port(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_anchor_element_set_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.port setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_port(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12775,6 +13134,7 @@ fn gen_html_anchor_element_set_pathname(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.pathname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_pathname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12795,6 +13155,7 @@ fn gen_html_anchor_element_set_search(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.search setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_search(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12809,6 +13170,7 @@ fn gen_html_anchor_element_get_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_anchor_element_set_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_anchor_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAnchorElement.hash setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_hash(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12821,6 +13183,7 @@ fn gen_html_area_element_get_alt(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_html_area_element_set_alt(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.alt setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_alt(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12833,6 +13196,7 @@ fn gen_html_area_element_get_coords(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_area_element_set_coords(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.coords setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_coords(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12845,6 +13209,7 @@ fn gen_html_area_element_get_shape(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_area_element_set_shape(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.shape setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_shape(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12857,6 +13222,7 @@ fn gen_html_area_element_get_target(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_area_element_set_target(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.target setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_target(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12875,6 +13241,7 @@ fn gen_html_area_element_set_download(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.download setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_download(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12887,6 +13254,7 @@ fn gen_html_area_element_get_rel(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_html_area_element_set_rel(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.rel setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_rel(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12915,6 +13283,7 @@ fn gen_html_area_element_set_referrer_policy(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.referrerPolicy setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_area_element::set_referrer_policy(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12929,6 +13298,7 @@ fn gen_html_area_element_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_area_element_set_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.href setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_href(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12956,6 +13326,7 @@ fn gen_html_area_element_set_protocol(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.protocol setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_protocol(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12976,6 +13347,7 @@ fn gen_html_area_element_set_username(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.username setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_username(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -12996,6 +13368,7 @@ fn gen_html_area_element_set_password(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.password setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_password(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13010,6 +13383,7 @@ fn gen_html_area_element_get_host(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_area_element_set_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.host setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_host(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13030,6 +13404,7 @@ fn gen_html_area_element_set_hostname(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.hostname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_hostname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13044,6 +13419,7 @@ fn gen_html_area_element_get_port(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_area_element_set_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.port setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_port(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13064,6 +13440,7 @@ fn gen_html_area_element_set_pathname(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.pathname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_pathname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13078,6 +13455,7 @@ fn gen_html_area_element_get_search(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_area_element_set_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.search setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_search(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13092,6 +13470,7 @@ fn gen_html_area_element_get_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_area_element_set_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLAreaElement.hash setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_hyperlink_element_utils::set_hash(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13104,6 +13483,7 @@ fn gen_html_image_element_get_src(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_image_element_set_src(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.src setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_src(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13116,6 +13496,7 @@ fn gen_html_image_element_get_srcset(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_image_element_set_srcset(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.srcset setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_srcset(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13128,6 +13509,7 @@ fn gen_html_image_element_get_alt(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_image_element_set_alt(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.alt setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_alt(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13140,6 +13522,7 @@ fn gen_html_image_element_get_width(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_image_element_set_width(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.width setter")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::html_image_element::set_width(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13152,6 +13535,7 @@ fn gen_html_image_element_get_height(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_image_element_set_height(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.height setter")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::html_image_element::set_height(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13208,6 +13592,7 @@ fn gen_html_image_element_set_loading(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.loading setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_loading(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13228,6 +13613,7 @@ fn gen_html_image_element_set_decoding(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.decoding setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_decoding(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13249,6 +13635,7 @@ fn gen_html_image_element_set_cross_origin(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.crossOrigin setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::html_image_element::set_cross_origin(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13269,6 +13656,7 @@ fn gen_html_image_element_set_referrer_policy(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_image_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLImageElement.referrerPolicy setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_image_element::set_referrer_policy(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13287,6 +13675,7 @@ fn gen_html_link_element_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_link_element_set_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.href setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_href(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13299,6 +13688,7 @@ fn gen_html_link_element_get_rel(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_html_link_element_set_rel(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.rel setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_rel(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13319,6 +13709,7 @@ fn gen_html_link_element_get_media(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_link_element_set_media(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.media setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_media(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13331,6 +13722,7 @@ fn gen_html_link_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_link_element_set_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.type setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_type(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13343,6 +13735,7 @@ fn gen_html_link_element_get_as(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_html_link_element_set_as(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.as setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_as(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13361,6 +13754,7 @@ fn gen_html_link_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_link_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13382,6 +13776,7 @@ fn gen_html_link_element_set_cross_origin(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.crossOrigin setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::html_link_element::set_cross_origin(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13400,6 +13795,7 @@ fn gen_html_link_element_set_hreflang(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_link_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLinkElement.hreflang setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_hreflang(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13417,6 +13813,7 @@ fn gen_html_form_element_get_action(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_form_element_set_action(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.action setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_form_element::set_action(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13429,6 +13826,7 @@ fn gen_html_form_element_get_method(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_form_element_set_method(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.method setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_form_element::set_method(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13441,6 +13839,7 @@ fn gen_html_form_element_get_enctype(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_form_element_set_enctype(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.enctype setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_form_element::set_enctype(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13453,6 +13852,7 @@ fn gen_html_form_element_get_target(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_form_element_set_target(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.target setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_form_element::set_target(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13465,6 +13865,7 @@ fn gen_html_form_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_html_form_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_form_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13485,6 +13886,7 @@ fn gen_html_form_element_set_no_validate(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.noValidate setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_form_element::set_no_validate(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13505,6 +13907,7 @@ fn gen_html_form_element_set_accept_charset(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_form_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFormElement.acceptCharset setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_form_element::set_accept_charset(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13557,6 +13960,7 @@ fn gen_html_input_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_input_element_set_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.type setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_type(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13569,6 +13973,7 @@ fn gen_html_input_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<J
 
 fn gen_html_input_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13589,6 +13994,7 @@ fn gen_html_input_element_set_placeholder(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.placeholder setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_placeholder(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13607,6 +14013,7 @@ fn gen_html_input_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13625,6 +14032,7 @@ fn gen_html_input_element_set_read_only(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.readOnly setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_read_only(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13643,6 +14051,7 @@ fn gen_html_input_element_set_required(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.required setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_required(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13661,6 +14070,7 @@ fn gen_html_input_element_set_multiple(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.multiple setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_multiple(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13681,6 +14091,7 @@ fn gen_html_input_element_set_default_value(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.defaultValue setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_default_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13701,6 +14112,7 @@ fn gen_html_input_element_set_default_checked(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.defaultChecked setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_default_checked(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13713,6 +14125,7 @@ fn gen_html_input_element_get_value(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_input_element_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13731,6 +14144,7 @@ fn gen_html_input_element_set_checked(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.checked setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_checked(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13751,6 +14165,7 @@ fn gen_html_input_element_set_indeterminate(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.indeterminate setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_indeterminate(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13771,6 +14186,7 @@ fn gen_html_input_element_set_form_action(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.formAction setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_form_action(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13791,6 +14207,7 @@ fn gen_html_input_element_set_form_enctype(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.formEnctype setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_form_enctype(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13811,6 +14228,7 @@ fn gen_html_input_element_set_form_method(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.formMethod setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_input_element::set_form_method(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13831,6 +14249,7 @@ fn gen_html_input_element_set_form_no_validate(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.formNoValidate setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_input_element::set_form_no_validate(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13862,6 +14281,7 @@ fn gen_html_input_element_set_max_length(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.maxLength setter")?;
     let a0 = cx.arg_i32(call, 0)?;
     imp::html_input_element::set_max_length(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13882,6 +14302,7 @@ fn gen_html_input_element_set_min_length(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.minLength setter")?;
     let a0 = cx.arg_i32(call, 0)?;
     imp::html_input_element::set_min_length(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13900,6 +14321,7 @@ fn gen_html_input_element_set_selection_start(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.selectionStart setter")?;
     let a0 = call.arg(0);
     imp::html_input_element::set_selection_start(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13918,6 +14340,7 @@ fn gen_html_input_element_set_selection_end(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.selectionEnd setter")?;
     let a0 = call.arg(0);
     imp::html_input_element::set_selection_end(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13941,6 +14364,7 @@ fn gen_html_input_element_set_selection_direction(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLInputElement.selectionDirection setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::html_input_element::set_selection_direction(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13951,6 +14375,7 @@ fn gen_html_input_element_set_selection_range(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_input_element(&call.this)?;
+    cx.require_args(call, 2, "HTMLInputElement.setSelectionRange")?;
     let a0 = cx.arg_u32(call, 0)?;
     let a1 = cx.arg_u32(call, 1)?;
     let a2 = cx.arg_opt_dom_string(call, 2)?;
@@ -13979,6 +14404,7 @@ fn gen_html_text_area_element_set_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_text_area_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -13999,6 +14425,7 @@ fn gen_html_text_area_element_set_placeholder(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.placeholder setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_text_area_element::set_placeholder(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14019,6 +14446,7 @@ fn gen_html_text_area_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_text_area_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14039,6 +14467,7 @@ fn gen_html_text_area_element_set_read_only(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.readOnly setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_text_area_element::set_read_only(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14059,6 +14488,7 @@ fn gen_html_text_area_element_set_required(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.required setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_text_area_element::set_required(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14079,6 +14509,7 @@ fn gen_html_text_area_element_set_rows(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.rows setter")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::html_text_area_element::set_rows(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14099,6 +14530,7 @@ fn gen_html_text_area_element_set_cols(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.cols setter")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::html_text_area_element::set_cols(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14119,6 +14551,7 @@ fn gen_html_text_area_element_set_default_value(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.defaultValue setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_text_area_element::set_default_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14139,6 +14572,7 @@ fn gen_html_text_area_element_set_value(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_text_area_element::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14196,6 +14630,7 @@ fn gen_html_text_area_element_set_max_length(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.maxLength setter")?;
     let a0 = cx.arg_i32(call, 0)?;
     imp::html_text_area_element::set_max_length(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14216,6 +14651,7 @@ fn gen_html_text_area_element_set_min_length(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.minLength setter")?;
     let a0 = cx.arg_i32(call, 0)?;
     imp::html_text_area_element::set_min_length(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14234,6 +14670,7 @@ fn gen_html_text_area_element_set_selection_start(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.selectionStart setter")?;
     let a0 = call.arg(0);
     imp::html_text_area_element::set_selection_start(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14252,6 +14689,7 @@ fn gen_html_text_area_element_set_selection_end(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.selectionEnd setter")?;
     let a0 = call.arg(0);
     imp::html_text_area_element::set_selection_end(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14275,6 +14713,7 @@ fn gen_html_text_area_element_set_selection_direction(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLTextAreaElement.selectionDirection setter")?;
     let a0 = cx.arg_nullable_dom_string(call, 0)?;
     imp::html_text_area_element::set_selection_direction(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14285,6 +14724,7 @@ fn gen_html_text_area_element_set_selection_range(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_text_area_element(&call.this)?;
+    cx.require_args(call, 2, "HTMLTextAreaElement.setSelectionRange")?;
     let a0 = cx.arg_u32(call, 0)?;
     let a1 = cx.arg_u32(call, 1)?;
     let a2 = cx.arg_opt_dom_string(call, 2)?;
@@ -14305,6 +14745,7 @@ fn gen_html_select_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_select_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_select_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14323,6 +14764,7 @@ fn gen_html_select_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_select_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14341,6 +14783,7 @@ fn gen_html_select_element_set_required(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.required setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_select_element::set_required(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14359,6 +14802,7 @@ fn gen_html_select_element_set_multiple(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.multiple setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_select_element::set_multiple(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14371,6 +14815,7 @@ fn gen_html_select_element_get_size(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_select_element_set_size(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.size setter")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::html_select_element::set_size(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14383,6 +14828,7 @@ fn gen_html_select_element_get_value(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_select_element_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_select_element::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14403,6 +14849,7 @@ fn gen_html_select_element_set_selected_index(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_select_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLSelectElement.selectedIndex setter")?;
     let a0 = cx.arg_i32(call, 0)?;
     imp::html_select_element::set_selected_index(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14464,6 +14911,7 @@ fn gen_html_option_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_option_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptionElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_option_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14476,6 +14924,7 @@ fn gen_html_option_element_get_label(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_option_element_set_label(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_option_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptionElement.label setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_option_element::set_label(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14496,6 +14945,7 @@ fn gen_html_option_element_set_default_selected(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_option_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptionElement.defaultSelected setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_option_element::set_default_selected(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14508,6 +14958,7 @@ fn gen_html_option_element_get_value(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_option_element_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_option_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptionElement.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_option_element::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14520,6 +14971,7 @@ fn gen_html_option_element_get_text(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_option_element_set_text(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_option_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptionElement.text setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_option_element::set_text(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14538,6 +14990,7 @@ fn gen_html_option_element_set_selected(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_option_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptionElement.selected setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_option_element::set_selected(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14569,6 +15022,7 @@ fn gen_html_opt_group_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_opt_group_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptGroupElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_opt_group_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14589,6 +15043,7 @@ fn gen_html_opt_group_element_set_label(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_opt_group_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLOptGroupElement.label setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_opt_group_element::set_label(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14601,6 +15056,7 @@ fn gen_html_button_element_get_type(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_button_element_set_type(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.type setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_button_element::set_type(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14613,6 +15069,7 @@ fn gen_html_button_element_get_name(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_html_button_element_set_name(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_button_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14625,6 +15082,7 @@ fn gen_html_button_element_get_value(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_html_button_element_set_value(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.value setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_button_element::set_value(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14643,6 +15101,7 @@ fn gen_html_button_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_button_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14663,6 +15122,7 @@ fn gen_html_button_element_set_form_action(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.formAction setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_button_element::set_form_action(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14683,6 +15143,7 @@ fn gen_html_button_element_set_form_enctype(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.formEnctype setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_button_element::set_form_enctype(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14703,6 +15164,7 @@ fn gen_html_button_element_set_form_method(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.formMethod setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_button_element::set_form_method(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14723,6 +15185,7 @@ fn gen_html_button_element_set_form_no_validate(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_button_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLButtonElement.formNoValidate setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_button_element::set_form_no_validate(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14757,6 +15220,7 @@ fn gen_html_label_element_set_html_for(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_label_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLLabelElement.htmlFor setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_label_element::set_html_for(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14792,6 +15256,7 @@ fn gen_html_field_set_element_set_name(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_field_set_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFieldSetElement.name setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_field_set_element::set_name(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -14812,6 +15277,7 @@ fn gen_html_field_set_element_set_disabled(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_html_field_set_element(&call.this)?;
+    cx.require_args(call, 1, "HTMLFieldSetElement.disabled setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::html_field_set_element::set_disabled(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15217,6 +15683,7 @@ fn gen_location_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
 
 fn gen_location_set_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.href setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_href(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15234,6 +15701,7 @@ fn gen_location_get_protocol(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_location_set_protocol(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.protocol setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_protocol(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15246,6 +15714,7 @@ fn gen_location_get_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
 
 fn gen_location_set_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.host setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_host(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15258,6 +15727,7 @@ fn gen_location_get_hostname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_location_set_hostname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.hostname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_hostname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15270,6 +15740,7 @@ fn gen_location_get_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
 
 fn gen_location_set_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.port setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_port(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15282,6 +15753,7 @@ fn gen_location_get_pathname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_location_set_pathname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.pathname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_pathname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15294,6 +15766,7 @@ fn gen_location_get_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, 
 
 fn gen_location_set_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.search setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_search(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15306,6 +15779,7 @@ fn gen_location_get_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
 
 fn gen_location_set_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.hash setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::set_hash(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15313,6 +15787,7 @@ fn gen_location_set_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, Js
 
 fn gen_location_assign(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.assign")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::assign(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15320,6 +15795,7 @@ fn gen_location_assign(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsTh
 
 fn gen_location_replace(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_location(&call.this)?;
+    cx.require_args(call, 1, "Location.replace")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::location::replace(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15349,6 +15825,7 @@ fn gen_history_set_scroll_restoration(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_history(&call.this)?;
+    cx.require_args(call, 1, "History.scrollRestoration setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::history::set_scroll_restoration(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15380,6 +15857,7 @@ fn gen_history_forward(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsTh
 
 fn gen_history_push_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_history(&call.this)?;
+    cx.require_args(call, 2, "History.pushState")?;
     let a0 = call.arg(0);
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = cx.arg_nullable_dom_string(call, 2)?;
@@ -15389,6 +15867,7 @@ fn gen_history_push_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_history_replace_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_history(&call.this)?;
+    cx.require_args(call, 2, "History.replaceState")?;
     let a0 = call.arg(0);
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = cx.arg_nullable_dom_string(call, 2)?;
@@ -15402,6 +15881,7 @@ fn gen_pop_state_event_get_state(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 }
 
 fn gen_pop_state_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "PopStateEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::pop_state_event::constructor(cx, call, a0, a1)
@@ -15414,6 +15894,7 @@ fn gen_submit_event_get_submitter(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 }
 
 fn gen_submit_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "SubmitEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::submit_event::constructor(cx, call, a0, a1)
@@ -15426,6 +15907,7 @@ fn gen_storage_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, J
 
 fn gen_storage_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_storage(&call.this)?;
+    cx.require_args(call, 1, "Storage.key")?;
     let a0 = cx.arg_u32(call, 0)?;
     Ok(match imp::storage::key(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -15435,6 +15917,7 @@ fn gen_storage_key(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow>
 
 fn gen_storage_get_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_storage(&call.this)?;
+    cx.require_args(call, 1, "Storage.getItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(match imp::storage::get_item(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -15444,6 +15927,7 @@ fn gen_storage_get_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_storage_set_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_storage(&call.this)?;
+    cx.require_args(call, 2, "Storage.setItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::storage::set_item(cx, this, a0, a1)?;
@@ -15452,6 +15936,7 @@ fn gen_storage_set_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_storage_remove_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_storage(&call.this)?;
+    cx.require_args(call, 1, "Storage.removeItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::storage::remove_item(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15487,6 +15972,7 @@ fn gen_window_proxy_get_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_window_proxy_set_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window_proxy(&call.this)?;
+    cx.require_args(call, 1, "WindowProxy.location setter")?;
     let a0 = call.arg(0);
     imp::window_proxy::set_location(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15494,6 +15980,7 @@ fn gen_window_proxy_set_location(cx: &BindCx<'_>, call: &HostCall) -> Result<JsV
 
 fn gen_window_proxy_post_message(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_window_proxy(&call.this)?;
+    cx.require_args(call, 1, "WindowProxy.postMessage")?;
     let a0 = call.arg(0);
     let a1 = call.arg(1);
     let a2 = call.arg(2);
@@ -15531,6 +16018,7 @@ fn gen_message_event_init_message_event(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "MessageEvent.initMessageEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let a2 = cx.arg_bool_or(call, 2, false);
@@ -15543,6 +16031,7 @@ fn gen_message_event_init_message_event(
 }
 
 fn gen_message_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "MessageEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::message_event::constructor(cx, call, a0, a1)
@@ -15565,6 +16054,7 @@ fn gen_media_query_list_get_onchange(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_media_query_list_set_onchange(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_media_query_list(&call.this)?;
+    cx.require_args(call, 1, "MediaQueryList.onchange setter")?;
     let a0 = call.arg(0);
     imp::media_query_list::set_onchange(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15572,6 +16062,7 @@ fn gen_media_query_list_set_onchange(cx: &BindCx<'_>, call: &HostCall) -> Result
 
 fn gen_media_query_list_add_listener(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_media_query_list(&call.this)?;
+    cx.require_args(call, 1, "MediaQueryList.addListener")?;
     let a0 = call.arg(0);
     imp::media_query_list::add_listener(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15582,6 +16073,7 @@ fn gen_media_query_list_remove_listener(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_media_query_list(&call.this)?;
+    cx.require_args(call, 1, "MediaQueryList.removeListener")?;
     let a0 = call.arg(0);
     imp::media_query_list::remove_listener(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15589,12 +16081,14 @@ fn gen_media_query_list_remove_listener(
 
 fn gen_plugin_array_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_plugin_array(&call.this)?;
+    cx.require_args(call, 1, "PluginArray.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::plugin_array::item(cx, this, a0)
 }
 
 fn gen_plugin_array_named_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_plugin_array(&call.this)?;
+    cx.require_args(call, 1, "PluginArray.namedItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::plugin_array::named_item(cx, this, a0)
 }
@@ -15612,12 +16106,14 @@ fn gen_plugin_array_refresh(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue,
 
 fn gen_mime_type_array_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_mime_type_array(&call.this)?;
+    cx.require_args(call, 1, "MimeTypeArray.item")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::mime_type_array::item(cx, this, a0)
 }
 
 fn gen_mime_type_array_named_item(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_mime_type_array(&call.this)?;
+    cx.require_args(call, 1, "MimeTypeArray.namedItem")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::mime_type_array::named_item(cx, this, a0)
 }
@@ -15629,6 +16125,7 @@ fn gen_mime_type_array_get_length(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_resize_observer_observe(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_resize_observer(&call.this)?;
+    cx.require_args(call, 1, "ResizeObserver.observe")?;
     let a0 = cx.arg_element(call, 0)?;
     let a1 = call.arg(1);
     imp::resize_observer::observe(cx, this, a0, a1)?;
@@ -15637,6 +16134,7 @@ fn gen_resize_observer_observe(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVal
 
 fn gen_resize_observer_unobserve(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_resize_observer(&call.this)?;
+    cx.require_args(call, 1, "ResizeObserver.unobserve")?;
     let a0 = cx.arg_element(call, 0)?;
     imp::resize_observer::unobserve(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15649,6 +16147,7 @@ fn gen_resize_observer_disconnect(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 }
 
 fn gen_resize_observer_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "ResizeObserver constructor")?;
     let a0 = call.arg(0);
     imp::resize_observer::constructor(cx, call, a0)
 }
@@ -15721,6 +16220,7 @@ fn gen_intersection_observer_get_thresholds(
 
 fn gen_intersection_observer_observe(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_intersection_observer(&call.this)?;
+    cx.require_args(call, 1, "IntersectionObserver.observe")?;
     let a0 = cx.arg_element(call, 0)?;
     imp::intersection_observer::observe(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15731,6 +16231,7 @@ fn gen_intersection_observer_unobserve(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_intersection_observer(&call.this)?;
+    cx.require_args(call, 1, "IntersectionObserver.unobserve")?;
     let a0 = cx.arg_element(call, 0)?;
     imp::intersection_observer::unobserve(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15757,6 +16258,7 @@ fn gen_intersection_observer_constructor(
     cx: &BindCx<'_>,
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "IntersectionObserver constructor")?;
     let a0 = call.arg(0);
     let a1 = call.arg(1);
     imp::intersection_observer::constructor(cx, call, a0, a1)
@@ -15849,6 +16351,7 @@ fn gen_svg_animated_string_set_base_val(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_svg_animated_string(&call.this)?;
+    cx.require_args(call, 1, "SVGAnimatedString.baseVal setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::svg_animated_string::set_base_val(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -15876,6 +16379,7 @@ fn gen_ui_event_get_detail(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, 
 
 fn gen_ui_event_init_ui_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "UIEvent.initUIEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let a2 = cx.arg_bool_or(call, 2, false);
@@ -15886,6 +16390,7 @@ fn gen_ui_event_init_ui_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValu
 }
 
 fn gen_ui_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "UIEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::ui_event::constructor(cx, call, a0, a1)
@@ -15984,6 +16489,7 @@ fn gen_mouse_event_get_modifier_state(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "MouseEvent.getModifierState")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::mouse_event::get_modifier_state(
         cx, this, a0,
@@ -15992,6 +16498,7 @@ fn gen_mouse_event_get_modifier_state(
 
 fn gen_mouse_event_init_mouse_event(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "MouseEvent.initMouseEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let a2 = cx.arg_bool_or(call, 2, false);
@@ -16014,6 +16521,7 @@ fn gen_mouse_event_init_mouse_event(cx: &BindCx<'_>, call: &HostCall) -> Result<
 }
 
 fn gen_mouse_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "MouseEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::mouse_event::constructor(cx, call, a0, a1)
@@ -16040,6 +16548,7 @@ fn gen_wheel_event_get_delta_mode(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 }
 
 fn gen_wheel_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "WheelEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::wheel_event::constructor(cx, call, a0, a1)
@@ -16079,6 +16588,7 @@ fn gen_pointer_event_get_is_primary(cx: &BindCx<'_>, call: &HostCall) -> Result<
 }
 
 fn gen_pointer_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "PointerEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::pointer_event::constructor(cx, call, a0, a1)
@@ -16152,6 +16662,7 @@ fn gen_keyboard_event_get_modifier_state(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "KeyboardEvent.getModifierState")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(JsValue::Bool(imp::keyboard_event::get_modifier_state(
         cx, this, a0,
@@ -16163,6 +16674,7 @@ fn gen_keyboard_event_init_keyboard_event(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_event(&call.this)?;
+    cx.require_args(call, 1, "KeyboardEvent.initKeyboardEvent")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_bool_or(call, 1, false);
     let a2 = cx.arg_bool_or(call, 2, false);
@@ -16178,6 +16690,7 @@ fn gen_keyboard_event_init_keyboard_event(
 }
 
 fn gen_keyboard_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "KeyboardEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::keyboard_event::constructor(cx, call, a0, a1)
@@ -16192,6 +16705,7 @@ fn gen_focus_event_get_related_target(
 }
 
 fn gen_focus_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "FocusEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::focus_event::constructor(cx, call, a0, a1)
@@ -16216,6 +16730,7 @@ fn gen_input_event_get_input_type(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 }
 
 fn gen_input_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "InputEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::input_event::constructor(cx, call, a0, a1)
@@ -16227,6 +16742,7 @@ fn gen_composition_event_get_data(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 }
 
 fn gen_composition_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "CompositionEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::composition_event::constructor(cx, call, a0, a1)
@@ -16239,6 +16755,7 @@ fn gen_url_get_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow
 
 fn gen_url_set_href(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.href setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_href(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16256,6 +16773,7 @@ fn gen_url_get_protocol(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_url_set_protocol(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.protocol setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_protocol(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16268,6 +16786,7 @@ fn gen_url_get_username(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_url_set_username(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.username setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_username(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16280,6 +16799,7 @@ fn gen_url_get_password(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_url_set_password(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.password setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_password(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16292,6 +16812,7 @@ fn gen_url_get_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow
 
 fn gen_url_set_host(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.host setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_host(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16304,6 +16825,7 @@ fn gen_url_get_hostname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_url_set_hostname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.hostname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_hostname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16316,6 +16838,7 @@ fn gen_url_get_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow
 
 fn gen_url_set_port(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.port setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_port(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16328,6 +16851,7 @@ fn gen_url_get_pathname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsT
 
 fn gen_url_set_pathname(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.pathname setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_pathname(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16340,6 +16864,7 @@ fn gen_url_get_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThr
 
 fn gen_url_set_search(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.search setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_search(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16357,6 +16882,7 @@ fn gen_url_get_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow
 
 fn gen_url_set_hash(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url(&call.this)?;
+    cx.require_args(call, 1, "URL.hash setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url::set_hash(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16368,6 +16894,7 @@ fn gen_url_to_json(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow>
 }
 
 fn gen_url_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "URL constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_opt_dom_string(call, 1)?;
     imp::url::constructor(cx, call, a0, a1)
@@ -16380,6 +16907,7 @@ fn gen_url_search_params_get_size(cx: &BindCx<'_>, call: &HostCall) -> Result<Js
 
 fn gen_url_search_params_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url_search_params(&call.this)?;
+    cx.require_args(call, 2, "URLSearchParams.append")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::url_search_params::append(cx, this, a0, a1)?;
@@ -16388,6 +16916,7 @@ fn gen_url_search_params_append(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_url_search_params_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url_search_params(&call.this)?;
+    cx.require_args(call, 1, "URLSearchParams.delete")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_opt_dom_string(call, 1)?;
     imp::url_search_params::delete(cx, this, a0, a1)?;
@@ -16396,6 +16925,7 @@ fn gen_url_search_params_delete(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 
 fn gen_url_search_params_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url_search_params(&call.this)?;
+    cx.require_args(call, 1, "URLSearchParams.get")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(match imp::url_search_params::get(cx, this, a0)? {
         Some(s) => JsValue::String(s),
@@ -16405,12 +16935,14 @@ fn gen_url_search_params_get(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_url_search_params_get_all(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url_search_params(&call.this)?;
+    cx.require_args(call, 1, "URLSearchParams.getAll")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::url_search_params::get_all(cx, this, a0)
 }
 
 fn gen_url_search_params_has(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url_search_params(&call.this)?;
+    cx.require_args(call, 1, "URLSearchParams.has")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_opt_dom_string(call, 1)?;
     Ok(JsValue::Bool(imp::url_search_params::has(
@@ -16420,6 +16952,7 @@ fn gen_url_search_params_has(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue
 
 fn gen_url_search_params_set(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_url_search_params(&call.this)?;
+    cx.require_args(call, 2, "URLSearchParams.set")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::url_search_params::set(cx, this, a0, a1)?;
@@ -16465,6 +16998,7 @@ fn gen_progress_event_get_total(cx: &BindCx<'_>, call: &HostCall) -> Result<JsVa
 }
 
 fn gen_progress_event_constructor(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    cx.require_args(call, 1, "ProgressEvent constructor")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = call.arg(1);
     imp::progress_event::constructor(cx, call, a0, a1)
@@ -16483,6 +17017,7 @@ fn gen_xml_http_request_event_target_set_onloadstart(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.onloadstart setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_onloadstart(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16501,6 +17036,7 @@ fn gen_xml_http_request_event_target_set_onprogress(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.onprogress setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_onprogress(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16519,6 +17055,7 @@ fn gen_xml_http_request_event_target_set_onabort(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.onabort setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_onabort(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16537,6 +17074,7 @@ fn gen_xml_http_request_event_target_set_onerror(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.onerror setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_onerror(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16555,6 +17093,7 @@ fn gen_xml_http_request_event_target_set_onload(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.onload setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_onload(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16573,6 +17112,7 @@ fn gen_xml_http_request_event_target_set_ontimeout(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.ontimeout setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_ontimeout(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16591,6 +17131,7 @@ fn gen_xml_http_request_event_target_set_onloadend(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr_event_target(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequestEventTarget.onloadend setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request_event_target::set_onloadend(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16609,6 +17150,7 @@ fn gen_xml_http_request_set_onreadystatechange(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequest.onreadystatechange setter")?;
     let a0 = call.arg(0);
     imp::xml_http_request::set_onreadystatechange(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16626,6 +17168,7 @@ fn gen_xml_http_request_get_ready_state(
 
 fn gen_xml_http_request_open(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 2, "XMLHttpRequest.open")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     let a2 = cx.arg_bool_or(call, 2, true);
@@ -16640,6 +17183,7 @@ fn gen_xml_http_request_set_request_header(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 2, "XMLHttpRequest.setRequestHeader")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     let a1 = cx.arg_dom_string(call, 1)?;
     imp::xml_http_request::set_request_header(cx, this, a0, a1)?;
@@ -16653,6 +17197,7 @@ fn gen_xml_http_request_get_timeout(cx: &BindCx<'_>, call: &HostCall) -> Result<
 
 fn gen_xml_http_request_set_timeout(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequest.timeout setter")?;
     let a0 = cx.arg_u32(call, 0)?;
     imp::xml_http_request::set_timeout(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16673,6 +17218,7 @@ fn gen_xml_http_request_set_with_credentials(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequest.withCredentials setter")?;
     let a0 = cx.arg_bool(call, 0);
     imp::xml_http_request::set_with_credentials(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16726,6 +17272,7 @@ fn gen_xml_http_request_get_response_header(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequest.getResponseHeader")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     Ok(
         match imp::xml_http_request::get_response_header(cx, this, a0)? {
@@ -16750,6 +17297,7 @@ fn gen_xml_http_request_override_mime_type(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequest.overrideMimeType")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::xml_http_request::override_mime_type(cx, this, a0)?;
     Ok(JsValue::Undefined)
@@ -16770,6 +17318,7 @@ fn gen_xml_http_request_set_response_type(
     call: &HostCall,
 ) -> Result<JsValue, JsThrow> {
     let this = cx.this_xhr(&call.this)?;
+    cx.require_args(call, 1, "XMLHttpRequest.responseType setter")?;
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::xml_http_request::set_response_type(cx, this, a0)?;
     Ok(JsValue::Undefined)

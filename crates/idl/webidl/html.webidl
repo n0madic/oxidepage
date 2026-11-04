@@ -154,7 +154,21 @@ HTMLBodyElement includes WindowEventHandlers;
 
 interface HTMLElement : Element {
   constructor();
+
+  // metadata attributes
+  [CEReactions] attribute DOMString title;
+  [CEReactions] attribute DOMString lang;
+  [CEReactions] attribute boolean translate;
   [CEReactions] attribute DOMString dir;
+
+  // user interaction
+  [CEReactions] attribute (boolean or unrestricted double or DOMString)? hidden;
+  [CEReactions] attribute boolean inert;
+  [CEReactions] attribute DOMString accessKey;
+
+  // HTMLOrSVGElement (only the members not already on HTMLElement)
+  [CEReactions] attribute boolean autofocus;
+  [CEReactions] attribute long tabIndex;
   [SameObject] readonly attribute DOMStringMap dataset;
   undefined click();
   undefined focus();

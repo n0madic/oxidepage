@@ -466,11 +466,19 @@ impl<'a> TElement for NodeRef<'a> {
     }
 
     fn lang_attr(&self) -> Option<AttrValue> {
-        None
+        self.tree().own_language(self.node).map(AttrValue::from)
     }
 
-    fn match_element_lang(&self, _override_lang: Option<Option<AttrValue>>, _value: &Lang) -> bool {
-        false
+    /// `:lang()`: RFC 4647 extended filtering of the element's language
+    /// against the pseudo-class's ranges. `override_lang` is the invalidation
+    /// pass's snapshot answer (`Some(None)`: no language then).
+    fn match_element_lang(&self, override_lang: Option<Option<AttrValue>>, value: &Lang) -> bool {
+        let language = match &override_lang {
+            Some(Some(lang)) => Some(&*lang.0),
+            Some(None) => None,
+            None => self.tree().language_of(self.node),
+        };
+        style::servo::selector_parser::extended_filtering(language.unwrap_or(""), value)
     }
 
     fn is_html_document_body_element(&self) -> bool {

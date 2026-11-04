@@ -1975,6 +1975,28 @@ impl BindCx<'_> {
 
     // === WebIDL argument conversion ===
 
+    /// WebIDL's argument-count check: a call that passes fewer than
+    /// `required` arguments throws a `TypeError` naming the member.
+    pub fn require_args(
+        &self,
+        call: &HostCall,
+        required: usize,
+        member: &str,
+    ) -> Result<(), JsThrow> {
+        let present = call.args.len();
+        if present >= required {
+            return Ok(());
+        }
+        let noun = if required == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        Err(JsThrow::Type(format!(
+            "{member}: {required} {noun} required, but only {present} present"
+        )))
+    }
+
     pub fn arg_dom_string(&self, call: &HostCall, i: usize) -> Result<String, JsThrow> {
         self.scope
             .coerce_string(&call.arg(i))

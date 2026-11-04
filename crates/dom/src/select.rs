@@ -351,6 +351,9 @@ impl<'a> selectors::Element for NodeRef<'a> {
             // `state_flag()` would name.
             NonTSPseudoClass::AnyLink | NonTSPseudoClass::Link => self.is_link_element(),
             NonTSPseudoClass::Visited => false,
+            NonTSPseudoClass::Lang(lang) => {
+                style::dom::TElement::match_element_lang(self, None, lang)
+            }
             // Everything else stylo supports is a pure element-state bit.
             // Deferring to stylo's own pseudo-class → bit mapping (rather than
             // repeating it here) is what keeps the two from drifting: a
@@ -358,8 +361,8 @@ impl<'a> selectors::Element for NodeRef<'a> {
             // is the honest answer, and one we later start setting starts
             // matching without a second edit here.
             //
-            // `state_flag()` is empty for `:lang()`, `:state()` and
-            // `-servo-non-zero-border`, none of which we implement.
+            // `state_flag()` is empty for `:state()` and
+            // `-servo-non-zero-border`, neither of which we implement.
             other => {
                 let flag = other.state_flag();
                 !flag.is_empty() && self.element().stylo.element_state.contains(flag)

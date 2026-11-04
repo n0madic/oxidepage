@@ -1807,6 +1807,42 @@ impl DomTree {
         }
     }
 
+    /// The `lang` an element declares itself (HTML "the language of a node",
+    /// its first two steps): `xml:lang` in the XML namespace wins, then a
+    /// `lang` in no namespace on an HTML or SVG element.
+    #[must_use]
+    pub fn own_language(&self, element: NodeId) -> Option<&str> {
+        let el = self.get(element)?.as_element()?;
+        let find = |ns: &html5ever::Namespace| {
+            el.attrs()
+                .iter()
+                .find(|a| a.name.ns == *ns && a.name.local == local_name!("lang"))
+                .map(|a| &*a.value)
+        };
+        find(&ns!(xml)).or_else(|| {
+            (el.is_html_element() || el.is_svg_element())
+                .then(|| find(&ns!()))
+                .flatten()
+        })
+    }
+
+    /// HTML "the language of a node": the nearest inclusive ancestor's own
+    /// language, crossing from a shadow root to its host. `None` when nothing
+    /// declares one (the document's default language is not tracked), which
+    /// is distinct from an explicit `lang=""` ("unknown").
+    #[must_use]
+    pub fn language_of(&self, node: NodeId) -> Option<&str> {
+        let mut current = Some(node);
+        while let Some(id) = current {
+            if let Some(lang) = self.own_language(id) {
+                return Some(lang);
+            }
+            let parent = self.get(id)?.parent;
+            current = parent.map(|p| self.shadow_host(p).unwrap_or(p));
+        }
+        None
+    }
+
     /// The mode of `fragment`, if it is a shadow root.
     #[must_use]
     pub fn shadow_mode(&self, fragment: NodeId) -> Option<ShadowMode> {
