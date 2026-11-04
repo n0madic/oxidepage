@@ -474,6 +474,19 @@
         });
     };
 
+    // WebIDL `@@unscopables`: a null-prototype object naming the interface's
+    // `[Unscopable]` members, each `true`. An event handler content attribute
+    // is compiled inside `with (document) with (element)`, and this is what
+    // keeps `onclick="remove()"` calling a global `remove` rather than the
+    // element's. `names` arrives comma-joined (identifiers never hold one).
+    const setUnscopables = (proto, names) => {
+        const object = Object.create(null);
+        for (const name of names.split(",")) object[name] = true;
+        Object.defineProperty(proto, Symbol.unscopables, {
+            value: object, writable: false, enumerable: false, configurable: true,
+        });
+    };
+
     const makeDomException = (name, message) => new DOMException(message, name);
 
     // === structuredClone (HTML "structured clone") ===
@@ -1615,7 +1628,7 @@
     return {
         newWrapperMap, cacheGet, cacheSet,
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
-        setToStringTag, makeDomException, structuredClone,
+        setToStringTag, setUnscopables, makeDomException, structuredClone,
         jsonStringify, jsonParse, cloneForMessage,
         makePromise, resolvedPromise, recordPairs, installParamsIterable,
         freeze, initStyleProps, styleProxy, datasetProxy, deleteProperty,

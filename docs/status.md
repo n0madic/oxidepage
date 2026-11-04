@@ -634,6 +634,13 @@ v1 limits.
 
 Conformance work landing outside the phase plan:
 
+- **`Symbol.unscopables`**: done. WebIDL `[Unscopable]` is a codegen construct:
+  each prototype that includes such a member (`Element`, `CharacterData`,
+  `DocumentType` through `ChildNode`; `Document`, `DocumentFragment` and
+  `Element` through `ParentNode`) gets a null-prototype `@@unscopables` object
+  naming them. It is observable because an event handler content attribute is
+  compiled inside `with (document) with (element)`, so `onclick="remove()"` now
+  reaches a global `remove` rather than the element's method.
 - **`new Image()`**: done. WebIDL `[LegacyFactoryFunction]` is a codegen
   construct — the annotation emits a global constructor sharing the interface's
   prototype without claiming `proto.constructor` — and interface-level extended

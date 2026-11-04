@@ -2320,6 +2320,20 @@ impl BindCx<'_> {
         Ok(())
     }
 
+    /// Defines WebIDL's `@@unscopables` on an interface prototype, naming its
+    /// `[Unscopable]` members. Emitted by the codegen.
+    pub(crate) fn set_unscopables(&self, proto: &JsObject, names: &[&str]) -> Result<(), JsThrow> {
+        let helper = self.with_js(|js| js.set_unscopables.clone())?;
+        self.call_helper(
+            &helper,
+            &[
+                JsValue::Object(proto.clone()),
+                JsValue::String(names.join(",")),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn define_method(
         &self,
         proto: &JsObject,

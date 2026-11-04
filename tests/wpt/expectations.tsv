@@ -5739,12 +5739,6 @@ dom/nodes/remove-and-adopt-thcrash.html	Check that removing a node and then adop
 dom/nodes/remove-and-adopt-thcrash.html	__harness__	OK
 dom/nodes/remove-next-sibling-during-replace-with.html	__harness__	OK
 dom/nodes/remove-unscopable.html	__harness__	OK
-dom/nodes/remove-unscopable.html	after() should be unscopable	FAIL
-dom/nodes/remove-unscopable.html	append() should be unscopable	FAIL
-dom/nodes/remove-unscopable.html	before() should be unscopable	FAIL
-dom/nodes/remove-unscopable.html	prepend() should be unscopable	FAIL
-dom/nodes/remove-unscopable.html	remove() should be unscopable	FAIL
-dom/nodes/remove-unscopable.html	replaceWith() should be unscopable	FAIL
 dom/nodes/rootNode.html	__harness__	OK
 dom/nodes/svg-template-querySelector.html	__harness__	OK
 url/javascript-urls.window.js	__harness__	OK

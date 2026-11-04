@@ -491,6 +491,9 @@ struct Interface {
     /// `[LegacyFactoryFunction=Image(…)]`: extra global constructors that build
     /// an instance of this interface. `(factory name, args)`.
     legacy_factories: Vec<(String, Vec<Arg>)>,
+    /// The identifiers of the members declared `[Unscopable]`, own and from
+    /// included mixins, in declaration order: WebIDL's `@@unscopables`.
+    unscopables: Vec<String>,
 }
 
 fn integer_lit_i64(lit: &IntegerLit<'_>) -> Result<i64, CodegenError> {
@@ -587,13 +590,17 @@ fn is_event_handler(ty: &Type<'_>) -> bool {
 /// Extended attributes the codegen reads and acts on.
 const CE_REACTIONS: &str = "CEReactions";
 const LEGACY_FACTORY_FUNCTION: &str = "LegacyFactoryFunction";
+/// Collected into the interface's `@@unscopables` object ([`unscopable`]). It
+/// is observable: an event handler content attribute is compiled inside
+/// `with (document) with (element)`, so without it `onclick="remove()"` would
+/// call `element.remove()` instead of a global `remove`.
+const UNSCOPABLE: &str = "Unscopable";
 
 /// Extended attributes the codegen knowingly ignores, each for a reason:
 ///
 /// - `SameObject` / `NewObject` — identity of the returned object. The `imp`
 ///   functions already honor these by hand (the `[SameObject]` caches, e.g.
 ///   [`cx::CSS_RULES_MEMBER`]), so the annotation is documentation here.
-/// - `Unscopable` — only observable inside `with (…)`, which we do not support.
 /// - `PutForwards` — the three uses are hand-implemented setters.
 /// - `LegacyNullToEmptyString` — a *type*-level attribute; the null-to-empty
 ///   coercion is hand-written in the `imp`.
@@ -604,7 +611,6 @@ const LEGACY_FACTORY_FUNCTION: &str = "LegacyFactoryFunction";
 const IGNORED_EXTENDED_ATTRS: &[&str] = &[
     "SameObject",
     "NewObject",
-    "Unscopable",
     "PutForwards",
     "LegacyNullToEmptyString",
 ];
@@ -630,11 +636,23 @@ fn ce_reactions(
         };
         if name == CE_REACTIONS {
             found = true;
-        } else if !IGNORED_EXTENDED_ATTRS.contains(&name) {
+        } else if name != UNSCOPABLE && !IGNORED_EXTENDED_ATTRS.contains(&name) {
             return err(format!("{context}: unknown extended attribute `[{name}]`"));
         }
     }
     Ok(found)
+}
+
+/// Whether a member is declared `[Unscopable]`. [`ce_reactions`] has already
+/// rejected anything unknown in the same list.
+fn unscopable(attrs: Option<&ExtendedAttributeList<'_>>) -> bool {
+    attrs.is_some_and(|attrs| {
+        attrs
+            .body
+            .list
+            .iter()
+            .any(|attr| matches!(attr, ExtendedAttribute::NoArgs(a) if a.0.0 == UNSCOPABLE))
+    })
 }
 
 /// Reads an *interface*'s extended attribute list and returns its
@@ -901,6 +919,7 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
                 constructor: None,
                 has_constructor: false,
                 legacy_factories: factories,
+                unscopables: Vec::new(),
             });
         }
     }
@@ -927,6 +946,11 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
                     interfaces[idx]
                         .members
                         .push((imp_module.clone(), attribute_member(&universe, attr, name)?));
+                    if unscopable(attr.attributes.as_ref()) {
+                        interfaces[idx]
+                            .unscopables
+                            .push(attr.identifier.0.to_owned());
+                    }
                 }
                 InterfaceMember::Operation(op) => {
                     if op.modifier.is_some() {
@@ -940,6 +964,11 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
                         op.attributes.as_ref(),
                         name,
                     )?;
+                    if unscopable(op.attributes.as_ref())
+                        && let Some(id) = &op.identifier
+                    {
+                        interfaces[idx].unscopables.push(id.0.to_owned());
+                    }
                     interfaces[idx].members.push((imp_module.clone(), member));
                 }
                 InterfaceMember::Constructor(ctor) => {
@@ -995,6 +1024,19 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
             .ok_or_else(|| CodegenError(format!("unknown mixin `{mixin_name}`")))?;
         let imp_module = snake(mixin_name);
         for member in members {
+            let (attrs, id) = match member {
+                MixinMember::Attribute(attr) => (attr.attributes.as_ref(), Some(attr.identifier.0)),
+                MixinMember::Operation(op) => (
+                    op.attributes.as_ref(),
+                    op.identifier.as_ref().map(|id| id.0),
+                ),
+                _ => (None, None),
+            };
+            if let Some(id) = id
+                && unscopable(attrs)
+            {
+                interfaces[idx].unscopables.push(id.to_owned());
+            }
             let converted = match member {
                 MixinMember::Const(konst) => const_member(konst, mixin_name)?,
                 MixinMember::Attribute(attr) if is_event_handler(&attr.type_.type_) => {
@@ -1438,6 +1480,17 @@ fn emit_interface(
 
     if has_iterable {
         let _ = writeln!(registration, "    cx.install_iterable(&{proto_var})?;");
+    }
+
+    // `@@unscopables`: only the interface's *own* `[Unscopable]` members (its
+    // mixins' included). An inheriting prototype reaches its parent's through
+    // the prototype chain, which is the lookup `with` performs.
+    if !interface.unscopables.is_empty() {
+        let _ = writeln!(
+            registration,
+            "    cx.set_unscopables(&{proto_var}, &{:?})?;",
+            interface.unscopables
+        );
     }
 
     // Constructor.

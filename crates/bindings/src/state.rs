@@ -686,6 +686,8 @@ pub(crate) struct JsRefs {
     /// behind `adoptedStyleSheets`: in-place mutations call `sync`.
     pub adopted_sheets_proxy: JsValue,
     pub set_to_string_tag: JsValue,
+    /// `(proto, "a,b")` — defines WebIDL's `@@unscopables` on a prototype.
+    pub set_unscopables: JsValue,
     pub make_dom_exception: JsValue,
     /// Pristine `structuredClone` (page script may replace the global one),
     /// used to clone `history.pushState`/`replaceState` state values.

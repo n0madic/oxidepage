@@ -1316,6 +1316,7 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         gen_document_get_onwheel,
         gen_document_set_onwheel,
     )?;
+    cx.set_unscopables(&proto_document, &["prepend", "append", "replaceChildren"])?;
     cx.finish_interface(
         "Document",
         &proto_document,
@@ -1412,6 +1413,10 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         gen_document_type_replace_with,
     )?;
     cx.define_method_ce(&proto_document_type, "remove", 0, gen_document_type_remove)?;
+    cx.set_unscopables(
+        &proto_document_type,
+        &["before", "after", "replaceWith", "remove"],
+    )?;
     cx.finish_interface("DocumentType", &proto_document_type, CtorSpec::Illegal)?;
 
     let proto_document_fragment = cx.begin_interface("DocumentFragment", Some("Node"))?;
@@ -1470,6 +1475,10 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "querySelectorAll",
         1,
         gen_document_fragment_query_selector_all,
+    )?;
+    cx.set_unscopables(
+        &proto_document_fragment,
+        &["prepend", "append", "replaceChildren"],
     )?;
     cx.finish_interface(
         "DocumentFragment",
@@ -1730,6 +1739,18 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.define_method_ce(&proto_element, "after", 0, gen_element_after)?;
     cx.define_method_ce(&proto_element, "replaceWith", 0, gen_element_replace_with)?;
     cx.define_method_ce(&proto_element, "remove", 0, gen_element_remove)?;
+    cx.set_unscopables(
+        &proto_element,
+        &[
+            "prepend",
+            "append",
+            "replaceChildren",
+            "before",
+            "after",
+            "replaceWith",
+            "remove",
+        ],
+    )?;
     cx.finish_interface("Element", &proto_element, CtorSpec::Illegal)?;
 
     let proto_character_data = cx.begin_interface("CharacterData", Some("Node"))?;
@@ -1802,6 +1823,10 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "remove",
         0,
         gen_character_data_remove,
+    )?;
+    cx.set_unscopables(
+        &proto_character_data,
+        &["before", "after", "replaceWith", "remove"],
     )?;
     cx.finish_interface("CharacterData", &proto_character_data, CtorSpec::Illegal)?;
 
