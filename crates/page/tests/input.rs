@@ -1436,3 +1436,103 @@ two</textarea>"##,
         "0:6"
     );
 }
+
+/// The legacy synthesis idiom: `createEvent("MouseEvents")`, then
+/// `initMouseEvent`, then `dispatchEvent`. Every argument lands in its member,
+/// and the result is a real mouse `click` — so it activates, exactly like
+/// `new MouseEvent`.
+#[test]
+fn init_mouse_event_builds_an_activating_click() {
+    let page = page_with(
+        r##"<!doctype html><input type=checkbox id=c><span id=s></span>
+           <script>
+             c.addEventListener('click', (e) => {
+               window.seen = [e.type, e.bubbles, e.cancelable, e.detail,
+                 e.screenX, e.screenY, e.clientX, e.clientY,
+                 e.ctrlKey, e.altKey, e.shiftKey, e.metaKey, e.button,
+                 e.relatedTarget && e.relatedTarget.id, e.view === window].join();
+             });
+           </script>"##,
+    );
+    eval_string(
+        &page,
+        "const e = document.createEvent('MouseEvents');\
+         e.initMouseEvent('click', true, true, window, 1, 10, 20, 30, 40,\
+                          true, false, true, false, 2, document.getElementById('s'));\
+         document.getElementById('c').dispatchEvent(e); ''",
+    );
+    assert_eq!(
+        eval_string(&page, "window.seen"),
+        "click,true,true,1,10,20,30,40,true,false,true,false,2,s,true"
+    );
+    assert_eq!(
+        eval_string(&page, "String(document.getElementById('c').checked)"),
+        "true",
+        "an initMouseEvent click carries a mouse payload, so it activates"
+    );
+}
+
+/// `initMouseEvent` brand-checks its receiver and, like every `init*Event`, is
+/// a no-op on an event that is being dispatched.
+#[test]
+fn init_mouse_event_brand_check_and_dispatch_flag() {
+    let page = page_with("<!doctype html><div id=d></div>");
+    assert_eq!(
+        eval_string(
+            &page,
+            "try { MouseEvent.prototype.initMouseEvent.call(new Event('x'), 'y'); 'no throw' }\
+             catch (e) { e.name }",
+        ),
+        "TypeError"
+    );
+    assert_eq!(
+        eval_string(
+            &page,
+            "const d = document.getElementById('d'); let r;\
+             d.addEventListener('zz', (e) => {\
+               e.initMouseEvent('other', false, false, null, 0, 0, 0, 99, 0);\
+               r = e.type + ',' + e.clientX;\
+             });\
+             d.dispatchEvent(new MouseEvent('zz', { clientX: 5 })); r",
+        ),
+        "zz,5"
+    );
+}
+
+/// `initKeyboardEvent` sets `key`, `location` and the modifiers; the members it
+/// has no argument for keep their defaults.
+#[test]
+fn init_keyboard_event_sets_key_location_and_modifiers() {
+    let page = page_with("<!doctype html><div id=d></div>");
+    assert_eq!(
+        eval_string(
+            &page,
+            "const d = document.getElementById('d'); let r;\
+             d.addEventListener('keydown', (e) => {\
+               r = [e.type, e.key, e.location, e.ctrlKey, e.altKey, e.shiftKey,\
+                    e.metaKey, JSON.stringify(e.code), e.keyCode].join();\
+             });\
+             const e = document.createEvent('KeyboardEvent');\
+             e.initKeyboardEvent('keydown', true, true, window, 'Enter', 3,\
+                                 true, true, false, false);\
+             d.dispatchEvent(e); r",
+        ),
+        "keydown,Enter,3,true,true,false,false,\"\",0"
+    );
+}
+
+/// `MessageEvent` is in DOM's `createEvent` table and is implemented, so the
+/// legacy factory returns one — uninitialized, with every member at its default.
+#[test]
+fn create_event_message_event() {
+    let page = page_with("<!doctype html>");
+    assert_eq!(
+        eval_string(
+            &page,
+            "const e = document.createEvent('MessageEvent');\
+             [e instanceof MessageEvent, JSON.stringify(e.type), e.data,\
+              JSON.stringify(e.origin), e.source].join()",
+        ),
+        "true,\"\",,\"\","
+    );
+}

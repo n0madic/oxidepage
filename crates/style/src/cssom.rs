@@ -46,6 +46,65 @@ pub fn parse_media_list(media: &str, url_data: &UrlExtraData) -> MediaList {
     MediaList::parse(&context, &mut Parser::new(&mut input))
 }
 
+/// `CSS.supports(property, value)`: whether `property` names a supported
+/// property (or is a custom property) and `value` parses for it.
+///
+/// This is the same parse `setProperty` runs, so the two can never disagree
+/// about what a value means. The value is parsed on its own, not as a
+/// declaration, so `"red !important"` is rejected — the spec's grammar is the
+/// property's value grammar, and `!important` is not part of any of them.
+#[must_use]
+pub fn supports_declaration(property: &str, value: &str, url_data: &UrlExtraData) -> bool {
+    let Ok(id) = PropertyId::parse_enabled_for_all_content(property) else {
+        return false;
+    };
+    let mut decls = SourcePropertyDeclaration::default();
+    parse_one_declaration_into(
+        &mut decls,
+        id,
+        value,
+        Origin::Author,
+        url_data,
+        None,
+        ParsingMode::DEFAULT,
+        QuirksMode::NoQuirks,
+        CssRuleType::Style,
+    )
+    .is_ok()
+}
+
+/// `CSS.supports(conditionText)`: parses `condition` as a
+/// `<supports-condition>` — or, failing that, as a bare declaration, which is
+/// the spec's "wrapped in parentheses" retry — and evaluates it.
+///
+/// It is stylo's own `@supports` evaluator, so `CSS.supports("(x: y)")` and
+/// `@supports (x: y) { … }` give the same answer by construction. Trailing
+/// input after a valid condition makes the whole text invalid.
+#[must_use]
+pub fn supports_condition(condition: &str, url_data: &UrlExtraData) -> bool {
+    use style::stylesheets::supports_rule::parse_condition_or_declaration;
+
+    let mut input = ParserInput::new(condition);
+    let mut parser = Parser::new(&mut input);
+    let Ok(parsed) = parser.parse_entirely(parse_condition_or_declaration) else {
+        return false;
+    };
+    // `Declaration::eval` asserts a style-rule context: a supports condition
+    // tests what a declaration inside a style rule would accept.
+    let context = ParserContext::new(
+        Origin::Author,
+        url_data,
+        Some(CssRuleType::Style),
+        ParsingMode::DEFAULT,
+        QuirksMode::NoQuirks,
+        Default::default(),
+        None,
+        None,
+        Default::default(),
+    );
+    parsed.eval(&context)
+}
+
 /// A shared reference to a locked declaration block (a style rule's `block`).
 pub type LockedBlock = ServoArc<Locked<PropertyDeclarationBlock>>;
 

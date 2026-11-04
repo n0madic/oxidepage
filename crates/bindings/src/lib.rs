@@ -506,7 +506,8 @@ fn install_late_globals(cx: &BindCx<'_>) -> Result<(), JsThrow> {
 }
 
 /// Installs the native helper functions the late globals (`installLateGlobals`)
-/// build on: `__oxide_randomBytes` (entropy for `crypto`) and
+/// build on: `__oxide_randomBytes` (entropy for `crypto`),
+/// `__oxide_cssSupports` (stylo's evaluator behind `CSS.supports`) and
 /// `__oxide_setDocumentUrl` (same-origin URL replacement for `history`). The
 /// bootstrap captures these into locals and deletes them from the global, so
 /// page script never sees the `__oxide_*` surface.
@@ -531,6 +532,23 @@ fn install_native_helpers(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         Ok(JsValue::Object(
             cx.scope.new_array(&items).map_err(JsThrow::from)?,
         ))
+    })?;
+
+    // `__oxide_cssSupports(a, b)` backs `CSS.supports`. The bootstrap resolves
+    // the WebIDL overload by argument count and stringifies both arguments, so
+    // a `null` second argument here means the one-argument `conditionText`
+    // form, never a value.
+    define_fn(cx, &global, "__oxide_cssSupports", 2, |cx, call| {
+        let first = cx.arg_dom_string(call, 0)?;
+        let url = cx.doc_url();
+        let supported = match call.arg(1) {
+            JsValue::Null => oxidepage_style::cssom::supports_condition(&first, &url),
+            value => {
+                let value = cx.scope.coerce_string(&value).map_err(JsThrow::from)?;
+                oxidepage_style::cssom::supports_declaration(&first, &value, &url)
+            }
+        };
+        Ok(JsValue::Bool(supported))
     })?;
 
     Ok(())

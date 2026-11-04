@@ -8,7 +8,7 @@
 use oxidepage_js::{HostCall, JsThrow, JsValue};
 
 use crate::cx::BindCx;
-use crate::events::{KeyboardFields, UiKind};
+use crate::events::{KeyboardFields, Modifiers, UiKind};
 use crate::imp::event::EventRef;
 use crate::imp::ui_event::{member_bool, member_string, member_u32, parse_ui_init, payload};
 
@@ -37,6 +37,57 @@ pub(crate) fn constructor(
     let data = parse_ui_init(cx, event_type, &init, UiKind::Keyboard(Box::new(keyboard)))?;
     let (value, _) = cx.new_event_object("KeyboardEvent", data)?;
     Ok(value)
+}
+
+/// `initKeyboardEvent`: the legacy initializer `createEvent("KeyboardEvent")`
+/// callers pair it with. It sets `key`, `location` and the modifiers; the
+/// members it has no argument for (`code`, `repeat`, `charCode`, `keyCode`)
+/// keep whatever they held, as in browsers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn init_keyboard_event(
+    cx: &BindCx<'_>,
+    this: EventRef,
+    event_type: String,
+    bubbles: bool,
+    cancelable: bool,
+    view: JsValue,
+    key: String,
+    location: u32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+) -> Result<(), JsThrow> {
+    fields(&this, |_| ())?;
+    // `initKeyboardEvent` has no `detail` argument; UIEvent's initializer
+    // resets it to 0, which is the spec's "initialize" for it too.
+    crate::imp::ui_event::init_ui_event(
+        cx,
+        this.clone(),
+        event_type,
+        bubbles,
+        cancelable,
+        view,
+        0,
+    )?;
+    let mut ev = this.borrow_mut();
+    if ev.dispatching {
+        return Ok(());
+    }
+    let Some(payload) = ev.ui.as_deref_mut() else {
+        return Ok(());
+    };
+    payload.modifiers = Modifiers {
+        ctrl,
+        shift,
+        alt,
+        meta,
+    };
+    if let UiKind::Keyboard(keyboard) = &mut payload.kind {
+        keyboard.key = key;
+        keyboard.location = location;
+    }
+    Ok(())
 }
 
 pub(crate) fn key(_cx: &BindCx<'_>, this: EventRef) -> Result<String, JsThrow> {

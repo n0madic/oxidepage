@@ -7,10 +7,10 @@
 use oxidepage_js::{HostCall, JsThrow, JsValue};
 
 use crate::cx::BindCx;
-use crate::events::{MouseFields, UiKind};
+use crate::events::{Modifiers, MouseFields, UiKind};
 use crate::imp::event::EventRef;
 use crate::imp::ui_event::{
-    member_f64, member_i32, member_node, member_u32, parse_ui_init, payload,
+    member_f64, member_i32, member_node, member_u32, node_arg, parse_ui_init, payload,
 };
 
 /// The mouse payload of `this`, or a `TypeError`. Shared by every getter in
@@ -54,6 +54,74 @@ pub(crate) fn constructor(
     let data = parse_ui_init(cx, event_type, &init, UiKind::Mouse(Box::new(mouse)))?;
     let (value, _) = cx.new_event_object("MouseEvent", data)?;
     Ok(value)
+}
+
+/// `initMouseEvent`: the legacy initializer, and what makes
+/// `document.createEvent("MouseEvents")` usable — every pre-constructor
+/// library and polyfill pairs the two to synthesize a click.
+///
+/// It sets what its arguments name and nothing else: `buttons` and any
+/// wheel/pointer payload are left alone, as in browsers. Like every `init*Event`
+/// it is a no-op on an event being dispatched — `init_ui_event` (and below it
+/// `init_event`) already skip their part, and this checks the same flag before
+/// writing its own.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn init_mouse_event(
+    cx: &BindCx<'_>,
+    this: EventRef,
+    event_type: String,
+    bubbles: bool,
+    cancelable: bool,
+    view: JsValue,
+    detail: i32,
+    screen_x: i32,
+    screen_y: i32,
+    client_x: i32,
+    client_y: i32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    meta: bool,
+    button: i32,
+    related_target: JsValue,
+) -> Result<(), JsThrow> {
+    // Brand check first: `MouseEvent.prototype.initMouseEvent.call(new Event(…))`
+    // must throw, not reinitialize a plain event and then refuse to say why.
+    fields(&this, "MouseEvent", |_| ())?;
+    crate::imp::ui_event::init_ui_event(
+        cx,
+        this.clone(),
+        event_type,
+        bubbles,
+        cancelable,
+        view,
+        detail,
+    )?;
+    let related = node_arg(cx, &related_target);
+    let mut ev = this.borrow_mut();
+    if ev.dispatching {
+        return Ok(());
+    }
+    let Some(payload) = ev.ui.as_deref_mut() else {
+        return Ok(());
+    };
+    payload.modifiers = Modifiers {
+        ctrl,
+        shift,
+        alt,
+        meta,
+    };
+    if let UiKind::Mouse(mouse) = &mut payload.kind {
+        mouse.screen_x = f64::from(screen_x);
+        mouse.screen_y = f64::from(screen_y);
+        mouse.client_x = f64::from(client_x);
+        mouse.client_y = f64::from(client_y);
+        mouse.offset = None;
+        // The IDL type is `short`; see the note in `uievents.webidl`.
+        mouse.button = button as i16;
+        mouse.related = related;
+    }
+    Ok(())
 }
 
 macro_rules! mouse_f64 {

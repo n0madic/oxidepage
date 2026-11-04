@@ -789,6 +789,9 @@ css/cssom-view/elementFromPosition.html	test some point of the element: right li
 css/cssom-view/elementFromPosition.html	test some point of the element: top right corner	FAIL
 css/cssom-view/elementScroll-002.html	__harness__	OK
 css/cssom-view/elementScroll.html	__harness__	OK
+css/cssom-view/elementsFromPoint-iframes.html	__harness__	TIMEOUT
+css/cssom-view/elementsFromPoint-iframes.html	elementsFromPoint on inner documents	NOTRUN
+css/cssom-view/elementsFromPoint-iframes.html	elementsFromPoint on the root document for points in iframe elements	NOTRUN
 css/cssom-view/elementsFromPoint-inline-htb-ltr.html	__harness__	OK
 css/cssom-view/elementsFromPoint-inline-htb-rtl.html	__harness__	OK
 css/cssom-view/elementsFromPoint-inline-htb-rtl.html	elementsFromPoint should return all elements under a point	FAIL
@@ -899,6 +902,7 @@ css/cssom-view/image-x-y-zoom.html	x and y properties for image elements with cs
 css/cssom-view/inheritance.html	Property scroll-behavior does not inherit	FAIL
 css/cssom-view/inheritance.html	Property scroll-behavior has initial value auto	FAIL
 css/cssom-view/inheritance.html	__harness__	OK
+css/cssom-view/matchMedia-display-none-iframe.html	__harness__	TIMEOUT
 css/cssom-view/matchMedia.html	__harness__	OK
 css/cssom-view/matchMedia.html	iframe.matchMedia("(max-height: 50px)") matches	FAIL
 css/cssom-view/matchMedia.html	iframe.matchMedia("(max-width: 199px), all and (min-width: 200px)") is serialized w/o "all"	FAIL
@@ -1014,6 +1018,8 @@ css/cssom-view/scroll-behavior-main-frame-window.html	__harness__	OK
 css/cssom-view/scroll-behavior-scrollintoview-nested.html	Make sure the page is ready for animation.	FAIL
 css/cssom-view/scroll-behavior-scrollintoview-nested.html	__harness__	OK
 css/cssom-view/scroll-behavior-scrollintoview-nested.html	scrollIntoView with nested elements with different scroll-behavior	FAIL
+css/cssom-view/scroll-behavior-smooth-after-hiding-iframe.html	Smooth scroll finishes correctly after hiding a tab with an iframe	FAIL
+css/cssom-view/scroll-behavior-smooth-after-hiding-iframe.html	__harness__	OK
 css/cssom-view/scroll-behavior-smooth-navigation.html	Instant scrolling while doing history navigation.	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	Make sure the page is ready for animation.	FAIL
 css/cssom-view/scroll-behavior-smooth-navigation.html	Smooth scrolling while doing history navigation.	FAIL
@@ -1035,6 +1041,9 @@ css/cssom-view/scroll-overflow-clip-quirks-002.html	__harness__	OK
 css/cssom-view/scroll-zoom.html	__harness__	OK
 css/cssom-view/scroll-zoom.html	scroll{Width, Height}	FAIL
 css/cssom-view/scrollIntoView-align-scrollport-covering-child.html	__harness__	OK
+css/cssom-view/scrollIntoView-container.html	__harness__	OK
+css/cssom-view/scrollIntoView-container.html	scrollIntoView({container: 'nearest'}) doesn't propagate to outer frames	FAIL
+css/cssom-view/scrollIntoView-container.html	scrollIntoView({container: 'nearest'}) only scrolls nearest scroll container	FAIL
 css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	Element.scrollIntoView doesn't scroll a position:fixed element outside of the layout viewport	FAIL
 css/cssom-view/scrollIntoView-fixed-outside-of-viewport.html	__harness__	OK
 css/cssom-view/scrollIntoView-fixed.html	[Box A] scrollIntoView from unscrollable position:fixed	FAIL
@@ -1054,6 +1063,11 @@ css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	
 css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"end"})	FAIL
 css/cssom-view/scrollIntoView-horizontal-tb-writing-mode-and-rtl-direction.html	scrollIntoView({"block":"start","inline":"start"})	FAIL
 css/cssom-view/scrollIntoView-horizontal-tb-writing-mode.html	__harness__	OK
+css/cssom-view/scrollIntoView-iframes.html	__harness__	TIMEOUT
+css/cssom-view/scrollIntoView-iframes.html	scrollIntoView in cross-origin iframe can scroll in inner window	TIMEOUT
+css/cssom-view/scrollIntoView-iframes.html	scrollIntoView in cross-origin iframe can't scroll in parent window	NOTRUN
+css/cssom-view/scrollIntoView-iframes.html	scrollIntoView in same-origin iframe can scroll in inner window	FAIL
+css/cssom-view/scrollIntoView-iframes.html	scrollIntoView in same-origin iframe can scroll in parent window	FAIL
 css/cssom-view/scrollIntoView-inline-image.html	__harness__	OK
 css/cssom-view/scrollIntoView-multiple-nested.html	Simultaneous instant scrollIntoViews run to completion	FAIL
 css/cssom-view/scrollIntoView-multiple-nested.html	Simultaneous instant,smooth scrollIntoViews run to completion	FAIL
@@ -1173,6 +1187,46 @@ css/cssom-view/scrollWidthHeight-contain-layout.html	__harness__	OK
 css/cssom-view/scrollWidthHeight-flex-column-padding-001.html	__harness__	OK
 css/cssom-view/scrollWidthHeight-negative-margin-001.html	__harness__	OK
 css/cssom-view/scrollWidthHeight-negative-margin-002.html	__harness__	OK
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: display: flex; overflow: visible; direction: ltr; flex-flow: row-reverse wrap-reverse;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: display: flex; overflow: visible; direction: ltr; flex-flow: wrap-reverse;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: auto; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: auto; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: clip; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: clip; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: hidden; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: hidden; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: scroll; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: scroll; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: row-reverse wrap-reverse; display: flex; overflow: visible; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: auto; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: auto; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: clip; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: clip; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: hidden; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: hidden; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: scroll; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: scroll; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollHeight with negative margins: flex-flow: wrap-reverse; display: flex; overflow: visible; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: display: flex; overflow: visible; direction: ltr; flex-flow: column wrap-reverse;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: display: flex; overflow: visible; direction: ltr; flex-flow: column-reverse wrap-reverse;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: auto; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: auto; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: clip; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: clip; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: hidden; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: hidden; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: scroll; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: scroll; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column wrap-reverse; display: flex; overflow: visible; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: auto; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: auto; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: clip; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: clip; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: hidden; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: hidden; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: scroll; direction: ltr;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: scroll; direction: rtl;	FAIL
+css/cssom-view/scrollWidthHeight-negative-margin-002.html	scrollWidth with negative margins: flex-flow: column-reverse wrap-reverse; display: flex; overflow: visible; direction: rtl;	FAIL
 css/cssom-view/scrollWidthHeight-overflow-visible-margin-collapsing.html	__harness__	OK
 css/cssom-view/scrollWidthHeight-overflow-visible-negative-margins.html	__harness__	OK
 css/cssom-view/scrolling-no-browsing-context.html	__harness__	OK
@@ -1264,10 +1318,6 @@ css/cssom-view/window-scroll-promises.html	Window.scrollTo(instant): return type
 css/cssom-view/window-scroll-promises.html	Window.scrollTo(smooth): promise behavior	NOTRUN
 css/cssom-view/window-scroll-promises.html	Window.scrollTo(smooth): return type	NOTRUN
 css/cssom-view/window-scroll-promises.html	__harness__	ERROR
-css/cssom/CSS-namespace-object-class-string.html	@@toStringTag exists on the namespace object with the appropriate descriptor	FAIL
-css/cssom/CSS-namespace-object-class-string.html	Object.prototype.toString applied after deleting @@toStringTag	FAIL
-css/cssom/CSS-namespace-object-class-string.html	Object.prototype.toString applied after modifying the namespace object's @@toStringTag	FAIL
-css/cssom/CSS-namespace-object-class-string.html	Object.prototype.toString applied to the namespace object	FAIL
 css/cssom/CSS-namespace-object-class-string.html	__harness__	OK
 css/cssom/CSSConditionRule-conditionText.html	CSSConditionRule.conditionText	FAIL
 css/cssom/CSSConditionRule-conditionText.html	__harness__	OK
@@ -1441,7 +1491,7 @@ css/cssom/cssom-cssText-serialize.html	__harness__	OK
 css/cssom/cssom-cssstyledeclaration-set.html	__harness__	OK
 css/cssom/cssom-fontfacerule-constructors.html	__harness__	TIMEOUT
 css/cssom/cssom-fontfacerule.html	__harness__	TIMEOUT
-css/cssom/cssom-getPropertyValue-common-checks.html	__harness__	ERROR
+css/cssom/cssom-getPropertyValue-common-checks.html	__harness__	OK
 css/cssom/cssom-pagerule.html	Cannot set cssText to invalid pseudo page - return default @page { }	FAIL
 css/cssom/cssom-pagerule.html	Cannot set cssText to named page with pseudo, whitespace between - return default @page { }	FAIL
 css/cssom/cssom-pagerule.html	Cannot set cssText to two pseudos, whitespace between - return default @page { }	FAIL
@@ -1520,16 +1570,6 @@ css/cssom/cssstyledeclaration-setter-declarations.html	setProperty with shorthan
 css/cssom/cssstyledeclaration-setter-form-controls.html	__harness__	OK
 css/cssom/cssstyledeclaration-setter-logical.html	__harness__	OK
 css/cssom/delete-namespace-rule-when-child-rule-exists.html	__harness__	OK
-css/cssom/escape.html	Dash number prefix	FAIL
-css/cssom/escape.html	Double dash prefix	FAIL
-css/cssom/escape.html	Letter number prefix	FAIL
-css/cssom/escape.html	Null bytes	FAIL
-css/cssom/escape.html	Number of arguments	FAIL
-css/cssom/escape.html	Number prefix	FAIL
-css/cssom/escape.html	Replacement character	FAIL
-css/cssom/escape.html	String conversion	FAIL
-css/cssom/escape.html	Surrogates	FAIL
-css/cssom/escape.html	Various tests	FAIL
 css/cssom/escape.html	__harness__	OK
 css/cssom/flex-serialization.html	Single value flex with non-CSS-wide value should serialize correctly.	FAIL
 css/cssom/flex-serialization.html	__harness__	OK
@@ -1538,13 +1578,7 @@ css/cssom/font-family-serialization-001.html	Serialization of prefixed -webkit-<
 css/cssom/font-family-serialization-001.html	Serialization of quoted "<generic-family>"	FAIL
 css/cssom/font-family-serialization-001.html	__harness__	OK
 css/cssom/font-shorthand-serialization.html	__harness__	OK
-css/cssom/font-variant-shorthand-serialization.html	CSS-wide keyword in one longhand	FAIL
-css/cssom/font-variant-shorthand-serialization.html	CSS-wide keyword in shorthand	FAIL
 css/cssom/font-variant-shorthand-serialization.html	__harness__	OK
-css/cssom/font-variant-shorthand-serialization.html	font-variant-ligatures: none serialization with non-default value for another longhand	FAIL
-css/cssom/font-variant-shorthand-serialization.html	font-variant: none serialization	FAIL
-css/cssom/font-variant-shorthand-serialization.html	font-variant: normal serialization	FAIL
-css/cssom/font-variant-shorthand-serialization.html	font-variant: normal with non-default longhands	FAIL
 css/cssom/font-variant-shorthand-serialization.html	font: menu serialization	FAIL
 css/cssom/getComputedStyle-animations-replaced-into-ib-split.html	__harness__	OK
 css/cssom/getComputedStyle-detached-subtree.html	__harness__	OK
@@ -1763,16 +1797,16 @@ css/cssom/getComputedStyle-pseudo.html	Resolution of width is correct when pseud
 css/cssom/getComputedStyle-pseudo.html	Resolution of width is correct when pseudo-element argument is invalid (due to a trailing token)	FAIL
 css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: backdrop	FAIL
 css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: file-selector-button	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: grammar-error	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: highlight(name)	FAIL
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: grammar-error	PRECONDITION_FAILED
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: highlight(name)	PRECONDITION_FAILED
 css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: marker	FAIL
 css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: placeholder	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: spelling-error	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-group(name)	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-image-pair(name)	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-new(name)	FAIL
-css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-old(name)	FAIL
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: spelling-error	PRECONDITION_FAILED
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition	PRECONDITION_FAILED
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-group(name)	PRECONDITION_FAILED
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-image-pair(name)	PRECONDITION_FAILED
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-new(name)	PRECONDITION_FAILED
+css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-element with a known identifier: view-transition-old(name)	PRECONDITION_FAILED
 css/cssom/getComputedStyle-pseudo.html	Unknown pseudo-elements	FAIL
 css/cssom/getComputedStyle-pseudo.html	__harness__	OK
 css/cssom/getComputedStyle-resolved-colors.html	__harness__	OK
@@ -1998,7 +2032,7 @@ css/cssom/setproperty-null-undefined.html	Verify that setting a CSS property pri
 css/cssom/setproperty-null-undefined.html	Verify that setting a CSS property to null is treated like empty string.	FAIL
 css/cssom/setproperty-null-undefined.html	__harness__	OK
 css/cssom/shorthand-serialization.html	__harness__	OK
-css/cssom/shorthand-values.html	__harness__	TIMEOUT
+css/cssom/shorthand-values.html	__harness__	OK
 css/cssom/style-attr-update-across-documents.html	Changing the style of a node that switched documents works	TIMEOUT
 css/cssom/style-attr-update-across-documents.html	__harness__	TIMEOUT
 css/cssom/style-sheet-interfaces-001.html	CSSStyleSheet_properties	FAIL
@@ -2780,6 +2814,10 @@ custom-elements/upgrading.html	__harness__	TIMEOUT
 dom/events/AddEventListenerOptions-once.any.js	__harness__	OK
 dom/events/AddEventListenerOptions-passive.any.js	__harness__	OK
 dom/events/AddEventListenerOptions-signal.any.js	__harness__	OK
+dom/events/Body-FrameSet-Event-Handlers.html	Forward HTMLBodyElement.onblur to Window	FAIL
+dom/events/Body-FrameSet-Event-Handlers.html	Reflect HTMLBodyElement.onblur	FAIL
+dom/events/Body-FrameSet-Event-Handlers.html	Set HTMLFrameSetElement.onblur	FAIL
+dom/events/Body-FrameSet-Event-Handlers.html	__harness__	OK
 dom/events/CustomEvent.html	First parameter to initCustomEvent should be mandatory.	FAIL
 dom/events/CustomEvent.html	__harness__	OK
 dom/events/CustomEvent.html	initCustomEvent's default parameter values.	FAIL
@@ -2877,8 +2915,6 @@ dom/events/Event-dispatch-throwing-multiple-globals.html	exception thrown in eve
 dom/events/Event-dispatch-throwing.html	Throwing in event listener with a single listeners	FAIL
 dom/events/Event-dispatch-throwing.html	Throwing in event listener with multiple listeners	FAIL
 dom/events/Event-dispatch-throwing.html	__harness__	OK
-dom/events/Event-init-while-dispatching.html	Calling initKeyboardEvent while dispatching.	FAIL
-dom/events/Event-init-while-dispatching.html	Calling initMouseEvent while dispatching.	FAIL
 dom/events/Event-init-while-dispatching.html	__harness__	OK
 dom/events/Event-initEvent.html	First parameter to initEvent should be mandatory.	FAIL
 dom/events/Event-initEvent.html	__harness__	OK
@@ -2926,7 +2962,6 @@ dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (DeviceOrientationEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (DragEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (HashChangeEvent).	FAIL
-dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (MessageEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	If the event's initialized flag is not set, an InvalidStateError must be thrown (StorageEvent).	FAIL
 dom/events/EventTarget-dispatchEvent.html	__harness__	OK
 dom/events/EventTarget-removeEventListener.any.js	__harness__	OK
@@ -2935,6 +2970,13 @@ dom/events/KeyEvent-initKeyEvent.html	__harness__	OK
 dom/events/click-on-absolute-pseudo.html	Click on pseudo-element that disappears on mousedown	FAIL
 dom/events/click-on-absolute-pseudo.html	__harness__	OK
 dom/events/event-disabled-dynamic.html	__harness__	OK
+dom/events/event-global-extra.window.js	Listener from a different global	FAIL
+dom/events/event-global-extra.window.js	__harness__	OK
+dom/events/event-global-extra.window.js	window.event and element from another document	FAIL
+dom/events/event-global-extra.window.js	window.event and moving an element post-dispatch	FAIL
+dom/events/event-global-extra.window.js	window.event for constructors from another global: EventTarget	FAIL
+dom/events/event-global-extra.window.js	window.event for constructors from another global: XMLHttpRequest	FAIL
+dom/events/event-global-extra.window.js	window.event should not be affected by nodes moving post-dispatch	FAIL
 dom/events/event-global-is-still-set-when-coercing-beforeunload-result.html	__harness__	OK
 dom/events/event-global-is-still-set-when-coercing-beforeunload-result.html	window.event is still set when 'beforeunload' result is coerced to string	FAIL
 dom/events/event-global-is-still-set-when-reporting-exception-onerror.html	__harness__	OK
@@ -4305,8 +4347,6 @@ dom/nodes/Document-createEvent.https.html	DeviceOrientationEvent should be an al
 dom/nodes/Document-createEvent.https.html	DragEvent should be an alias for DragEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	HASHCHANGEEVENT should be an alias for HashChangeEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	HashChangeEvent should be an alias for HashChangeEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	MESSAGEEVENT should be an alias for MessageEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	MessageEvent should be an alias for MessageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	STORAGEEVENT should be an alias for StorageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	StorageEvent should be an alias for StorageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	TEXTEVENT should be an alias for TextEvent.	FAIL
@@ -4325,8 +4365,6 @@ dom/nodes/Document-createEvent.https.html	createEvent('DeviceOrientationEvent') 
 dom/nodes/Document-createEvent.https.html	createEvent('DragEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('HASHCHANGEEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('HashChangeEvent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('MESSAGEEVENT') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('MessageEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('STORAGEEVENT') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('StorageEvent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('TOUCHEVENT') should be initialized correctly.	PRECONDITION_FAILED
@@ -4336,14 +4374,12 @@ dom/nodes/Document-createEvent.https.html	createEvent('devicemotionevent') shoul
 dom/nodes/Document-createEvent.https.html	createEvent('deviceorientationevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('dragevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('hashchangeevent') should be initialized correctly.	FAIL
-dom/nodes/Document-createEvent.https.html	createEvent('messageevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('storageevent') should be initialized correctly.	FAIL
 dom/nodes/Document-createEvent.https.html	createEvent('touchevent') should be initialized correctly.	PRECONDITION_FAILED
 dom/nodes/Document-createEvent.https.html	devicemotionevent should be an alias for DeviceMotionEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	deviceorientationevent should be an alias for DeviceOrientationEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	dragevent should be an alias for DragEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	hashchangeevent should be an alias for HashChangeEvent.	FAIL
-dom/nodes/Document-createEvent.https.html	messageevent should be an alias for MessageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	storageevent should be an alias for StorageEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	textevent should be an alias for TextEvent.	FAIL
 dom/nodes/Document-createEvent.https.html	touchevent should be an alias for TouchEvent.	PRECONDITION_FAILED
@@ -5725,6 +5761,8 @@ dom/nodes/remove-unscopable.html	remove() should be unscopable	FAIL
 dom/nodes/remove-unscopable.html	replaceWith() should be unscopable	FAIL
 dom/nodes/rootNode.html	__harness__	OK
 dom/nodes/svg-template-querySelector.html	__harness__	OK
+url/javascript-urls.window.js	__harness__	OK
+url/javascript-urls.window.js	javascript: URL that fails to parse due to invalid host	FAIL
 url/percent-encoding.window.js	Input A with encoding big5	FAIL
 url/percent-encoding.window.js	Input A with encoding iso-2022-jp	FAIL
 url/percent-encoding.window.js	Input A with encoding utf-8	FAIL
