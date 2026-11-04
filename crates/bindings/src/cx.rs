@@ -1525,13 +1525,13 @@ impl BindCx<'_> {
         self.new_indexed("StyleSheetList", HostData::StyleSheetList(document))
     }
 
-    /// Creates a `CSSRule` host object; `Style` rules get the `CSSStyleRule`
-    /// prototype, everything else the base `CSSRule` (v1).
+    /// Creates a `CSSRule` host object: `CSSStyleRule` and `CSSPageRule` get
+    /// their own prototypes, everything else the base `CSSRule` (v1).
     pub(crate) fn new_css_rule(&self, data: RuleData) -> Result<JsValue, JsThrow> {
-        let interface = if matches!(data.rule, style::stylesheets::CssRule::Style(_)) {
-            "CSSStyleRule"
-        } else {
-            "CSSRule"
+        let interface = match data.rule {
+            style::stylesheets::CssRule::Style(_) => "CSSStyleRule",
+            style::stylesheets::CssRule::Page(_) => "CSSPageRule",
+            _ => "CSSRule",
         };
         self.new_slab_object(interface, HostData::CssRule(Rc::new(data)))
     }

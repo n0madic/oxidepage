@@ -227,6 +227,7 @@ impl Page {
     /// in half" rule multi-column uses (ADR-0016).
     #[must_use]
     pub fn pdf(&self, options: &PdfOptions, paint: &PaintOptions) -> Vec<u8> {
+        let options = &self.pdf_options_with_css_page(options);
         // One budget for the whole export, armed before the flush inside
         // `full_page_display_list` and still owning the deadline when
         // pagination runs under it. Two nested passes each arming their own
@@ -244,6 +245,56 @@ impl Page {
             options.page_content_height(list.content_size.width.max(list.viewport.width));
         let boundaries = self.budgeted_page_boundaries(page_height);
         oxidepage_export_pdf::export_paginated(&list, options, &boundaries)
+    }
+
+    /// `options` with the document's `@page` rules applied (ADR-0041): their
+    /// margins always, their `size` when [`PdfOptions::prefer_css_page_size`]
+    /// asks for it — Chrome's split, where `@page` margins override the print
+    /// settings' and the paper is the caller's unless it prefers the CSS one.
+    ///
+    /// Only selector-less `@page` rules count, since every page of an export
+    /// shares one paper and one set of margins. A percentage margin resolves
+    /// against the final paper: its width for left and right, its height for
+    /// top and bottom.
+    #[must_use]
+    pub fn pdf_options_with_css_page(&self, options: &PdfOptions) -> PdfOptions {
+        use oxidepage_style::page_rules::{Orientation, PageSize};
+
+        let style = self.state.style.borrow().page_style();
+        let mut out = *options;
+        if options.prefer_css_page_size {
+            match style.size {
+                None | Some(PageSize::Auto) => {}
+                Some(PageSize::Orientation(orientation)) => {
+                    out.landscape = orientation == Orientation::Landscape;
+                }
+                Some(PageSize::Lengths { width, height }) if width > 0.0 && height > 0.0 => {
+                    out.paper = oxidepage_export_pdf::PaperSize { width, height };
+                    out.landscape = false;
+                }
+                Some(PageSize::Lengths { .. }) => {}
+                Some(PageSize::Named { size, orientation }) => {
+                    let (width, height) = size.size_px();
+                    out.paper = oxidepage_export_pdf::PaperSize { width, height };
+                    out.landscape = orientation == Some(Orientation::Landscape);
+                }
+            }
+        }
+        let (width, height) = out.paper_size();
+        let [top, right, bottom, left] = style.margins;
+        if let Some(m) = top {
+            out.margins.top = m.resolve(height);
+        }
+        if let Some(m) = right {
+            out.margins.right = m.resolve(width);
+        }
+        if let Some(m) = bottom {
+            out.margins.bottom = m.resolve(height);
+        }
+        if let Some(m) = left {
+            out.margins.left = m.resolve(width);
+        }
+        out
     }
 
     /// Where the current document would break onto pages for a slice of

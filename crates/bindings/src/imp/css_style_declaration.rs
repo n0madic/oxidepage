@@ -14,8 +14,8 @@ use oxidepage_base::{DomExceptionKind, NodeId};
 use oxidepage_dom::node::attr_name;
 use oxidepage_dom::{LocalName, StyleUpdate};
 use oxidepage_js::{JsThrow, JsValue};
-use oxidepage_style::cssom;
 use oxidepage_style::{computed_style_for, longhand_names_sorted, serialize_property};
+use oxidepage_style::{cssom, page_rules};
 use std::cell::RefCell;
 
 use style::properties::PropertyDeclarationBlock;
@@ -31,6 +31,18 @@ fn rule_lock_block(cx: &BindCx<'_>, rule: &CssRule) -> Option<(SharedRwLock, css
     let lock = cx.style_lock();
     let block = cssom::style_rule_block(&lock, rule)?;
     Some((lock, block))
+}
+
+/// The declared names of a rule's `style`: a page rule's side descriptors
+/// (ADR-0041) and then its block, or a style rule's block.
+fn rule_names(cx: &BindCx<'_>, rule: &CssRule) -> Vec<String> {
+    let lock = cx.style_lock();
+    page_rules::decl_names(&lock, rule)
+        .or_else(|| {
+            cssom::style_rule_block(&lock, rule)
+                .map(|block| cssom::locked_block_names(&lock, &block))
+        })
+        .unwrap_or_default()
 }
 
 /// The element's current `style` attribute text and the document's URL data.
@@ -268,8 +280,11 @@ pub(crate) fn css_text(cx: &BindCx<'_>, this: Rc<StyleDeclData>) -> Result<Strin
         StyleDeclData::Inline { element, block } => {
             cssom::block_to_css(&inline_block_cached(cx, *element, block))
         }
-        StyleDeclData::Rule { rule, .. } => rule_lock_block(cx, rule)
-            .map(|(lock, block)| cssom::locked_block_to_css(&lock, &block))
+        StyleDeclData::Rule { rule, .. } => page_rules::decl_css_text(&cx.style_lock(), rule)
+            .or_else(|| {
+                rule_lock_block(cx, rule)
+                    .map(|(lock, block)| cssom::locked_block_to_css(&lock, &block))
+            })
             .unwrap_or_default(),
         // Computed declarations serialize cssText to "" (CSSOM).
         StyleDeclData::Computed { .. } => String::new(),
@@ -290,7 +305,9 @@ pub(crate) fn set_css_text(
             Ok(())
         }
         StyleDeclData::Rule { owner, rule } => {
-            if let Some((lock, block)) = rule_lock_block(cx, rule) {
+            if page_rules::decl_set_css_text(&cx.style_lock(), rule, &value, &cx.doc_url()) {
+                note_rule_changed(cx, *owner, rule);
+            } else if let Some((lock, block)) = rule_lock_block(cx, rule) {
                 cssom::locked_block_set_text(&lock, &block, &value, &cx.doc_url());
                 note_rule_changed(cx, *owner, rule);
             }
@@ -305,9 +322,7 @@ pub(crate) fn length(cx: &BindCx<'_>, this: Rc<StyleDeclData>) -> Result<f64, Js
         StyleDeclData::Inline { element, block } => {
             cssom::block_names(&inline_block_cached(cx, *element, block)).len()
         }
-        StyleDeclData::Rule { rule, .. } => rule_lock_block(cx, rule)
-            .map(|(lock, block)| cssom::locked_block_names(&lock, &block).len())
-            .unwrap_or(0),
+        StyleDeclData::Rule { rule, .. } => rule_names(cx, rule).len(),
         StyleDeclData::Computed { .. } => longhand_names_sorted().len(),
     };
     Ok(n as f64)
@@ -325,8 +340,7 @@ pub(crate) fn item(
                 .get(i)
                 .cloned()
         }
-        StyleDeclData::Rule { rule, .. } => rule_lock_block(cx, rule)
-            .and_then(|(lock, block)| cssom::locked_block_names(&lock, &block).get(i).cloned()),
+        StyleDeclData::Rule { rule, .. } => rule_names(cx, rule).get(i).cloned(),
         StyleDeclData::Computed { .. } => longhand_names_sorted().get(i).map(|s| (*s).to_owned()),
     };
     Ok(name.unwrap_or_default())
@@ -341,8 +355,11 @@ pub(crate) fn get_property_value(
         StyleDeclData::Inline { element, block } => {
             cssom::block_get(&inline_block_cached(cx, *element, block), &property)
         }
-        StyleDeclData::Rule { rule, .. } => rule_lock_block(cx, rule)
-            .map(|(lock, block)| cssom::locked_block_get(&lock, &block, &property))
+        StyleDeclData::Rule { rule, .. } => page_rules::decl_get(rule, &property)
+            .or_else(|| {
+                rule_lock_block(cx, rule)
+                    .map(|(lock, block)| cssom::locked_block_get(&lock, &block, &property))
+            })
             .unwrap_or_default(),
         StyleDeclData::Computed {
             element,
@@ -361,11 +378,12 @@ pub(crate) fn get_property_priority(
         StyleDeclData::Inline { element, block } => {
             cssom::block_is_important(&inline_block_cached(cx, *element, block), &property)
         }
-        StyleDeclData::Rule { rule, .. } => {
-            rule_lock_block(cx, rule).is_some_and(|(lock, block)| {
-                cssom::locked_block_is_important(&lock, &block, &property)
-            })
-        }
+        StyleDeclData::Rule { rule, .. } => page_rules::decl_is_important(rule, &property)
+            .unwrap_or_else(|| {
+                rule_lock_block(cx, rule).is_some_and(|(lock, block)| {
+                    cssom::locked_block_is_important(&lock, &block, &property)
+                })
+            }),
         // Computed values carry no priority.
         StyleDeclData::Computed { .. } => false,
     };
@@ -406,7 +424,11 @@ pub(crate) fn set_property(
             Ok(())
         }
         StyleDeclData::Rule { owner, rule } => {
-            if let Some((lock, block)) = rule_lock_block(cx, rule) {
+            if let Some(changed) = page_rules::decl_set(rule, &property, &value, important) {
+                if changed {
+                    note_rule_changed(cx, *owner, rule);
+                }
+            } else if let Some((lock, block)) = rule_lock_block(cx, rule) {
                 cssom::locked_block_set(&lock, &block, &property, &value, important, &cx.doc_url());
                 note_rule_changed(cx, *owner, rule);
             }
@@ -429,6 +451,10 @@ pub(crate) fn remove_property(
             Ok(old)
         }
         StyleDeclData::Rule { owner, rule } => {
+            if let Some(old) = page_rules::decl_remove(rule, &property) {
+                note_rule_changed(cx, *owner, rule);
+                return Ok(old);
+            }
             let old = match rule_lock_block(cx, rule) {
                 Some((lock, block)) => {
                     let old = cssom::locked_block_remove(&lock, &block, &property);

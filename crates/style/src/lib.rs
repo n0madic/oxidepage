@@ -8,6 +8,7 @@ pub mod engine;
 pub mod font_faces;
 pub mod fonts;
 pub mod loader;
+pub mod page_rules;
 pub mod properties;
 
 pub use computed::{computed_style_for, serialize_property};

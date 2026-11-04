@@ -497,6 +497,46 @@ fn print_to_pdf_returns_a_pdf() {
     );
 }
 
+/// `preferCSSPageSize`: off (Chrome's default), the paper is the request's
+/// and only the `@page` margins apply; on, `@page { size }` is the paper
+/// (ADR-0041).
+#[test]
+fn print_to_pdf_prefers_the_css_page_size_on_request() {
+    let fixtures = Fixtures::start(vec![(
+        "/a",
+        &doc(
+            "A",
+            "<style>@page { size: letter landscape }</style><p>x</p>",
+        ),
+    )]);
+    let harness = Harness::start();
+    let (mut client, session, _target) = harness.attached();
+    client.call_on(
+        &session,
+        "Page.navigate",
+        json!({ "url": fixtures.url("/a") }),
+    );
+    let mut media_box = |params: serde_json::Value| {
+        let pdf = client.call_on(&session, "Page.printToPDF", params);
+        let bytes =
+            oxidepage_cdp::base64::decode(pdf["data"].as_str().expect("data")).expect("base64");
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let start = text.find("/MediaBox [").expect("a media box");
+        let end = start + text[start..].find(']').expect("closed");
+        text[start..=end].to_owned()
+    };
+    assert_eq!(
+        media_box(json!({})),
+        "/MediaBox [0 0 595.275 841.89]",
+        "the engine's A4 default"
+    );
+    assert_eq!(
+        media_box(json!({ "preferCSSPageSize": true })),
+        "/MediaBox [0 0 792 612]",
+        "the CSS letter landscape"
+    );
+}
+
 #[test]
 fn print_to_pdf_can_hand_back_a_stream() {
     let harness = Harness::start();

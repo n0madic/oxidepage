@@ -15,6 +15,7 @@ pub(crate) mod character_data;
 pub(crate) mod child_node;
 pub(crate) mod comment;
 pub(crate) mod composition_event;
+pub(crate) mod css_page_rule;
 pub(crate) mod css_rule;
 pub(crate) mod css_rule_list;
 pub(crate) mod css_style_declaration;

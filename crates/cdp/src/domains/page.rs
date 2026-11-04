@@ -450,6 +450,9 @@ struct PrintToPdfParams {
     margin_left: Option<f32>,
     #[serde(default)]
     margin_right: Option<f32>,
+    /// Chrome's name, kept: the field is `preferCSSPageSize` on the wire.
+    #[serde(default, rename = "preferCSSPageSize")]
+    prefer_css_page_size: Option<bool>,
     /// Chrome accepts `ReturnAsBase64` and `ReturnAsStream`. Only the former is
     /// implemented — there is no `IO` domain to read a stream through.
     #[serde(default)]
@@ -495,6 +498,9 @@ fn print_to_pdf(connection: &Arc<Connection>, request: &Request) -> CommandResul
             bottom: inches(params.margin_bottom, defaults.margins.bottom),
             left: inches(params.margin_left, defaults.margins.left),
         },
+        prefer_css_page_size: params
+            .prefer_css_page_size
+            .unwrap_or(defaults.prefer_css_page_size),
         ..defaults
     };
     let paint = PaintOptions {

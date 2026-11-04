@@ -1494,30 +1494,8 @@ css/cssom/cssom-cssstyledeclaration-set.html	__harness__	OK
 css/cssom/cssom-fontfacerule-constructors.html	__harness__	TIMEOUT
 css/cssom/cssom-fontfacerule.html	__harness__	TIMEOUT
 css/cssom/cssom-getPropertyValue-common-checks.html	__harness__	OK
-css/cssom/cssom-pagerule.html	Cannot set cssText to invalid pseudo page - return default @page { }	FAIL
-css/cssom/cssom-pagerule.html	Cannot set cssText to named page with pseudo, whitespace between - return default @page { }	FAIL
-css/cssom/cssom-pagerule.html	Cannot set cssText to two pseudos, whitespace between - return default @page { }	FAIL
-css/cssom/cssom-pagerule.html	Cannot set selectorText to invalid pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Cannot set selectorText to named page with pseudo, whitespace between	FAIL
-css/cssom/cssom-pagerule.html	Cannot set selectorText to two pseudos, whitespace between	FAIL
-css/cssom/cssom-pagerule.html	Page selector 'cssText' is initially the @page { }	FAIL
-css/cssom/cssom-pagerule.html	Page selector is initially the empty string	FAIL
-css/cssom/cssom-pagerule.html	Sanity checks	FAIL
-css/cssom/cssom-pagerule.html	Set cssText to :left pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set cssText to named page	FAIL
-css/cssom/cssom-pagerule.html	Set cssText to named page with :first pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set cssText to named page with case insensitive :first pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set cssText to named page with pseudo pages of :first, :left, :right, :first in order.	FAIL
-css/cssom/cssom-pagerule.html	Set cssText to named page with two :first pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set selectorText to :left pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set selectorText to named page	FAIL
 css/cssom/cssom-pagerule.html	Set selectorText to named page after rule was removed	FAIL
-css/cssom/cssom-pagerule.html	Set selectorText to named page with :first pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set selectorText to named page with case insensitive :first pseudo page	FAIL
-css/cssom/cssom-pagerule.html	Set selectorText to named page with pseudo pages of :first, :left, :right, :first in order.	FAIL
-css/cssom/cssom-pagerule.html	Set selectorText to named page with two :first pseudo page	FAIL
 css/cssom/cssom-pagerule.html	__harness__	OK
-css/cssom/cssom-ruleTypeAndOrder.html	Type of #s-6 is expected to be page rule	FAIL
 css/cssom/cssom-ruleTypeAndOrder.html	__harness__	OK
 css/cssom/cssom-setProperty-shorthand.html	__harness__	OK
 css/cssom/cssstyledeclaration-all-shorthand.html	__harness__	OK

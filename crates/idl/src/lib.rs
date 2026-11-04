@@ -225,7 +225,7 @@ fn this_unwrap(interface: &str) -> Result<&'static str, CodegenError> {
         "CSSStyleDeclaration" => "this_style_decl",
         "StyleSheet" | "CSSStyleSheet" => "this_style_sheet",
         "StyleSheetList" => "this_style_sheet_list",
-        "CSSRule" | "CSSStyleRule" => "this_css_rule",
+        "CSSRule" | "CSSStyleRule" | "CSSPageRule" => "this_css_rule",
         "CSSRuleList" => "this_css_rule_list",
         // The read-only base and its mutable subclass share the same backing
         // `RectData`, so they unwrap identically.
@@ -844,6 +844,7 @@ pub fn generate(idl_dir: &Path) -> Result<String, CodegenError> {
             "StyleSheetList".into(),
             "CSSRule".into(),
             "CSSStyleRule".into(),
+            "CSSPageRule".into(),
             "CSSRuleList".into(),
             // Phase 5 geometry interfaces (imp functions return finished
             // JsValues; `DOMRect?` returns/args pass through as raw values).

@@ -251,6 +251,9 @@ pub fn rule_type_number(rule: &CssRule) -> u16 {
 /// Serializes a rule to its `cssText`.
 #[must_use]
 pub fn rule_css_text(lock: &SharedRwLock, rule: &CssRule) -> String {
+    if let CssRule::Page(page) = rule {
+        return crate::page_rules::rule_css_text(lock, page);
+    }
     let guard = lock.read();
     let mut out = String::new();
     let _ = rule.to_css(&guard, &mut out);
@@ -299,6 +302,9 @@ pub fn style_rule_block(lock: &SharedRwLock, rule: &CssRule) -> Option<LockedBlo
     let guard = lock.read();
     match rule {
         CssRule::Style(s) => Some(s.read_with(&guard).block.clone()),
+        // `CSSPageRule.style`: stylo's block holds every descriptor but `size`,
+        // which `page_rules` keeps beside it (ADR-0041).
+        CssRule::Page(p) => Some(p.read_with(&guard).block.clone()),
         _ => None,
     }
 }

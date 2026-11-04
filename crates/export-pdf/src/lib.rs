@@ -156,6 +156,13 @@ pub struct PdfOptions {
     /// Split the document across pages. `false` restores the pre-ADR-0026
     /// single page, as tall as the whole document.
     pub paginate: bool,
+    /// Let the document's `@page { size }` replace [`Self::paper`] and
+    /// [`Self::landscape`] (ADR-0041), as Chrome's `preferCSSPageSize` does.
+    /// Off by default, again as in Chrome. The exporter itself never reads
+    /// CSS: `Page::pdf` applies this before it gets here. `@page` margins
+    /// need no switch — they always win over [`Self::margins`], which are the
+    /// defaults a page box starts from.
+    pub prefer_css_page_size: bool,
 }
 
 impl Default for PdfOptions {
@@ -168,6 +175,7 @@ impl Default for PdfOptions {
             scale: 1.0,
             fit_to_width: true,
             paginate: true,
+            prefer_css_page_size: false,
         }
     }
 }

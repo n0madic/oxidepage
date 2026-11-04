@@ -29,7 +29,7 @@ use style::servo::media_features::PointerCapabilities;
 use style::shared_lock::{Locked, SharedRwLock, StylesheetGuards};
 use style::stylesheets::{
     AllowImportRules, CssRule, CssRuleTypes, CustomMediaEvaluator, DocumentStyleSheet, Origin,
-    RulesMutateError, Stylesheet, StylesheetInDocument, StylesheetLoader, UrlExtraData,
+    RulesMutateError, StylesheetInDocument, StylesheetLoader, UrlExtraData,
 };
 use style::stylist::Stylist;
 use style::thread_state::{self, ThreadState};
@@ -357,6 +357,45 @@ impl StyleEngine {
         out
     }
 
+    /// The page style the document's `@page` rules give every page
+    /// (ADR-0041).
+    ///
+    /// The same walk as [`Self::font_faces`] — effective rules, so `@media`,
+    /// `@supports`, `@import`, `disabled` and `<style media>` all apply — over
+    /// the document's own sheets and its `adoptedStyleSheets`, in cascade
+    /// order. Shadow trees are not walked: a `@page` rule styles the page box,
+    /// which belongs to the document.
+    ///
+    /// Media queries are evaluated against the device the document renders
+    /// with, so a `@page` inside `@media print` is not seen: this engine has
+    /// no print-media device (no print relayout, ADR-0026).
+    #[must_use]
+    pub fn page_style(&self) -> crate::page_rules::PageStyle {
+        use style::stylesheets::StylesheetInDocument;
+
+        let guard = self.lock.read();
+        let device = self.stylist.device();
+        let custom_media = style::stylesheets::CustomMediaMap::default();
+        let mut rules = Vec::new();
+        let sheets = self
+            .author_sheets()
+            .map(|(_, sheet)| sheet)
+            .chain(self.doc_adopted.iter());
+        for sheet in sheets {
+            if !sheet.enabled() || !sheet.is_effective_for_device(device, &custom_media, &guard) {
+                continue;
+            }
+            let contents = sheet.contents(&guard);
+            for rule in contents.effective_rules(device, &custom_media, &guard) {
+                if let CssRule::Page(page) = rule {
+                    rules.push(page.clone());
+                }
+            }
+        }
+        drop(guard);
+        crate::page_rules::resolve(&self.lock, &rules)
+    }
+
     /// Replaces the viewport, rebuilding the stylo device (re-evaluates media
     /// queries on the next resolution).
     pub fn set_viewport(&mut self, viewport: Viewport) {
@@ -611,17 +650,15 @@ impl StyleEngine {
         loader: Option<&dyn StylesheetLoader>,
     ) -> DocumentStyleSheet {
         let media_list = media_list(&self.lock, &url_data, media);
-        let sheet = Stylesheet::from_bytes(
+        let sheet = crate::loader::stylesheet_from_bytes(
             bytes,
             url_data,
             protocol_encoding_label,
             environment_encoding,
             Origin::Author,
             media_list,
-            self.lock.clone(),
+            &self.lock,
             loader,
-            None,
-            QuirksMode::NoQuirks,
         );
         DocumentStyleSheet(ServoArc::new(sheet))
     }
@@ -644,16 +681,35 @@ impl StyleEngine {
         let new_rule = {
             let guard = self.lock.read();
             let contents = sheet.contents(&guard);
-            contents.rules.read_with(&guard).parse_rule_for_insert(
-                &self.lock,
-                text,
-                contents,
-                index,
-                CssRuleTypes::from_bits(0),
-                None,
-                None,
-                AllowImportRules::Yes,
-            )?
+            let rules = contents.rules.read_with(&guard);
+            // stylo's Servo build refuses `@page` as a syntax error, so it is
+            // parsed here (ADR-0041) and placed under the same hierarchy
+            // rules stylo enforces for any non-`@import` rule: within bounds,
+            // and never ahead of an `@import` or `@namespace`.
+            match crate::page_rules::parse_rule(&self.lock, text, &contents.url_data) {
+                Some(rule) => {
+                    if index > rules.0.len() {
+                        return Err(RulesMutateError::IndexSize);
+                    }
+                    if rules.0[index..]
+                        .iter()
+                        .any(|r| matches!(r, CssRule::Import(_) | CssRule::Namespace(_)))
+                    {
+                        return Err(RulesMutateError::HierarchyRequest);
+                    }
+                    rule
+                }
+                None => rules.parse_rule_for_insert(
+                    &self.lock,
+                    text,
+                    contents,
+                    index,
+                    CssRuleTypes::from_bits(0),
+                    None,
+                    None,
+                    AllowImportRules::Yes,
+                )?,
+            }
         };
         self.bump_version();
         let rules = {
@@ -828,17 +884,8 @@ fn make_stylesheet_impl(
     loader: Option<&dyn StylesheetLoader>,
 ) -> DocumentStyleSheet {
     let media_list = media_list(lock, url_data, media);
-    let sheet = Stylesheet::from_str(
-        css,
-        url_data.clone(),
-        origin,
-        media_list,
-        lock.clone(),
-        loader,
-        None,
-        QuirksMode::NoQuirks,
-        AllowImportRules::Yes,
-    );
+    let sheet =
+        crate::loader::stylesheet_from_str(css, url_data.clone(), origin, media_list, lock, loader);
     DocumentStyleSheet(ServoArc::new(sheet))
 }
 

@@ -75,6 +75,17 @@ interface CSSStyleRule : CSSRule {
   [SameObject] readonly attribute CSSStyleDeclaration style;
 };
 
+// `@page` (ADR-0041). CSSOM has it inherit `CSSGroupingRule` for the margin
+// at-rules (`@top-left`, …) a page rule can nest; those are not parsed, and
+// this engine exposes no grouping rule, so it inherits `CSSRule` directly.
+// `style` is CSSOM's `CSSPageDescriptors`, served by the ordinary
+// `CSSStyleDeclaration`: `getPropertyValue("size")` and friends answer for the
+// page descriptors, but there are no `size`/`marginTop` IDL attributes on it.
+interface CSSPageRule : CSSRule {
+  attribute DOMString selectorText;
+  [SameObject] readonly attribute CSSStyleDeclaration style;
+};
+
 partial interface Document {
   [SameObject] readonly attribute StyleSheetList styleSheets;
   attribute any adoptedStyleSheets;

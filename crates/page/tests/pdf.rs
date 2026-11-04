@@ -299,3 +299,119 @@ fn each_page_clips_to_its_own_slice() {
         "no page stops short: {heights:?}"
     );
 }
+
+// === @page (ADR-0041) ===
+
+fn page_with_css(css: &str) -> oxidepage_page::Page {
+    load_html_page(
+        &format!("<!DOCTYPE html><style>{css}</style><p>x</p>"),
+        PageOptions::default(),
+    )
+    .unwrap()
+}
+
+/// The options `Page::pdf` would actually use.
+fn resolved(page: &oxidepage_page::Page, prefer_css_page_size: bool) -> PdfOptions {
+    page.pdf_options_with_css_page(&PdfOptions {
+        prefer_css_page_size,
+        ..PdfOptions::default()
+    })
+}
+
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.01
+}
+
+/// `@page` margins replace the caller's (Chrome's rule); `size` replaces the
+/// paper only when the caller prefers the CSS page size.
+#[test]
+fn page_margins_always_apply_and_size_only_when_preferred() {
+    let page = page_with_css("@page { size: letter landscape; margin: 1in 0 2cm }");
+    let plain = resolved(&page, false);
+    assert_eq!(plain.paper, PdfOptions::default().paper, "paper untouched");
+    assert!(!plain.landscape);
+    assert!(close(plain.margins.top, 96.0) && close(plain.margins.right, 0.0));
+    assert!(close(plain.margins.bottom, 2.0 * 96.0 / 2.54) && close(plain.margins.left, 0.0));
+
+    let preferred = resolved(&page, true);
+    assert_eq!(preferred.paper_size(), (816.0, 1056.0).into_landscape());
+    let pdf = page.pdf(
+        &PdfOptions {
+            prefer_css_page_size: true,
+            ..PdfOptions::default()
+        },
+        &PaintOptions::default(),
+    );
+    assert!(
+        String::from_utf8_lossy(&pdf).contains("/MediaBox [0 0 792 612]"),
+        "letter landscape in points"
+    );
+}
+
+trait Landscape {
+    fn into_landscape(self) -> Self;
+}
+
+impl Landscape for (f32, f32) {
+    fn into_landscape(self) -> Self {
+        (self.1, self.0)
+    }
+}
+
+/// The cascade: later wins, `!important` beats later normal declarations,
+/// selector rules do not apply to every page and are skipped, a nested rule
+/// counts when its group matches, and a percentage margin resolves against
+/// the final paper's width (left/right) or height (top/bottom).
+#[test]
+fn page_rules_cascade_into_one_page_style() {
+    let page = page_with_css(
+        "@page { size: a3; margin-left: 10% !important }\
+         @page { size: 100mm 50mm; margin-left: 0 }\
+         @page :first { size: a5; margin-top: 7px }\
+         @media all { @page { margin-top: 10% } }\
+         @media (max-width: 1px) { @page { margin-right: 99px } }",
+    );
+    let options = resolved(&page, true);
+    let (width, height) = options.paper_size();
+    assert!(close(width, 100.0 * 96.0 / 25.4) && close(height, 50.0 * 96.0 / 25.4));
+    assert!(
+        close(options.margins.left, width * 0.1),
+        "important 10% of width"
+    );
+    assert!(
+        close(options.margins.top, height * 0.1),
+        "nested, 10% of height"
+    );
+    assert!(
+        close(options.margins.right, PdfOptions::default().margins.right),
+        "a non-matching @media contributes nothing"
+    );
+}
+
+/// Sheets that do not apply contribute no page style — their `!important`
+/// would otherwise beat everything — and an adopted sheet does, through
+/// `replaceSync`, the constructed-sheet parse path.
+#[test]
+fn page_style_follows_which_sheets_apply() {
+    let page = load_html_page(
+        "<!DOCTYPE html>\
+         <style media=print>@page { margin: 1px !important }</style>\
+         <style>@page { margin: 2px !important }</style>\
+         <script>\
+           document.styleSheets[1].disabled = true;\
+           const sheet = new CSSStyleSheet();\
+           sheet.replaceSync('@page { size: a5; margin: 3px }');\
+           document.adoptedStyleSheets = [sheet];\
+         </script>",
+        PageOptions::default(),
+    )
+    .unwrap();
+    let options = resolved(&page, true);
+    assert!(
+        close(options.margins.top, 3.0),
+        "only the adopted sheet applies: {:?}",
+        options.margins
+    );
+    let (width, _) = options.paper_size();
+    assert!(close(width, 148.0 * 96.0 / 25.4), "a5");
+}

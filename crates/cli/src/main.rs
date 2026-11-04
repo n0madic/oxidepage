@@ -114,9 +114,10 @@ fn usage() {
          \x20 --clip X,Y,W,H    render this region of the document, in CSS px\n\
          \x20 --quality N       JPEG quality, 1-100 (default 80)\n\
          \x20 --paper <spec>    PDF paper: a3, a4, a5, letter, legal, tabloid, or\n\
-         \x20                   WxH in CSS px (default a4)\n\
+         \x20                   WxH in CSS px (default: the document's @page\n\
+         \x20                   size, else a4)\n\
          \x20 --margin <spec>   PDF margins in CSS px: one value, or t,r,b,l\n\
-         \x20                   (default 38.4 = 0.4in)\n\
+         \x20                   (default 38.4 = 0.4in); @page margins win\n\
          \x20 --scale N         PDF zoom, 0.1-2 (default 1)\n\
          \x20 --landscape       swap the PDF paper's width and height\n\
          \x20 --single-page     one PDF page as tall as the whole document\n\
@@ -268,6 +269,9 @@ fn render_command(args: &[String]) -> ExitCode {
     // The library's default, not a second copy of it.
     let mut quality: u8 = ScreenshotOptions::default().quality;
     let mut pdf = PdfOptions::default();
+    // An explicit `--paper` or `--landscape` is the caller choosing the paper;
+    // without either, the document's `@page { size }` does (ADR-0041).
+    let mut paper_given = false;
     let mut paint = PaintOptions::default();
 
     let mut iter = args.iter();
@@ -341,6 +345,7 @@ fn render_command(args: &[String]) -> ExitCode {
                     return ExitCode::from(2);
                 };
                 pdf.paper = parsed;
+                paper_given = true;
             }
             "--margin" => {
                 let Some(parsed) = iter.next().and_then(|v| parse_margins(v)) else {
@@ -364,7 +369,10 @@ fn render_command(args: &[String]) -> ExitCode {
                 }
                 pdf.scale = clamped;
             }
-            "--landscape" => pdf.landscape = true,
+            "--landscape" => {
+                pdf.landscape = true;
+                paper_given = true;
+            }
             "--single-page" => pdf.paginate = false,
             "--no-fit-to-width" => pdf.fit_to_width = false,
             "--no-print-background" => paint.print_background = false,
@@ -454,7 +462,13 @@ fn render_command(args: &[String]) -> ExitCode {
             quality,
             ..ScreenshotOptions::default()
         }),
-        OutputFormat::Pdf => page.pdf(&pdf, &paint),
+        OutputFormat::Pdf => page.pdf(
+            &PdfOptions {
+                prefer_css_page_size: !paper_given,
+                ..pdf
+            },
+            &paint,
+        ),
         OutputFormat::Html => page.document_html().into_bytes(),
     };
     flush_page_output(&page, quiet);

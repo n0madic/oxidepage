@@ -499,3 +499,88 @@ fn css_arguments_reject_a_symbol() {
         "TypeError,TypeError,TypeError,\\31 \\.5,true"
     );
 }
+
+// === @page (ADR-0041) ===
+
+const PAGE_SHEET: &str = "<!DOCTYPE html><style>\
+    p { color: red }\
+    @page { size: A4 landscape; margin: 1cm 2cm }\
+    div { color: blue }\
+    @page :first { margin-top: 3in }\
+    @media all { @page { size: 100mm } }\
+    @page :bogus { margin: 0 }\
+    </style>";
+
+/// `@page` rules sit in `cssRules` exactly where they were written, as
+/// `CSSPageRule`s; an invalid selector drops the rule; one nested in a group
+/// rule stays out of the top-level list.
+#[test]
+fn page_rules_appear_in_css_rules_in_source_order() {
+    assert_eq!(
+        eval(
+            PAGE_SHEET,
+            "const r = document.styleSheets[0].cssRules;\
+             [r.length, ...Array.from(r, (x) => x.type + ':' + x.constructor.name)].join()",
+        ),
+        "5,1:CSSStyleRule,6:CSSPageRule,1:CSSStyleRule,6:CSSPageRule,4:CSSRule"
+    );
+    assert_eq!(
+        eval(
+            PAGE_SHEET,
+            "const r = document.styleSheets[0].cssRules;\
+             [r[1].selectorText, r[1].cssText, r[3].selectorText, r[3].cssText].join('|')",
+        ),
+        "|@page { size: a4 landscape; margin: 1cm 2cm; }|:first|@page :first { margin-top: 3in; }"
+    );
+}
+
+/// `selectorText` reparses and serializes canonically; an invalid one is
+/// ignored. `style` reads and writes both stylo's block and `size`.
+#[test]
+fn page_rule_selector_text_and_style() {
+    assert_eq!(
+        eval(
+            PAGE_SHEET,
+            "const rule = document.styleSheets[0].cssRules[1];\
+             const out = [];\
+             rule.selectorText = 'named:First'; out.push(rule.selectorText);\
+             rule.selectorText = ':nope'; out.push(rule.selectorText);\
+             rule.selectorText = ''; out.push(JSON.stringify(rule.selectorText));\
+             const s = rule.style;\
+             out.push(s === rule.style, s.getPropertyValue('size'), s.getPropertyValue('margin-left'));\
+             out.push(s.length, s.item(0));\
+             s.setProperty('size', 'letter', 'important');\
+             out.push(s.getPropertyValue('size'), s.getPropertyPriority('size'));\
+             s.setProperty('size', 'bogus');\
+             out.push(s.getPropertyValue('size'));\
+             out.push(s.removeProperty('size'), JSON.stringify(s.getPropertyValue('size')));\
+             s.cssText = 'size: 5in 7in; margin: 0';\
+             out.push(rule.cssText);\
+             out.join('|')",
+        ),
+        "named:first|named:first|\"\"|true|a4 landscape|2cm|5|size|letter|important|letter|letter|\"\"|\
+         @page { size: 5in 7in; margin: 0px; }"
+    );
+}
+
+/// `insertRule` accepts `@page` (stylo's Servo build calls it a syntax error)
+/// under the usual hierarchy rules, and `deleteRule` treats it like any rule.
+#[test]
+fn page_rules_through_insert_delete_and_replace() {
+    assert_eq!(
+        eval(
+            "<!DOCTYPE html><style>@import url(data:text/css,a{});p{}</style>",
+            "const sheet = document.styleSheets[0];\
+             const name = (f) => { try { f(); return 'ok'; } catch (e) { return e.name; } };\
+             const out = [];\
+             out.push(sheet.insertRule('@page :left { margin: 1in }', 2));\
+             out.push(sheet.cssRules[2].cssText);\
+             out.push(name(() => sheet.insertRule('@page {}', 0)));\
+             out.push(name(() => sheet.insertRule('@page :what {}', 1)));\
+             out.push(name(() => sheet.insertRule('@page {} p {}', 1)));\
+             sheet.deleteRule(2); out.push(sheet.cssRules.length);\
+             out.join('|')",
+        ),
+        "2|@page :left { margin: 1in; }|HierarchyRequestError|SyntaxError|SyntaxError|2"
+    );
+}

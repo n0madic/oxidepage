@@ -80,8 +80,11 @@ v1 limits.
   `CSS` namespace: `CSS.escape` (CSSOM's "serialize an identifier", in JS so a
   lone surrogate survives) and both overloads of `CSS.supports`, answered by
   stylo's own `@supports` evaluator so the method and the at-rule cannot
-  disagree. `@page` is **not** parsed — stylo accepts it only in its Gecko
-  build — so it is absent from `cssRules` and there is no `CSSPageRule`. Gated by
+  disagree. `@page` is parsed beside stylo, which accepts it only in its Gecko
+  build, and spliced into stylo's own rule lists at its source position
+  (ADR-0041): `CSSPageRule` has `selectorText` and a `style` that reads and
+  writes the margins and `size`. `page-orientation`, the margin at-rules and
+  `CSSPageDescriptors`' IDL attributes (`style.size`) are not implemented. Gated by
   style-engine, computed-value, and CSSOM integration tests plus the WPT
   `css/cssom` suite. Implementation decisions: ADR-0005.
 - **Phase 5 — Layout & geometry (taffy + parley)**: done. A box tree separate
@@ -507,7 +510,11 @@ v1 limits.
   size, margins, landscape, scale, fit-to-width and `printBackground`), breaking
   at the class-A break points multi-column already computes so no line is cut in
   half, and emitting the document's content **once** as a form XObject that every
-  page invokes. The CLI gained `--clip`, `--quality`, `--paper`, `--margin`,
+  page invokes. The document's selector-less `@page` rules shape it (ADR-0041):
+  their margins always, their `size` under `prefer_css_page_size` (CDP
+  `preferCSSPageSize`; the CLI's default unless `--paper` or `--landscape` is
+  given); `@media print` and `:first`/`:left`/`:right` pages are not
+  consulted. The CLI gained `--clip`, `--quality`, `--paper`, `--margin`,
   `--scale`, `--landscape`, `--single-page`, `--no-fit-to-width` and
   `--no-print-background`; `--dpr` now reaches `window.devicePixelRatio` and says
   so when it is ignored. **Not implemented:** `offset*`/`client*`/`scrollWidth`

@@ -284,6 +284,16 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     cx.define_getter(&proto_css_style_rule, "style", gen_css_style_rule_get_style)?;
     cx.finish_interface("CSSStyleRule", &proto_css_style_rule, CtorSpec::Illegal)?;
 
+    let proto_css_page_rule = cx.begin_interface("CSSPageRule", Some("CSSRule"))?;
+    cx.define_accessor(
+        &proto_css_page_rule,
+        "selectorText",
+        gen_css_page_rule_get_selector_text,
+        gen_css_page_rule_set_selector_text,
+    )?;
+    cx.define_getter(&proto_css_page_rule, "style", gen_css_page_rule_get_style)?;
+    cx.finish_interface("CSSPageRule", &proto_css_page_rule, CtorSpec::Illegal)?;
+
     let proto_custom_element_registry = cx.begin_interface("CustomElementRegistry", None)?;
     cx.define_method_ce(
         &proto_custom_element_registry,
@@ -6235,6 +6245,31 @@ fn gen_css_style_rule_set_selector_text(
 fn gen_css_style_rule_get_style(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let this = cx.this_css_rule(&call.this)?;
     imp::css_style_rule::style(cx, this)
+}
+
+fn gen_css_page_rule_get_selector_text(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_css_rule(&call.this)?;
+    Ok(JsValue::String(imp::css_page_rule::selector_text(
+        cx, this,
+    )?))
+}
+
+fn gen_css_page_rule_set_selector_text(
+    cx: &BindCx<'_>,
+    call: &HostCall,
+) -> Result<JsValue, JsThrow> {
+    let this = cx.this_css_rule(&call.this)?;
+    let a0 = cx.arg_dom_string(call, 0)?;
+    imp::css_page_rule::set_selector_text(cx, this, a0)?;
+    Ok(JsValue::Undefined)
+}
+
+fn gen_css_page_rule_get_style(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_css_rule(&call.this)?;
+    imp::css_page_rule::style(cx, this)
 }
 
 fn gen_custom_element_registry_define(
