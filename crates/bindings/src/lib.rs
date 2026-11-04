@@ -541,6 +541,9 @@ fn install_native_helpers(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     // `__oxide_createObjectURL(blob)` and `__oxide_revokeObjectURL(url)` back
     // the `URL` statics (ADR-0042); the bootstrap defines those, because the
     // codegen emits no static operations.
+    // `__oxide_resourceTimings(after)` feeds the resource timeline the
+    // bootstrap's `performance` layer keeps (ADR-0044).
+    define_fn(cx, &global, "__oxide_resourceTimings", 1, resource_timings)?;
     define_fn(cx, &global, "__oxide_createObjectURL", 1, create_object_url)?;
     define_fn(cx, &global, "__oxide_revokeObjectURL", 1, revoke_object_url)?;
 
@@ -1084,6 +1087,83 @@ fn window_device_pixel_ratio(cx: &BindCx<'_>, _call: &HostCall) -> Result<JsValu
 /// so the copy is the same value for its whole life. `MediaSource` is the
 /// other argument HTML allows; there is none here, so anything that is not a
 /// `Blob` is a `TypeError`.
+/// The context's Resource Timing entries recorded after sequence number
+/// `call.arg(0)`, as plain records the bootstrap wraps in
+/// `PerformanceResourceTiming` (ADR-0044).
+///
+/// Times are made relative to this realm's time origin. A cross-origin entry
+/// whose response did not pass the timing-allow check keeps only its start
+/// and end: the network phases and sizes read 0, as Resource Timing requires,
+/// so a page cannot time or size another origin's response.
+fn resource_timings(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let after = match call.arg(0) {
+        JsValue::Number(n) if n.is_finite() && n >= 0.0 => n as u64,
+        _ => 0,
+    };
+    let origin = crate::imp::htmli_frame_element::origin_of(&cx.state.frame.document_url());
+    let time_origin = cx.state.frame.time_origin_epoch_ms;
+    let mut out = Vec::new();
+    for (seq, entry) in cx.state.frame.resource_timings_after(after) {
+        // An opaque origin ("null") is same-origin with nothing, itself
+        // included.
+        let same_origin = origin != "null"
+            && crate::imp::htmli_frame_element::origin_of(&entry.url) == origin
+            && crate::imp::htmli_frame_element::origin_of(&entry.final_url) == origin;
+        let detailed = same_origin
+            || oxidepage_net::timing_allowed(entry.timing_allow_origin.as_deref(), &origin);
+        let rel = |t: f64| (t - time_origin).max(0.0);
+        let record = cx.scope.new_object().map_err(JsThrow::from)?;
+        let num = |v: f64| JsValue::Number(v);
+        let fields: [(&str, JsValue); 11] = [
+            ("seq", num(seq as f64)),
+            ("name", JsValue::String(entry.url.clone())),
+            (
+                "initiatorType",
+                JsValue::String(entry.initiator_type().to_owned()),
+            ),
+            ("startTime", num(rel(entry.start))),
+            ("responseEnd", num(rel(entry.end))),
+            (
+                "responseStart",
+                num(if detailed {
+                    rel(entry.response_start)
+                } else {
+                    0.0
+                }),
+            ),
+            (
+                "transferSize",
+                num(if detailed {
+                    entry.transfer_len as f64
+                } else {
+                    0.0
+                }),
+            ),
+            (
+                "encodedBodySize",
+                num(if detailed {
+                    entry.encoded_len as f64
+                } else {
+                    0.0
+                }),
+            ),
+            // Status and type follow CORS, not the timing-allow check: an
+            // opaque response already reports 0 and no `Content-Type`.
+            ("responseStatus", num(f64::from(entry.status))),
+            ("contentType", JsValue::String(entry.mime_type.clone())),
+            ("detailed", JsValue::Bool(detailed)),
+        ];
+        for (key, value) in &fields {
+            cx.scope.set(&record, key, value).map_err(JsThrow::from)?;
+        }
+        out.push(JsValue::Object(record));
+    }
+    cx.scope
+        .new_array(&out)
+        .map(JsValue::Object)
+        .map_err(JsThrow::from)
+}
+
 fn create_object_url(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
     let blob = cx
         .this_blob(&call.arg(0))

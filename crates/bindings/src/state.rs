@@ -1460,6 +1460,11 @@ impl PageGlobal {
 /// violator and now stores serialized state (D3/D5); the only shared owner
 /// of JS values left is `LoopHooks`, whose timer and rAF callbacks each carry
 /// the world that created them.
+/// Most Resource Timing entries a browsing context retains, oldest dropped
+/// first. A world's own buffer (250 by default, `setResourceTimingBufferSize`)
+/// is the limit a page sees; this only bounds a page that never reads.
+pub const MAX_RESOURCE_TIMINGS: usize = 1024;
+
 pub struct FrameShared {
     /// State shared by every browsing context of the page (ADR-0035 D2).
     pub global: Rc<PageGlobal>,
@@ -1595,6 +1600,11 @@ pub struct FrameShared {
     /// context id on the `Cell` and a copy stored here would keep answering
     /// with the dead one.
     pub(crate) worlds: RefCell<Vec<WorldId>>,
+    /// Completed fetches this context started, each with its sequence number
+    /// (ADR-0044). Shared by the context's worlds; each world's `performance`
+    /// keeps its own buffer and cursor.
+    resource_timings: RefCell<VecDeque<(u64, oxidepage_net::ResourceTiming)>>,
+    next_resource_timing: Cell<u64>,
 }
 
 /// All bindings state for one *world* — one `Runtime`, one `Context`, one
@@ -1887,7 +1897,35 @@ impl FrameShared {
             time_origin_epoch_ms,
             whole_document_visible: Cell::new(false),
             worlds: RefCell::new(Vec::new()),
+            resource_timings: RefCell::new(VecDeque::new()),
+            next_resource_timing: Cell::new(1),
         })
+    }
+
+    /// Records a fetch this context started, for `performance`'s resource
+    /// timeline (ADR-0044). Each entry gets the next sequence number, which
+    /// is how every world's timeline reads only what it has not seen yet.
+    pub fn push_resource_timing(&self, entry: oxidepage_net::ResourceTiming) {
+        let seq = self.next_resource_timing.get();
+        self.next_resource_timing.set(seq + 1);
+        let mut log = self.resource_timings.borrow_mut();
+        if log.len() == MAX_RESOURCE_TIMINGS {
+            log.pop_front();
+        }
+        log.push_back((seq, entry));
+    }
+
+    /// The recorded entries after sequence number `after`, oldest first.
+    pub(crate) fn resource_timings_after(
+        &self,
+        after: u64,
+    ) -> Vec<(u64, oxidepage_net::ResourceTiming)> {
+        self.resource_timings
+            .borrow()
+            .iter()
+            .filter(|(seq, _)| *seq > after)
+            .cloned()
+            .collect()
     }
 
     /// Which browsing context this state belongs to.

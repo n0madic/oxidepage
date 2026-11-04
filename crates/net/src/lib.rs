@@ -35,6 +35,7 @@ pub mod ip_filter;
 pub mod policy;
 pub mod record;
 pub mod service;
+pub mod timing;
 
 pub use blob::{BlobUrlError, BlobUrlStore};
 pub use cache::{CachePartition, HttpCache};
@@ -46,7 +47,7 @@ pub use fetch::{
     ContentDisposition, Credentials, FetchEngine, FetchOutcome, NetRequest, RequestDefaults,
     RequestMode, ResourceType, ResponseHead, ResponseType, SharedFetchParts, basic_auth_header,
     charset_from_content_type, decode_charset, decode_with_charset, is_forbidden_request_header,
-    parse_auth_challenge, parse_content_disposition, sanitize_filename,
+    parse_auth_challenge, parse_content_disposition, sanitize_filename, timing_allow_origin_of,
 };
 pub use intercept::{
     AuthChallenge, AuthResponse, AuthSource, DEFAULT_INTERCEPT_TIMEOUT, FulfilledResponse,
@@ -55,6 +56,7 @@ pub use intercept::{
 pub use ip_filter::ip_allowed;
 pub use policy::ResourcePolicy;
 pub use record::{NetworkEvent, RequestLog};
-pub use service::{NetEvent, NetPool, NetPoolOptions, NetService, SharedNetConfig};
+pub use service::{NetEvent, NetPool, NetPoolOptions, NetService, SharedNetConfig, TimingSink};
+pub use timing::{ResourceTiming, timing_allowed};
 
 pub use oxidepage_base::{NetErrorKind, RequestId};

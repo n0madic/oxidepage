@@ -2058,6 +2058,22 @@ impl Page {
         };
         let net = Rc::new(net);
         hooks.set_net(Rc::clone(&net));
+        // Resource Timing (ADR-0044): each completed fetch goes to the context
+        // that started it. A request no context named is the top-level
+        // document's (a blocking module or `@import` fetch, which is untagged);
+        // one whose context has since been detached is dropped with it.
+        // **Weak**: `net` outlives the frame table in drop order.
+        {
+            let frames = Rc::downgrade(&frames);
+            net.set_timing_sink(Some(Rc::new(move |entry, frame| {
+                let Some(frames) = frames.upgrade() else {
+                    return;
+                };
+                if let Some(target) = frames.get(frame.unwrap_or(oxidepage_base::MAIN_FRAME)) {
+                    target.shared().push_resource_timing(entry);
+                }
+            })));
+        }
         // Installed on every runtime, so `import()` from an isolated world is
         // not a silent no-op. The loader's module cache is per runtime, which
         // is the isolation this stage is for.

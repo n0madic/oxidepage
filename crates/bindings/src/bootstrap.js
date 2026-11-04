@@ -802,34 +802,77 @@
             });
         }
 
-        // performance.mark / measure / getEntries*: a pure-JS user-timing layer
-        // over `performance.now()`. navigation/resource/paint entry types are
-        // not tracked (they read back as empty).
+        // The `performance` timeline: user timing (`mark`/`measure`) kept here
+        // in JS over `performance.now()`, and resource timing pulled from the
+        // context's native log (`__oxide_resourceTimings`, ADR-0044). The
+        // navigation and paint entry types are not tracked (they read back
+        // as empty), and there is no `PerformanceObserver`.
         const performance = globalThis.performance;
         const Performance = globalThis.Performance;
+        const nativeResourceTimings = globalThis.__oxide_resourceTimings;
         if (performance && typeof Performance === "function") {
             const proto = Performance.prototype;
-            let entries = [];            // mark + measure entries, in order
-            let marksByName = new MapCtor();
-            // The realm survives navigation, so the timeline must be reset per
-            // document. `navigationStart` is re-stamped on each navigation, so a
-            // change signals a new document — clear the buffers before any read.
-            let lastNav = performance.timing.navigationStart;
-            const maybeReset = () => {
-                const nav = performance.timing.navigationStart;
-                if (nav !== lastNav) {
-                    entries = [];
-                    marksByName = new MapCtor();
-                    lastNav = nav;
+            // Every entry's state, keyed by the entry object: the getters read
+            // it, so a page cannot forge an entry by writing own properties.
+            const slots = new WeakMapCtor();
+            const slotOf = (entry, what) => {
+                const s = weakMapGet.call(slots, entry);
+                if (s === undefined) {
+                    throw new TypeError("Illegal invocation: not a " + what);
+                }
+                return s;
+            };
+            let constructing = false;
+            const illegal = () => {
+                if (!constructing) throw new TypeError("Illegal constructor");
+            };
+            const getters = (cls, names, what) => {
+                for (const name of names) {
+                    defineProp(cls.prototype, name, {
+                        get: { [name]() { return slotOf(this, what)[name]; } }[name],
+                        enumerable: true, configurable: true,
+                    });
                 }
             };
-            const makeEntry = (name, entryType, startTime, duration) => objectFreeze({
-                name: String(name), entryType, startTime, duration,
-                toJSON() {
-                    return { name: this.name, entryType, startTime, duration };
-                },
+            const jsonOf = (entry, names) => {
+                const s = slotOf(entry, "PerformanceEntry");
+                const out = {};
+                for (const name of names) out[name] = s[name];
+                return out;
+            };
+            const ENTRY_FIELDS = ["name", "entryType", "startTime", "duration"];
+
+            const PerformanceEntry = function PerformanceEntry() { illegal(); };
+            getters(PerformanceEntry, ENTRY_FIELDS, "PerformanceEntry");
+            reflectDefineProperty(globalThis, "PerformanceEntry", {
+                value: PerformanceEntry, writable: true, enumerable: false, configurable: true,
             });
-            // PerformanceTiming attribute names measure() may reference as marks.
+            defineProp(PerformanceEntry.prototype, "toJSON", {
+                value: function toJSON() { return jsonOf(this, ENTRY_FIELDS); },
+                writable: true, enumerable: true, configurable: true,
+            });
+            const subclass = (name, ctor) => {
+                ctor.prototype = objectCreate(PerformanceEntry.prototype, {
+                    constructor: { value: ctor, writable: true, configurable: true },
+                });
+                Object.setPrototypeOf(ctor, PerformanceEntry);
+                // An interface object: a writable, configurable, non-enumerable
+                // global, like every generated interface.
+                reflectDefineProperty(globalThis, name, {
+                    value: ctor, writable: true, enumerable: false, configurable: true,
+                });
+                return ctor;
+            };
+            const mint = (ctor, slot) => {
+                constructing = true;
+                let entry;
+                try { entry = new ctor(); } finally { constructing = false; }
+                weakMapSet.call(slots, entry, objectFreeze(slot));
+                return entry;
+            };
+
+            // PerformanceTiming attribute names, which a mark may not take and
+            // a measure may reference.
             const timingAttrs = {
                 navigationStart: 1, unloadEventStart: 1, unloadEventEnd: 1,
                 redirectStart: 1, redirectEnd: 1, fetchStart: 1,
@@ -839,6 +882,137 @@
                 domContentLoadedEventStart: 1, domContentLoadedEventEnd: 1,
                 domComplete: 1, loadEventStart: 1, loadEventEnd: 1,
             };
+            const cloneDetail = (detail) =>
+                detail === undefined || detail === null ? null : structuredCloneInner(detail, new MapCtor());
+
+            const PerformanceMark = subclass("PerformanceMark", function PerformanceMark(markName, markOptions) {
+                if (constructing) return;
+                if (new.target === undefined) {
+                    throw new TypeError("Failed to construct 'PerformanceMark': Please use the 'new' operator");
+                }
+                if (arguments.length < 1) {
+                    throw new TypeError("Failed to construct 'PerformanceMark': 1 argument required");
+                }
+                const name = String(markName);
+                if (timingAttrs[name] === 1) {
+                    throw new DOMException(
+                        "'" + name + "' is part of the PerformanceTiming interface, and cannot be used as a mark name.",
+                        "SyntaxError");
+                }
+                const options = markOptions === undefined || markOptions === null ? {} : markOptions;
+                let startTime = performance.now();
+                if (options.startTime !== undefined) {
+                    startTime = Number(options.startTime);
+                    if (!(startTime >= 0)) {
+                        throw new TypeError("Failed to construct 'PerformanceMark': '" + startTime
+                            + "' cannot have a negative start time.");
+                    }
+                }
+                weakMapSet.call(slots, this, objectFreeze({
+                    name, entryType: "mark", startTime, duration: 0,
+                    detail: cloneDetail(options.detail),
+                }));
+            });
+            getters(PerformanceMark, ["detail"], "PerformanceMark");
+            const PerformanceMeasure = subclass("PerformanceMeasure", function PerformanceMeasure() { illegal(); });
+            getters(PerformanceMeasure, ["detail"], "PerformanceMeasure");
+
+            const RESOURCE_FIELDS = [
+                "initiatorType", "deliveryType", "nextHopProtocol", "workerStart",
+                "redirectStart", "redirectEnd", "fetchStart", "domainLookupStart",
+                "domainLookupEnd", "connectStart", "connectEnd", "secureConnectionStart",
+                "requestStart", "firstInterimResponseStart", "responseStart", "responseEnd",
+                "transferSize", "encodedBodySize", "decodedBodySize", "responseStatus",
+                "renderBlockingStatus", "contentType",
+            ];
+            const PerformanceResourceTiming = subclass("PerformanceResourceTiming",
+                function PerformanceResourceTiming() { illegal(); });
+            getters(PerformanceResourceTiming, RESOURCE_FIELDS, "PerformanceResourceTiming");
+            defineProp(PerformanceResourceTiming.prototype, "serverTiming", {
+                get: function serverTiming() {
+                    slotOf(this, "PerformanceResourceTiming");
+                    return objectFreeze([]);
+                },
+                enumerable: true, configurable: true,
+            });
+            defineProp(PerformanceResourceTiming.prototype, "toJSON", {
+                value: function toJSON() {
+                    const out = jsonOf(this, ENTRY_FIELDS.concat(RESOURCE_FIELDS));
+                    out.serverTiming = [];
+                    return out;
+                },
+                writable: true, enumerable: true, configurable: true,
+            });
+
+            // A native record → a `PerformanceResourceTiming`. Without
+            // `detailed` (a cross-origin response that failed the timing-allow
+            // check) every phase but fetchStart/responseEnd is 0, and so are
+            // the sizes, as Resource Timing requires.
+            const resourceEntry = (r) => {
+                const fetchStart = r.startTime;
+                const d = r.detailed;
+                const phase = d ? fetchStart : 0;
+                const secure = d && /^https:/i.test(r.name) ? fetchStart : 0;
+                return mint(PerformanceResourceTiming, {
+                    name: r.name, entryType: "resource", startTime: fetchStart,
+                    duration: r.responseEnd - fetchStart,
+                    initiatorType: r.initiatorType, deliveryType: "", nextHopProtocol: "",
+                    workerStart: 0, redirectStart: 0, redirectEnd: 0, fetchStart,
+                    domainLookupStart: phase, domainLookupEnd: phase,
+                    connectStart: phase, connectEnd: phase, secureConnectionStart: secure,
+                    requestStart: phase, firstInterimResponseStart: 0,
+                    responseStart: r.responseStart, responseEnd: r.responseEnd,
+                    transferSize: r.transferSize, encodedBodySize: r.encodedBodySize,
+                    decodedBodySize: r.encodedBodySize, responseStatus: r.responseStatus,
+                    renderBlockingStatus: "non-blocking", contentType: r.contentType,
+                });
+            };
+
+            let userEntries = [];        // mark + measure entries, in order
+            let marksByName = new MapCtor();
+            let resources = [];
+            let resourceLimit = 250;
+            let resourceCursor = 0;
+            // The realm survives navigation, so the timeline must be reset per
+            // document. `navigationStart` is re-stamped on each navigation, so a
+            // change signals a new document — clear the buffers before any read.
+            let lastNav = performance.timing.navigationStart;
+            const maybeReset = () => {
+                const nav = performance.timing.navigationStart;
+                if (nav !== lastNav) {
+                    userEntries = [];
+                    marksByName = new MapCtor();
+                    resources = [];
+                    lastNav = nav;
+                }
+            };
+            // Pulls what the context recorded since the last read. An entry
+            // started before this document's navigation belongs to the one it
+            // replaced; one past the buffer limit is dropped, as Resource
+            // Timing does once the buffer is full.
+            const pullResources = () => {
+                maybeReset();
+                if (typeof nativeResourceTimings !== "function") return;
+                const fresh = nativeResourceTimings(resourceCursor);
+                const navRel = lastNav - performance.timeOrigin - 1;
+                for (let i = 0; i < fresh.length; i++) {
+                    const r = fresh[i];
+                    resourceCursor = r.seq;
+                    if (r.startTime < navRel) continue;
+                    if (resources.length >= resourceLimit) continue;
+                    resources.push(resourceEntry(r));
+                }
+            };
+            const timeline = () => {
+                pullResources();
+                const all = userEntries.concat(resources);
+                // Chronological, stable for equal start times.
+                return all
+                    .map((e, i) => [e, i])
+                    .sort((a, b) => (a[0].startTime - b[0].startTime) || (a[1] - b[1]))
+                    .map((p) => p[0]);
+            };
+
             // Resolves a string mark reference to a timestamp: a recorded mark,
             // a non-zero PerformanceTiming attribute, else a SyntaxError.
             const resolveMark = (ref) => {
@@ -865,17 +1039,16 @@
             };
             defMethod("mark", function mark(name, options) {
                 maybeReset();
-                const startTime = (options && typeof options.startTime === "number")
-                    ? options.startTime : performance.now();
-                const entry = makeEntry(name, "mark", startTime, 0);
-                entries.push(entry);
-                mapSet.call(marksByName, String(name), entry);
+                const entry = new PerformanceMark(name, options);
+                userEntries.push(entry);
+                mapSet.call(marksByName, entry.name, entry);
                 return entry;
             });
             defMethod("measure", function measure(name, startOrOptions, endMark) {
                 maybeReset();
                 let startTime = 0;
                 let endTime = performance.now();
+                let detail = null;
                 if (typeof startOrOptions === "string") {
                     startTime = resolveMark(startOrOptions);
                     if (endMark !== undefined) endTime = resolveMark(endMark);
@@ -889,38 +1062,53 @@
                         if (o.start !== undefined) endTime = startTime + o.duration;
                         else startTime = endTime - o.duration;
                     }
+                    detail = cloneDetail(o.detail);
                 }
-                const entry = makeEntry(name, "measure", startTime, endTime - startTime);
-                entries.push(entry);
+                const entry = mint(PerformanceMeasure, {
+                    name: String(name), entryType: "measure", startTime,
+                    duration: endTime - startTime, detail,
+                });
+                userEntries.push(entry);
                 return entry;
             });
             defMethod("getEntries", function getEntries() {
-                maybeReset();
-                return entries.slice();
+                return timeline();
             });
             defMethod("getEntriesByType", function getEntriesByType(type) {
-                maybeReset();
                 const t = String(type);
-                return entries.filter((e) => e.entryType === t);
+                return timeline().filter((e) => e.entryType === t);
             });
             defMethod("getEntriesByName", function getEntriesByName(name, type) {
-                maybeReset();
                 const n = String(name);
-                return entries.filter((e) =>
+                return timeline().filter((e) =>
                     e.name === n && (type === undefined || e.entryType === String(type)));
             });
             const clearBy = (entryType, name) => {
                 maybeReset();
-                for (let i = entries.length - 1; i >= 0; i--) {
-                    const e = entries[i];
+                for (let i = userEntries.length - 1; i >= 0; i--) {
+                    const e = userEntries[i];
                     if (e.entryType === entryType && (name === undefined || e.name === String(name))) {
-                        entries.splice(i, 1);
+                        userEntries.splice(i, 1);
                         if (entryType === "mark") mapDelete.call(marksByName, e.name);
                     }
                 }
             };
             defMethod("clearMarks", function clearMarks(name) { clearBy("mark", name); });
             defMethod("clearMeasures", function clearMeasures(name) { clearBy("measure", name); });
+            defMethod("clearResourceTimings", function clearResourceTimings() {
+                // Pull first, so what is cleared includes everything finished
+                // so far and the next read does not resurrect it.
+                pullResources();
+                resources = [];
+            });
+            defMethod("setResourceTimingBufferSize", function setResourceTimingBufferSize(maxSize) {
+                if (arguments.length < 1) {
+                    throw new TypeError("Failed to execute 'setResourceTimingBufferSize' on "
+                        + "'Performance': 1 argument required, but only 0 present.");
+                }
+                const n = Number(maxSize);
+                resourceLimit = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) >>> 0 : 0;
+            });
         }
 
         // Native helpers installed by `install_native_helpers`, captured here and
@@ -1592,6 +1780,7 @@
         reflectDeleteProperty(globalThis, "__oxide_cssSupports");
         reflectDeleteProperty(globalThis, "__oxide_createObjectURL");
         reflectDeleteProperty(globalThis, "__oxide_revokeObjectURL");
+        reflectDeleteProperty(globalThis, "__oxide_resourceTimings");
     };
 
     // URLSearchParams pair iteration, built on a native `snapshot(params)`

@@ -249,7 +249,11 @@ v1 limits.
   `structuredClone` (cycles, shared buffers, `Map`/`Set`/`Date`/`RegExp`/typed
   arrays/`Error`/`DOMException`, `DataCloneError` for host objects and
   `transfer`); `performance.timing` (Navigation Timing Level 1 milestones) plus
-  a `performance.mark`/`measure`/`getEntries*` user-timing layer;
+  a `performance.mark`/`measure`/`getEntries*` user-timing layer whose entries
+  are `PerformanceMark`/`PerformanceMeasure` instances, and Resource Timing
+  (`PerformanceResourceTiming` for every completed subresource fetch, with the
+  timing-allow check zeroing a cross-origin entry's phases and sizes,
+  `clearResourceTimings`/`setResourceTimingBufferSize`; ADR-0044);
   `ResizeObserver` (content/border/device-pixel box) and `IntersectionObserver`
   (`root`/`rootMargin`/`threshold`, `takeRecords`). Observers deliver from the
   page event loop behind an O(1) gate (DOM versions + paint stamp), with entry

@@ -425,6 +425,23 @@ pub struct ResponseHead {
     pub redirected: bool,
     /// The response's visibility class (basic / cors / opaque).
     pub response_type: ResponseType,
+    /// The response's `Timing-Allow-Origin`, combined across repeats, read
+    /// **before** the visibility filter: Resource Timing's check applies to
+    /// the network response, and an opaque one shows script no headers at all
+    /// (ADR-0044).
+    pub timing_allow_origin: Option<String>,
+}
+
+/// Every `Timing-Allow-Origin` field of `headers`, combined into one list the
+/// way HTTP merges a repeated list header; `None` when there is none.
+#[must_use]
+pub fn timing_allow_origin_of(headers: &[(String, String)]) -> Option<String> {
+    let values: Vec<&str> = headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("timing-allow-origin"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    (!values.is_empty()).then(|| values.join(", "))
 }
 
 /// A fully-read response (head + decompressed body).
@@ -933,6 +950,7 @@ impl FetchEngine {
                 headers: response_headers,
                 redirected,
                 response_type,
+                timing_allow_origin: timing_allow_origin_of(&header_pairs(&parts.headers)),
             };
             return Ok(FetchOutcome {
                 head,
@@ -977,6 +995,7 @@ impl FetchEngine {
                 headers,
                 redirected: false,
                 response_type: ResponseType::Basic,
+                timing_allow_origin: None,
             },
             body: Bytes::from(f.bytes),
         })
@@ -1245,6 +1264,7 @@ fn data_outcome(url: &Url, max_bytes: u64) -> NetResult<FetchOutcome> {
             headers: vec![("content-type".to_owned(), body.content_type)],
             redirected: false,
             response_type: ResponseType::Basic,
+            timing_allow_origin: None,
         },
         body: Bytes::from(body.bytes),
     })
@@ -1290,6 +1310,7 @@ fn blob_outcome(
             ],
             redirected: false,
             response_type: ResponseType::Basic,
+            timing_allow_origin: None,
         },
         body: bytes,
     })
@@ -1595,6 +1616,7 @@ fn cached_outcome(cached: crate::cache::CachedResponse, url: &Url) -> FetchOutco
             headers: header_pairs(&cached.headers),
             redirected: false,
             response_type: ResponseType::Basic,
+            timing_allow_origin: timing_allow_origin_of(&header_pairs(&cached.headers)),
         },
         body: cached.body,
     }

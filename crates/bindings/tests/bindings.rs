@@ -1802,6 +1802,7 @@ fn xhr_wrapper_released_after_completion() {
                 final_url: "http://example.test/data".to_owned(),
                 redirected: false,
                 response_type: ResponseType::Basic,
+                timing_allow_origin: None,
             },
         );
         oxidepage_bindings::deliver_net_event(&cx, NetEvent::Done { id });

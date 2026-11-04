@@ -70,6 +70,9 @@ pub enum NetworkEvent {
         /// Repeated from the request, because CDP's `responseReceived` carries
         /// it too and a driver that reads it there must not be told `Other`.
         resource_type: ResourceType,
+        /// The network response's `Timing-Allow-Origin`, which `headers` may
+        /// not show: an opaque response's are blanked (ADR-0044).
+        timing_allow_origin: Option<String>,
         timestamp: f64,
     },
     /// The body is complete.

@@ -55,6 +55,7 @@ use crate::intercept::{
 };
 use crate::policy::ResourcePolicy;
 use crate::record::{NetworkEvent, RequestLog};
+use crate::timing::{ResourceTiming, TimingRecorder};
 
 /// A net→page progress event, tagged with the originating [`RequestId`].
 #[derive(Debug)]
@@ -68,6 +69,8 @@ pub enum NetEvent {
         final_url: String,
         redirected: bool,
         response_type: ResponseType,
+        /// See [`ResponseHead::timing_allow_origin`].
+        timing_allow_origin: Option<String>,
     },
     /// A chunk of the (decompressed) response body.
     Chunk { id: RequestId, data: Bytes },
@@ -285,6 +288,11 @@ pub struct NetService {
     /// observer. Nothing here crosses a thread — the driver side receives this
     /// as a `PageEvent`, which the page's own bus already carries.
     observer: RefCell<Option<NetObserver>>,
+    /// Pairs every request's milestones into Resource Timing entries. Fed
+    /// from [`Self::notify`] whether or not an observer is installed: a page's
+    /// own `performance` timeline does not depend on a driver watching.
+    timing: RefCell<TimingRecorder>,
+    timing_sink: RefCell<Option<TimingSink>>,
     /// The interception state a driver shares with this page (ADR-0032 D2).
     ///
     /// The service holding it is what keeps [`NetService::decisions`] from ever
@@ -362,6 +370,10 @@ const MAX_AUTH_ATTEMPTS: u32 = 1;
 
 /// A callback told about each request's progress.
 pub type NetObserver = Rc<dyn Fn(NetworkEvent, Option<oxidepage_base::FrameId>)>;
+
+/// A callback handed each completed [`ResourceTiming`] and the browsing
+/// context that started the request, if one named itself (ADR-0044).
+pub type TimingSink = Rc<dyn Fn(ResourceTiming, Option<oxidepage_base::FrameId>)>;
 
 /// What [`NetService::open`] remembers about a request still in flight.
 #[derive(Clone, Debug, Default)]
@@ -456,6 +468,8 @@ impl NetService {
                 open: RefCell::new(HashMap::new()),
                 request_frames: RefCell::new(HashMap::new()),
                 observer: RefCell::new(None),
+                timing: RefCell::new(TimingRecorder::default()),
+                timing_sink: RefCell::new(None),
                 intercept,
                 decisions,
                 paused: RefCell::new(HashMap::new()),
@@ -512,6 +526,11 @@ impl NetService {
         self.request_frames.borrow().get(&id).copied()
     }
 
+    /// Installs (or removes) the Resource Timing sink.
+    pub fn set_timing_sink(&self, sink: Option<TimingSink>) {
+        *self.timing_sink.borrow_mut() = sink;
+    }
+
     fn notify(&self, event: NetworkEvent) {
         // Read before the observer runs and before a terminal event drops the
         // entry: an observer is free to start another request, and holding this
@@ -524,6 +543,15 @@ impl NetService {
             NetworkEvent::Finished { .. } | NetworkEvent::Failed { .. }
         ) {
             self.request_frames.borrow_mut().remove(&id);
+        }
+        // The recorder's borrow ends before either callback runs, for the
+        // same re-entrancy reason as the observer clone below.
+        let completed = self.timing.borrow_mut().observe(&event);
+        if let Some(entry) = completed {
+            let sink = self.timing_sink.borrow().clone();
+            if let Some(sink) = sink {
+                sink(entry, frame);
+            }
         }
         // Cloned out of the `RefCell` before the call: an observer that starts
         // another request would otherwise re-enter this borrow.
@@ -607,6 +635,7 @@ impl NetService {
                     final_url: head.final_url.clone(),
                     mime_type: mime_of(&content_type),
                     resource_type,
+                    timing_allow_origin: head.timing_allow_origin.clone(),
                     timestamp: epoch_ms(),
                 });
                 self.notify(NetworkEvent::Finished {
@@ -642,6 +671,7 @@ impl NetService {
                 status_text,
                 headers,
                 final_url,
+                timing_allow_origin,
                 ..
             } => {
                 let content_type = header_value(headers, "content-type");
@@ -663,6 +693,7 @@ impl NetService {
                     final_url: final_url.clone(),
                     mime_type: mime_of(&content_type),
                     resource_type,
+                    timing_allow_origin: timing_allow_origin.clone(),
                     timestamp: epoch_ms(),
                 });
             }
@@ -1390,6 +1421,7 @@ fn emit_outcome(tx: &Sender<NetEvent>, id: RequestId, outcome: FetchOutcome) {
         final_url: head.final_url,
         redirected: head.redirected,
         response_type: head.response_type,
+        timing_allow_origin: head.timing_allow_origin,
     });
     if !body.is_empty() {
         let _ = tx.send(NetEvent::Chunk { id, data: body });
@@ -1432,6 +1464,7 @@ fn fulfilled_outcome(url: &str, response: FulfilledResponse) -> FetchOutcome {
         headers,
         body,
     } = response;
+    let timing_allow_origin = crate::fetch::timing_allow_origin_of(&headers);
     FetchOutcome {
         head: ResponseHead {
             status,
@@ -1440,6 +1473,7 @@ fn fulfilled_outcome(url: &str, response: FulfilledResponse) -> FetchOutcome {
             headers,
             redirected: false,
             response_type: ResponseType::Basic,
+            timing_allow_origin,
         },
         body: Bytes::from(body),
     }

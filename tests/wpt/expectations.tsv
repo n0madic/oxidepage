@@ -1367,10 +1367,7 @@ css/cssom/CSSStyleSheet-constructable-replace-thenable.html	__harness__	OK
 css/cssom/CSSStyleSheet-constructable.html	Adding non-constructed stylesheet to AdoptedStyleSheets is not allowed when the owner document of the stylesheet and the AdoptedStyleSheets are in different document trees	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Adopting a shadow host will empty adoptedStyleSheets if adopting to a different document	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Adopting a shadow host's ancestor will empty adoptedStyleSheets if adopting to a different document	FAIL
-css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace allows, but ignores, import rule inside	FAIL
-css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace ignores @import rule but still loads other rules	FAIL
 css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace produces Promise<CSSStyleSheet>	FAIL
-css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replaceSync should not trigger any loads from @import rules	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Importing a shadow host will not copy shadow root, and also adoptedStyleSheets	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Stylesheet constructed on iframe cannot be used in the main Document	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Stylesheets constructed on the main Document cannot be used in iframes	FAIL
