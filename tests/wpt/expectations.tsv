@@ -1371,16 +1371,25 @@ css/cssom/CSSNamespaceRule.html	CSSOM - CSSNamespaceRule interface	FAIL
 css/cssom/CSSNamespaceRule.html	__harness__	OK
 css/cssom/CSSRuleList.html	__harness__	OK
 css/cssom/CSSStyleDeclaration-iterator.html	__harness__	OK
-css/cssom/CSSStyleRule-set-selectorText-namespace.html	__harness__	TIMEOUT
-css/cssom/CSSStyleRule-set-selectorText.html	__harness__	TIMEOUT
-css/cssom/CSSStyleRule.html	__harness__	ERROR
+css/cssom/CSSStyleRule-set-selectorText-namespace.html	CSSStyleRule: selectorText value: | *.style1  | isMatch: false	FAIL
+css/cssom/CSSStyleRule-set-selectorText-namespace.html	CSSStyleRule: selectorText value: |*|*.style1  | isMatch: true	FAIL
+css/cssom/CSSStyleRule-set-selectorText-namespace.html	CSSStyleRule: selectorText value: |.style1| isMatch: false	FAIL
+css/cssom/CSSStyleRule-set-selectorText-namespace.html	CSSStyleRule: selectorText value: |p| isMatch: false	FAIL
+css/cssom/CSSStyleRule-set-selectorText-namespace.html	CSSStyleRule: selectorText value: |svg|*.style1  | isMatch: true	FAIL
+css/cssom/CSSStyleRule-set-selectorText-namespace.html	__harness__	OK
+css/cssom/CSSStyleRule-set-selectorText.html	CSSStyleRule: selectorText value: |::first-line| isMatch: false	FAIL
+css/cssom/CSSStyleRule-set-selectorText.html	CSSStyleRule: selectorText value: |:first-line| isMatch: false	FAIL
+css/cssom/CSSStyleRule-set-selectorText.html	CSSStyleRule: selectorText value: |:lang(zh)| isMatch: true	FAIL
+css/cssom/CSSStyleRule-set-selectorText.html	CSSStyleRule: selectorText value: |:lang(zh-CN)| isMatch: true	FAIL
+css/cssom/CSSStyleRule-set-selectorText.html	__harness__	OK
+css/cssom/CSSStyleRule.html	Assigning to CSSStyleRule.style assigns to cssText; CSSStyleRule.style returns the same object	FAIL
+css/cssom/CSSStyleRule.html	CSSStyleRule's style has [PutForwards]	FAIL
+css/cssom/CSSStyleRule.html	__harness__	OK
 css/cssom/CSSStyleSheet-constructable-baseURL.html	Constructing sheet with custom base URL ueses that URL for CSS rules	FAIL
 css/cssom/CSSStyleSheet-constructable-baseURL.html	Constructing sheet with invalid base URL throws a NotAllowedError	FAIL
 css/cssom/CSSStyleSheet-constructable-baseURL.html	Constructing sheet with relative URL adds to the constructor document's base URL	FAIL
 css/cssom/CSSStyleSheet-constructable-baseURL.html	__harness__	OK
 css/cssom/CSSStyleSheet-constructable-cssRules.html	__harness__	OK
-css/cssom/CSSStyleSheet-constructable-cssRules.html	cssRules doesn't change on replace / replaceSync	FAIL
-css/cssom/CSSStyleSheet-constructable-disabled-regular-sheet-insertion.html	Shouldn't crash / assert when inserting a stylesheet after there are disabled constructable sheets	FAIL
 css/cssom/CSSStyleSheet-constructable-disabled-regular-sheet-insertion.html	__harness__	OK
 css/cssom/CSSStyleSheet-constructable-duplicate.html	__harness__	OK
 css/cssom/CSSStyleSheet-constructable-invalidation.html	__harness__	OK
@@ -1388,19 +1397,20 @@ css/cssom/CSSStyleSheet-constructable-invalidation.html	mutating constructed CSS
 css/cssom/CSSStyleSheet-constructable-invalidation.html	mutating constructed CSSStyleSheet applied to shadowdom invalidates styles	FAIL
 css/cssom/CSSStyleSheet-constructable-invalidation.html	mutating dependent constructed CSSStyleSheet applied to shadowdom invalidates styles	FAIL
 css/cssom/CSSStyleSheet-constructable-replace-cssRules.html	__harness__	OK
-css/cssom/CSSStyleSheet-constructable-replace-cssRules.html	cssRules tests (sync: false)	FAIL
-css/cssom/CSSStyleSheet-constructable-replace-cssRules.html	cssRules tests (sync: true)	FAIL
 css/cssom/CSSStyleSheet-constructable-replace-on-regular-sheet.html	CSSStyleSheet.replace returns a rejected promise for non-constructed sheets	FAIL
 css/cssom/CSSStyleSheet-constructable-replace-on-regular-sheet.html	CSSStyleSheet.replace returns a rejected promise for non-constructed sheets that have no associated document	FAIL
 css/cssom/CSSStyleSheet-constructable-replace-on-regular-sheet.html	CSSStyleSheet.replaceSync throws NotAllowedError for non-constructed sheets	FAIL
 css/cssom/CSSStyleSheet-constructable-replace-on-regular-sheet.html	__harness__	OK
-css/cssom/CSSStyleSheet-constructable-replace-thenable.html	CSSStyleSheet.replace/replaceSync() when stylesheet is a thenable	FAIL
 css/cssom/CSSStyleSheet-constructable-replace-thenable.html	__harness__	OK
+css/cssom/CSSStyleSheet-constructable.html	Adding non-constructed stylesheet to AdoptedStyleSheets is not allowed when the owner document of the stylesheet and the AdoptedStyleSheets are in different document trees	FAIL
+css/cssom/CSSStyleSheet-constructable.html	Adopting a shadow host will empty adoptedStyleSheets if adopting to a different document	FAIL
+css/cssom/CSSStyleSheet-constructable.html	Adopting a shadow host's ancestor will empty adoptedStyleSheets if adopting to a different document	FAIL
+css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace allows, but ignores, import rule inside	FAIL
+css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace ignores @import rule but still loads other rules	FAIL
 css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replace produces Promise<CSSStyleSheet>	FAIL
-css/cssom/CSSStyleSheet-constructable.html	Changes to constructed stylesheets through CSSOM is reflected	FAIL
-css/cssom/CSSStyleSheet-constructable.html	Constructed style sheets can be applied on document	FAIL
-css/cssom/CSSStyleSheet-constructable.html	Constructed style sheets can be applied on shadow root	FAIL
+css/cssom/CSSStyleSheet-constructable.html	CSSStyleSheet.replaceSync should not trigger any loads from @import rules	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Constructed stylesheet can be used and modified in multiple TreeScopes	FAIL
+css/cssom/CSSStyleSheet-constructable.html	Importing a shadow host will not copy shadow root, and also adoptedStyleSheets	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Re-attaching shadow host with adopted stylesheets work	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Stylesheet constructed on iframe cannot be used in the main Document	FAIL
 css/cssom/CSSStyleSheet-constructable.html	Stylesheets constructed on the main Document cannot be used in iframes	FAIL
@@ -1421,7 +1431,6 @@ css/cssom/CSSStyleSheet.html	deleteRule with no argument throws	FAIL
 css/cssom/CSSStyleSheet.html	deleteRule(1)	FAIL
 css/cssom/CSSStyleSheet.html	insertRule with #bar selector	FAIL
 css/cssom/CSSStyleSheet.html	insertRule with no argument throws	FAIL
-css/cssom/CSSStyleSheet.html	preconditions	FAIL
 css/cssom/CSSStyleSheet.html	removeRule on empty style sheet throws	FAIL
 css/cssom/CSSStyleSheet.html	removeRule with no argument removes first rule	FAIL
 css/cssom/CSSStyleSheet.html	removeRule(1)	FAIL
@@ -1451,22 +1460,15 @@ css/cssom/StyleSheetList-constructable-shadow-with-style-recalc.html	shadowRoot.
 css/cssom/StyleSheetList-constructable-shadow.html	__harness__	OK
 css/cssom/StyleSheetList-constructable-shadow.html	shadowRoot.styleSheets does not include adopted style sheets	FAIL
 css/cssom/StyleSheetList-constructable-with-style-recalc.html	__harness__	OK
-css/cssom/StyleSheetList-constructable-with-style-recalc.html	document.styleSheets does not include adopted style sheets	FAIL
 css/cssom/StyleSheetList-constructable.html	__harness__	OK
-css/cssom/StyleSheetList-constructable.html	document.styleSheets does not include adopted style sheets	FAIL
 css/cssom/StyleSheetList.html	__harness__	OK
-css/cssom/adoptedstylesheets-modify-array-and-sheet.html	Modify the color declaration. Should now be green.	FAIL
 css/cssom/adoptedstylesheets-modify-array-and-sheet.html	__harness__	OK
-css/cssom/adoptedstylesheets-observablearray.html	__harness__	TIMEOUT
-css/cssom/at-namespace.html	CSS Test: @namespace in CSSOM is not severely broken	FAIL
+css/cssom/adoptedstylesheets-observablearray.html	__harness__	OK
 css/cssom/at-namespace.html	__harness__	OK
 css/cssom/base-uri.html	KeyframeEffect constructor	FAIL
 css/cssom/base-uri.html	KeyframeEffect.setKeyframes	FAIL
 css/cssom/base-uri.html	__harness__	OK
 css/cssom/base-uri.html	setProperty	FAIL
-css/cssom/border-shorthand-serialization.html	Border shorthand is serialized correctly if all border-image-* are set to their initial specified values.	FAIL
-css/cssom/border-shorthand-serialization.html	Declaration with border longhands and border-image is not serialized to a border shorthand declaration.	FAIL
-css/cssom/border-shorthand-serialization.html	Declaration with border longhands is not serialized to a border shorthand declaration.	FAIL
 css/cssom/border-shorthand-serialization.html	__harness__	OK
 css/cssom/caretPositionFromPoint-audioVideo.html	__harness__	OK
 css/cssom/caretPositionFromPoint-audioVideo.html	document.caretPositionFromPoint() should return a CaretPosition over audio elements	FAIL
@@ -1498,7 +1500,7 @@ css/cssom/css-style-attr-decl-block.html	Changes to CSS declaration block should
 css/cssom/css-style-attr-decl-block.html	Removing non-existing property or setting invalid value on CSS declaration block shouldn't queue mutation record	FAIL
 css/cssom/css-style-attr-decl-block.html	__harness__	OK
 css/cssom/css-style-attribute-modifications.html	__harness__	OK
-css/cssom/css-style-declaration-modifications.html	__harness__	ERROR
+css/cssom/css-style-declaration-modifications.html	__harness__	OK
 css/cssom/css-style-reparse.html	__harness__	OK
 css/cssom/css-style-reparse.html	style.innerHTML modification	FAIL
 css/cssom/css-style-reparse.html	style.textContent modification	FAIL
@@ -1506,23 +1508,29 @@ css/cssom/cssimportrule-parent.html	@import stylesheet is properly unlinked from
 css/cssom/cssimportrule-parent.html	__harness__	OK
 css/cssom/cssimportrule-sheet-identity.html	CSSImportRule has different sheets even if referencing the same URL	FAIL
 css/cssom/cssimportrule-sheet-identity.html	__harness__	OK
-css/cssom/cssimportrule.html	__harness__	ERROR
+css/cssom/cssimportrule.html	CSSImportRule : MediaList mediaText attribute should be updated due to [PutForwards]	FAIL
+css/cssom/cssimportrule.html	CSSRule and CSSImportRule types	FAIL
+css/cssom/cssimportrule.html	CSSStyleDeclaration cssText attribute should be updated due to [PutForwards]	FAIL
+css/cssom/cssimportrule.html	Existence and writability of CSSImportRule attributes	FAIL
+css/cssom/cssimportrule.html	Existence and writability of CSSImportRule supportsText attribute	FAIL
+css/cssom/cssimportrule.html	StyleSheet : MediaList mediaText attribute should be updated due to [PutForwards]	FAIL
+css/cssom/cssimportrule.html	Value of CSSImportRule supportsText attribute	FAIL
+css/cssom/cssimportrule.html	Values of CSSImportRule attributes	FAIL
+css/cssom/cssimportrule.html	Values of CSSRule attributes	FAIL
+css/cssom/cssimportrule.html	__harness__	OK
 css/cssom/cssom-cssText-serialize.html	__harness__	OK
 css/cssom/cssom-cssstyledeclaration-set.html	__harness__	OK
-css/cssom/cssom-fontfacerule-constructors.html	__harness__	TIMEOUT
-css/cssom/cssom-fontfacerule.html	__harness__	TIMEOUT
+css/cssom/cssom-fontfacerule-constructors.html	@font-face declarations are instances of CSSFontFaceRule	FAIL
+css/cssom/cssom-fontfacerule-constructors.html	The style attribute must return a CSSFontFaceDescriptors block	FAIL
+css/cssom/cssom-fontfacerule-constructors.html	__harness__	OK
+css/cssom/cssom-fontfacerule.html	CSSStyleDeclaration values are represented within CSSFontFaceRule	FAIL
+css/cssom/cssom-fontfacerule.html	__harness__	OK
 css/cssom/cssom-getPropertyValue-common-checks.html	__harness__	OK
 css/cssom/cssom-pagerule.html	Set selectorText to named page after rule was removed	FAIL
 css/cssom/cssom-pagerule.html	__harness__	OK
 css/cssom/cssom-ruleTypeAndOrder.html	__harness__	OK
 css/cssom/cssom-setProperty-shorthand.html	__harness__	OK
 css/cssom/cssstyledeclaration-all-shorthand.html	__harness__	OK
-css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns css-wide keyword when 'all' overrides prior property via insertRule	FAIL
-css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns css-wide keyword when 'all' overrides shorthand 'margin' via insertRule	FAIL
-css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns empty string when property overridden after 'all' via insertRule	FAIL
-css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns empty string when single property overridden after 'all' via insertRule	FAIL
-css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns empty string with shorthand 'margin' via insertRule	FAIL
-css/cssom/cssstyledeclaration-all-shorthand.html	getPropertyValue('all') returns later 'all' value when it overrides earlier 'all' and properties via insertRule	FAIL
 css/cssom/cssstyledeclaration-csstext-all-shorthand.html	__harness__	OK
 css/cssom/cssstyledeclaration-csstext-final-delimiter.html	__harness__	OK
 css/cssom/cssstyledeclaration-csstext-important.html	__harness__	OK
@@ -1827,21 +1835,13 @@ css/cssom/insertRule-across-context.html	The constructor of inserted rule object
 css/cssom/insertRule-across-context.html	The constructor of inserted rule object must be from iframe for new CSSStyleSheet()	FAIL
 css/cssom/insertRule-across-context.html	__harness__	OK
 css/cssom/insertRule-charset-no-index.html	__harness__	OK
-css/cssom/insertRule-charset-no-index.html	insertRule with charset and omitted index argument	FAIL
-css/cssom/insertRule-charset-no-index.html	insertRule with charset and undefined index argument	FAIL
 css/cssom/insertRule-import-no-index.html	__harness__	OK
-css/cssom/insertRule-import-no-index.html	insertRule with import and omitted index argument	FAIL
-css/cssom/insertRule-import-no-index.html	insertRule with import and undefined index argument	FAIL
 css/cssom/insertRule-namespace-after-import.html	__harness__	OK
 css/cssom/insertRule-namespace-after-import.html	insertRule places an @namespace rule after a single @import rule	FAIL
 css/cssom/insertRule-namespace-after-import.html	insertRule places an @namespace rule after two @import rules	FAIL
 css/cssom/insertRule-namespace-no-index.html	__harness__	OK
-css/cssom/insertRule-namespace-no-index.html	insertRule with namespace and omitted index argument	FAIL
 css/cssom/insertRule-namespace-no-index.html	insertRule with namespace and omitted index argument should insert import	FAIL
-css/cssom/insertRule-namespace-no-index.html	insertRule with namespace and undefined index argument	FAIL
 css/cssom/insertRule-no-index.html	__harness__	OK
-css/cssom/insertRule-no-index.html	insertRule with omitted index argument	FAIL
-css/cssom/insertRule-no-index.html	insertRule with undefined index argument	FAIL
 css/cssom/insertRule-syntax-error-01.html	__harness__	OK
 css/cssom/invalid-pseudo-elements.html	__harness__	OK
 css/cssom/link-element-stylesheet-title.html	Executing setAttribute('title', '') results in the title being set to null	FAIL
@@ -1860,7 +1860,6 @@ css/cssom/medialist-interfaces-001.html	mediatest_medialist_serialize_element	FA
 css/cssom/medialist-interfaces-001.html	mediatest_medialist_serialize_empty	FAIL
 css/cssom/medialist-interfaces-001.html	mediatest_medialist_serialize_order	FAIL
 css/cssom/medialist-interfaces-002.html	__harness__	OK
-css/cssom/medialist-interfaces-002.html	deleteMedium_called_without_argument	FAIL
 css/cssom/medialist-interfaces-002.html	deleteMedium_no_matching_medium_to_remove	FAIL
 css/cssom/medialist-interfaces-002.html	deleteMedium_removes_correct_medium	FAIL
 css/cssom/medialist-interfaces-004.html	__harness__	OK
@@ -1900,7 +1899,6 @@ css/cssom/selectorSerialize.html	escaped character (\) in element name with no n
 css/cssom/selectorSerialize.html	escaped character as code point in attribute name	FAIL
 css/cssom/selectorSerialize.html	escaped character in attribute name	FAIL
 css/cssom/selectorSerialize.html	escaped character in attribute name with any namespace	FAIL
-css/cssom/selectorSerialize.html	escaped character in attribute prefix	FAIL
 css/cssom/selectorSerialize.html	escaped character in both attribute prefix and name	FAIL
 css/cssom/selectorSerialize.html	single class (simple) selector in the sequence of simple selectors that is not a universal selector	FAIL
 css/cssom/selectorSerialize.html	single id (simple) selector in the sequence of simple selectors that is not a universal selector	FAIL
@@ -1919,19 +1917,9 @@ css/cssom/serialization-CSSDeclaration-with-important.html	__harness__	OK
 css/cssom/serialize-all-longhands.html	__harness__	OK
 css/cssom/serialize-custom-props.html	__harness__	OK
 css/cssom/serialize-media-rule.html	__harness__	OK
-css/cssom/serialize-media-rule.html	empty media query list	FAIL
 css/cssom/serialize-media-rule.html	features - character case normalization	FAIL
-css/cssom/serialize-media-rule.html	features - no lexicographical sorting	FAIL
-css/cssom/serialize-media-rule.html	features - preservation of overspecified features	FAIL
 css/cssom/serialize-media-rule.html	many rules	FAIL
-css/cssom/serialize-media-rule.html	media query list	FAIL
 css/cssom/serialize-media-rule.html	one rule	FAIL
-css/cssom/serialize-media-rule.html	type - inclusion of negated all	FAIL
-css/cssom/serialize-media-rule.html	type - no features	FAIL
-css/cssom/serialize-media-rule.html	type - no features - character case normalization	FAIL
-css/cssom/serialize-media-rule.html	type - no features - negation	FAIL
-css/cssom/serialize-media-rule.html	type - omission of all	FAIL
-css/cssom/serialize-namespaced-type-selectors.html	Simple type selector	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Simple type selector followed by atttribute selector	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Simple type selector followed by class	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Simple type selector followed by id	FAIL
@@ -1944,7 +1932,6 @@ css/cssom/serialize-namespaced-type-selectors.html	Type selector with any namesp
 css/cssom/serialize-namespaced-type-selectors.html	Type selector with any namespace followed by pseudo class	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Type selector with any namespace followed by pseudo element	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Type selector with namespace	FAIL
-css/cssom/serialize-namespaced-type-selectors.html	Type selector with namespace equal to default namespace	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Type selector with namespace equal to default namespace followed by attribute selector	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Type selector with namespace equal to default namespace followed by class	FAIL
 css/cssom/serialize-namespaced-type-selectors.html	Type selector with namespace equal to default namespace followed by id	FAIL
@@ -2024,7 +2011,6 @@ css/cssom/serialize-values.html	page-break-inside: inherit	FAIL
 css/cssom/serialize-values.html	widows: 101	FAIL
 css/cssom/serialize-values.html	widows: inherit	FAIL
 css/cssom/serialize-variable-reference.html	__harness__	OK
-css/cssom/set-selector-text-attachment.html	Modifying property value invalidates style, even after selectorText mutation	FAIL
 css/cssom/set-selector-text-attachment.html	__harness__	OK
 css/cssom/setproperty-null-undefined.html	Verify that setting a CSS property priority to null is treated like empty string.	FAIL
 css/cssom/setproperty-null-undefined.html	Verify that setting a CSS property to null is treated like empty string.	FAIL
@@ -2032,25 +2018,19 @@ css/cssom/setproperty-null-undefined.html	__harness__	OK
 css/cssom/shorthand-serialization.html	__harness__	OK
 css/cssom/shorthand-values.html	__harness__	OK
 css/cssom/style-attr-update-across-documents.html	__harness__	OK
-css/cssom/style-sheet-interfaces-001.html	CSSStyleSheet_properties	FAIL
 css/cssom/style-sheet-interfaces-001.html	CSSStyleSheet_property_values	FAIL
 css/cssom/style-sheet-interfaces-001.html	StyleSheet_properties	FAIL
 css/cssom/style-sheet-interfaces-001.html	StyleSheet_property_values	FAIL
 css/cssom/style-sheet-interfaces-001.html	__harness__	OK
 css/cssom/style-sheet-interfaces-001.html	disabled attribute getter/setter	FAIL
-css/cssom/style-sheet-interfaces-001.html	sheet_property	FAIL
 css/cssom/style-sheet-interfaces-001.html	sheet_property_updates	FAIL
 css/cssom/style-sheet-interfaces-002.html	__harness__	OK
-css/cssom/style-sheet-interfaces-002.html	add_rule	FAIL
-css/cssom/style-sheet-interfaces-002.html	delete_rule	FAIL
 css/cssom/stylesheet-cross-origin-redirect-quirks.sub.html	__harness__	OK
 css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in copied cross-origin CSSOM Stylesheets	FAIL
 css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in cross-origin CSSOM Stylesheets	FAIL
 css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in cross-origin CSSOM Stylesheets (redirect from cross-origin to same-origin)	FAIL
 css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in cross-origin CSSOM Stylesheets (redirect from same-origin to cross-origin)	FAIL
-css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in data:css CSSOM Stylesheets	FAIL
 css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in loading error CSSOM Stylesheets	FAIL
-css/cssom/stylesheet-same-origin.sub.html	Origin-clean check in same-origin CSSOM Stylesheets	FAIL
 css/cssom/stylesheet-same-origin.sub.html	__harness__	OK
 css/cssom/stylesheet-title.html	Preferred style sheet name	FAIL
 css/cssom/stylesheet-title.html	__harness__	OK

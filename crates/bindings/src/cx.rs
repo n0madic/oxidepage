@@ -1520,6 +1520,63 @@ impl BindCx<'_> {
         self.new_slab_object("CSSStyleSheet", HostData::StyleSheet(Rc::new(data)))
     }
 
+    /// The live stylesheet a rule or rule list belongs to, if it still has one.
+    pub(crate) fn sheet_of(
+        &self,
+        sheet: &crate::cssdata::SheetRef,
+    ) -> Option<style::stylesheets::DocumentStyleSheet> {
+        match sheet {
+            crate::cssdata::SheetRef::Node(owner) => self.sheet_for(*owner),
+            crate::cssdata::SheetRef::Constructed(handle) => Some(handle.sheet.clone()),
+        }
+    }
+
+    /// The wrapper of a `<style>`/`<link>` node's sheet: `[SameObject]` per
+    /// owner node, so `document.styleSheets[i]`, `el.sheet` and a rule's
+    /// `parentStyleSheet` are one object.
+    pub(crate) fn node_sheet_wrapper(&self, owner: NodeId) -> Result<JsValue, JsThrow> {
+        self.same_object(owner, "cssom-sheet", move |cx| {
+            cx.new_style_sheet(SheetData::Node { owner })
+        })
+    }
+
+    /// A wrapper for a constructed sheet, remembered weakly in `handle` so
+    /// the sheet's rules answer `parentStyleSheet` with this same object.
+    pub(crate) fn new_constructed_sheet(
+        &self,
+        handle: Rc<crate::cssdata::ConstructedSheet>,
+    ) -> Result<JsValue, JsThrow> {
+        let wrapper = self.new_style_sheet(SheetData::Constructed {
+            handle: Rc::clone(&handle),
+            rules: RefCell::new(None),
+        })?;
+        let new_weak_ref = self.with_js(|js| js.new_weak_ref.clone())?;
+        *handle.wrapper.borrow_mut() =
+            self.call_helper(&new_weak_ref, std::slice::from_ref(&wrapper))?;
+        Ok(wrapper)
+    }
+
+    /// The wrapper of the sheet a rule belongs to.
+    pub(crate) fn sheet_wrapper(
+        &self,
+        sheet: &crate::cssdata::SheetRef,
+    ) -> Result<JsValue, JsThrow> {
+        match sheet {
+            crate::cssdata::SheetRef::Node(owner) => self.node_sheet_wrapper(*owner),
+            crate::cssdata::SheetRef::Constructed(handle) => {
+                let weak = handle.wrapper.borrow().clone();
+                if !weak.is_undefined() {
+                    let deref = self.with_js(|js| js.deref_weak_ref.clone())?;
+                    let live = self.call_helper(&deref, &[weak])?;
+                    if !live.is_undefined() {
+                        return Ok(live);
+                    }
+                }
+                self.new_constructed_sheet(Rc::clone(handle))
+            }
+        }
+    }
+
     /// Creates a `StyleSheetList` host object wrapped in the indexing proxy.
     pub(crate) fn new_style_sheet_list(&self, document: NodeId) -> Result<JsValue, JsThrow> {
         self.new_indexed("StyleSheetList", HostData::StyleSheetList(document))
@@ -2269,14 +2326,18 @@ impl BindCx<'_> {
         self.state.same_object.borrow().get(&key).cloned()
     }
 
-    /// Drops the per-index wrapper cache of `owner`'s `cssRules` list.
+    /// Drops the per-index wrapper cache of `sheet`'s `cssRules` list.
     ///
     /// `CSSRuleList::item` caches one wrapper per index, and the list itself is
     /// `[SameObject]`, so after `insertRule`/`deleteRule` shifts the underlying
     /// rules those wrappers would keep answering for the rules that *used* to sit
     /// at those indices.
-    pub(crate) fn invalidate_css_rule_list(&self, owner: NodeId) {
-        let Some(list) = self.same_object_peek(owner, CSS_RULES_MEMBER) else {
+    pub(crate) fn invalidate_css_rule_list(&self, sheet: &SheetData) {
+        let list = match sheet {
+            SheetData::Node { owner } => self.same_object_peek(*owner, CSS_RULES_MEMBER),
+            SheetData::Constructed { rules, .. } => rules.borrow().clone(),
+        };
+        let Some(list) = list else {
             return;
         };
         if let Ok(data) = self.this_css_rule_list(&list) {

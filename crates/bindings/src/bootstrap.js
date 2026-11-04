@@ -191,6 +191,10 @@
         return value;
     };
     const cacheSet = (map, key, value) => { mapSet.call(map, key, new WeakRefCtor(value)); };
+    // A lone weak reference, for a Rust-held back-pointer that must not keep
+    // its target alive (a constructed sheet's wrapper, seen from its rules).
+    const newWeakRef = (value) => new WeakRefCtor(value);
+    const derefWeakRef = (ref) => weakRefDeref.call(ref);
 
     // Indexed collections: a Proxy over the host object adds the WebIDL
     // indexed-property behavior; methods and getters resolve through the
@@ -452,18 +456,47 @@
     // (push, indexed writes, length truncation, delete) must reach the style
     // engine, not only full reassignment. Writes forward to the plain target
     // array, then the native sync re-reads it for the owner scope.
+    // WebIDL ObservableArray semantics, which keep the backing list dense:
+    // an index may be written only at or below `length`, only the last
+    // index may be deleted, and `length` may only shrink. `sync` validates
+    // the whole list before applying it; a write it rejects is undone and its
+    // exception (a TypeError for a non-sheet, a NotAllowedError for a sheet
+    // that was not constructed) propagates, so the list never holds a value
+    // the style engine refused.
     const adoptedSheetsProxy = (owner, sync, initial) => {
         const target = Array.isArray(initial) ? Array.prototype.slice.call(initial) : [];
         return new Proxy(target, {
             set(t, key, value, receiver) {
-                const ok = Reflect.set(t, key, value, receiver);
-                if (ok) sync(owner, t);
-                return ok;
+                if (key === "length") {
+                    const length = +value;
+                    if (!(length >>> 0 === length)) throw new RangeError("Invalid array length");
+                    if (length > t.length) return false;
+                    t.length = length;
+                    sync(owner, t);
+                    return true;
+                }
+                const i = indexOf(key);
+                if (i === null) return Reflect.set(t, key, value, receiver);
+                if (i > t.length) return false;
+                const replaced = i < t.length;
+                const old = t[i];
+                t[i] = value;
+                try {
+                    sync(owner, t);
+                } catch (e) {
+                    if (replaced) t[i] = old; else t.length = i;
+                    throw e;
+                }
+                return true;
             },
             deleteProperty(t, key) {
-                const ok = Reflect.deleteProperty(t, key);
-                if (ok) sync(owner, t);
-                return ok;
+                const i = indexOf(key);
+                if (i === null) return Reflect.deleteProperty(t, key);
+                if (i >= t.length) return true;
+                if (i !== t.length - 1) return false;
+                t.length = i;
+                sync(owner, t);
+                return true;
             },
         });
     };
@@ -1650,7 +1683,7 @@
     const newStorageEvent = (init) => new StorageEventCtor("storage", init);
 
     return {
-        newWrapperMap, cacheGet, cacheSet,
+        newWrapperMap, cacheGet, cacheSet, newWeakRef, derefWeakRef,
         collectionProxy, installIterable, installValueIterator, adoptedSheetsProxy,
         setToStringTag, setUnscopables, makeDomException, structuredClone,
         jsonStringify, jsonParse, cloneForMessage,

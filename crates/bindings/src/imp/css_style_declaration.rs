@@ -22,7 +22,9 @@ use style::properties::PropertyDeclarationBlock;
 use style::shared_lock::SharedRwLock;
 use style::stylesheets::{CssRule, UrlExtraData};
 
-use crate::cssdata::{ComputedCache, InlineCache, RuleData, StyleDeclData, style_attr_name};
+use crate::cssdata::{
+    ComputedCache, InlineCache, RuleData, SheetRef, StyleDeclData, style_attr_name,
+};
 use crate::cx::BindCx;
 
 /// The shared lock plus the locked declaration block of a `CSSStyleRule.style`
@@ -257,14 +259,23 @@ fn computed_value(
     }
 }
 
-/// Notifies the stylist that a rule's declaration block changed in place,
-/// resolving the current sheet from the rule's owner node.
-fn note_rule_changed(cx: &BindCx<'_>, owner: NodeId, rule: &CssRule) {
-    if let Some(sheet) = cx.sheet_for(owner) {
-        cx.state
-            .style
-            .borrow_mut()
-            .note_style_rule_declarations_changed(&sheet, rule);
+/// Notifies the stylist that a rule's declaration block changed in place.
+///
+/// A node-owned sheet is one the document `Stylist` knows, so the change is
+/// reported against it. A constructed sheet may be adopted by any number of
+/// scopes, or by none, so it takes the same "every author origin is dirty"
+/// path `replaceSync` does.
+fn note_rule_changed(cx: &BindCx<'_>, owner: &SheetRef, rule: &CssRule) {
+    match owner {
+        SheetRef::Node(node) => {
+            if let Some(sheet) = cx.sheet_for(*node) {
+                cx.state
+                    .style
+                    .borrow_mut()
+                    .note_style_rule_declarations_changed(&sheet, rule);
+            }
+        }
+        SheetRef::Constructed(_) => cx.state.style.borrow_mut().note_constructed_sheet_changed(),
     }
 }
 
@@ -306,10 +317,10 @@ pub(crate) fn set_css_text(
         }
         StyleDeclData::Rule { owner, rule } => {
             if page_rules::decl_set_css_text(&cx.style_lock(), rule, &value, &cx.doc_url()) {
-                note_rule_changed(cx, *owner, rule);
+                note_rule_changed(cx, owner, rule);
             } else if let Some((lock, block)) = rule_lock_block(cx, rule) {
                 cssom::locked_block_set_text(&lock, &block, &value, &cx.doc_url());
-                note_rule_changed(cx, *owner, rule);
+                note_rule_changed(cx, owner, rule);
             }
             Ok(())
         }
@@ -426,11 +437,11 @@ pub(crate) fn set_property(
         StyleDeclData::Rule { owner, rule } => {
             if let Some(changed) = page_rules::decl_set(rule, &property, &value, important) {
                 if changed {
-                    note_rule_changed(cx, *owner, rule);
+                    note_rule_changed(cx, owner, rule);
                 }
             } else if let Some((lock, block)) = rule_lock_block(cx, rule) {
                 cssom::locked_block_set(&lock, &block, &property, &value, important, &cx.doc_url());
-                note_rule_changed(cx, *owner, rule);
+                note_rule_changed(cx, owner, rule);
             }
             Ok(())
         }
@@ -452,13 +463,13 @@ pub(crate) fn remove_property(
         }
         StyleDeclData::Rule { owner, rule } => {
             if let Some(old) = page_rules::decl_remove(rule, &property) {
-                note_rule_changed(cx, *owner, rule);
+                note_rule_changed(cx, owner, rule);
                 return Ok(old);
             }
             let old = match rule_lock_block(cx, rule) {
                 Some((lock, block)) => {
                     let old = cssom::locked_block_remove(&lock, &block, &property);
-                    note_rule_changed(cx, *owner, rule);
+                    note_rule_changed(cx, owner, rule);
                     old
                 }
                 None => String::new(),
@@ -472,7 +483,7 @@ pub(crate) fn remove_property(
 pub(crate) fn parent_rule(cx: &BindCx<'_>, this: Rc<StyleDeclData>) -> Result<JsValue, JsThrow> {
     match &*this {
         StyleDeclData::Rule { owner, rule, .. } => cx.new_css_rule(RuleData {
-            owner: *owner,
+            owner: owner.clone(),
             rule: rule.clone(),
             style: RefCell::new(None),
         }),

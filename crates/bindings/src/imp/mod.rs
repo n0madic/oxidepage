@@ -75,6 +75,7 @@ pub(crate) mod intersection_observer;
 pub(crate) mod intersection_observer_entry;
 pub(crate) mod keyboard_event;
 pub(crate) mod keys;
+pub(crate) mod link_style;
 pub(crate) mod location;
 pub(crate) mod media_query_list;
 pub(crate) mod message_event;

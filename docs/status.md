@@ -75,7 +75,9 @@ v1 limits.
   pointer-sized element handle backs both `querySelector` and the cascade.
   `getComputedStyle` returns computed values, and the CSSOM is scripted:
   `el.style` (camelCase/dashed/indexed via a proxy), `getComputedStyle`,
-  `document.styleSheets`, `CSSStyleSheet.insertRule`/`deleteRule`/`disabled`,
+  `document.styleSheets`, `<style>.sheet`/`<link>.sheet` (the same objects,
+  and the list and `sheet` both see a `<style>` inserted or removed earlier
+  in the same script), `CSSStyleSheet.insertRule`/`deleteRule`/`disabled`,
   `CSSRuleList`, `CSSRule`/`CSSStyleRule` (`selectorText`, `style`), and the
   `CSS` namespace: `CSS.escape` (CSSOM's "serialize an identifier", in JS so a
   lone surrogate survives) and both overloads of `CSS.supports`, answered by
@@ -204,7 +206,13 @@ v1 limits.
   flush to a `CascadeData` side-map read by `TShadowRoot::style_data`; `:host`,
   `::slotted()`, and `::part()` match. `adoptedStyleSheets` (on `ShadowRoot`
   and `Document`) with constructable `CSSStyleSheet`
-  (`new`/`replace`/`replaceSync`); shadow-aware `getRootNode({composed})`; the
+  (`new` with `media`/`disabled`, `replace` resolving with the sheet,
+  `replaceSync`, both dropping `@import`, and a `cssRules` list whose rules
+  answer `parentStyleSheet` with the sheet itself). `adoptedStyleSheets`
+  keeps WebIDL ObservableArray semantics: in-place `push`/`pop`/`splice`
+  work, a non-sheet is a `TypeError` and a non-constructed sheet a
+  `NotAllowedError`, and a refused write leaves the list as it was. The
+  sheet's `media` attribute (`MediaList`) is not implemented. Shadow-aware `getRootNode({composed})`; the
   event dispatch path is composed (crosses shadow → host for `composed`
   events, stops at the root otherwise). Shadow ids never leak into the
   document `getElementById`. This makes web components render: constructors

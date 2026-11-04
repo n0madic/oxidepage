@@ -86,6 +86,15 @@ interface CSSPageRule : CSSRule {
   [SameObject] readonly attribute CSSStyleDeclaration style;
 };
 
+// `<style>.sheet` and `<link>.sheet`: the same object `document.styleSheets`
+// lists, or `null` while the element has no sheet (not connected, or a
+// `<link>` that is not a style sheet or has not loaded).
+interface mixin LinkStyle {
+  readonly attribute CSSStyleSheet? sheet;
+};
+HTMLStyleElement includes LinkStyle;
+HTMLLinkElement includes LinkStyle;
+
 partial interface Document {
   [SameObject] readonly attribute StyleSheetList styleSheets;
   attribute any adoptedStyleSheets;

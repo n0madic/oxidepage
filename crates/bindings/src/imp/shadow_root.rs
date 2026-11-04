@@ -137,9 +137,12 @@ fn apply_adopted(cx: &BindCx<'_>, node: NodeId, value: &JsValue) -> Result<(), J
     for i in 0..len {
         let entry = cx.scope.array_get(array, i).map_err(JsThrow::from)?;
         let data = cx.this_style_sheet(&entry)?;
+        // CSSOM: a sheet whose constructed flag is unset is a
+        // `NotAllowedError`, not a type error (it *is* a `CSSStyleSheet`).
         let Some(sheet) = data.constructed_sheet() else {
-            return Err(JsThrow::Type(
-                "adoptedStyleSheets entries must be constructed CSSStyleSheet objects".into(),
+            return Err(cx.dom_throw(
+                oxidepage_base::DomExceptionKind::NotAllowedError,
+                "adoptedStyleSheets entries must be constructed CSSStyleSheet objects",
             ));
         };
         sheets.push(sheet);

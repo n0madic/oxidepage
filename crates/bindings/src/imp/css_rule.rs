@@ -5,15 +5,12 @@ use std::rc::Rc;
 use oxidepage_js::{JsThrow, JsValue};
 use oxidepage_style::cssom;
 
-use crate::cssdata::{RuleData, SheetData};
+use crate::cssdata::RuleData;
 use crate::cx::BindCx;
 
-/// The owning sheet wrapper for a rule (identity via the sheet's owner node).
+/// The owning sheet wrapper for a rule (one object per sheet).
 pub(crate) fn parent_sheet_value(cx: &BindCx<'_>, this: &RuleData) -> Result<JsValue, JsThrow> {
-    let owner = this.owner;
-    cx.same_object(owner, "cssom-sheet", move |cx| {
-        cx.new_style_sheet(SheetData::Node { owner })
-    })
+    cx.sheet_wrapper(&this.owner)
 }
 
 pub(crate) fn r#type(_cx: &BindCx<'_>, this: Rc<RuleData>) -> Result<f64, JsThrow> {

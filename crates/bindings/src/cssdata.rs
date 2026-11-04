@@ -47,9 +47,9 @@ pub(crate) enum StyleDeclData {
     },
     /// `CSSStyleRule.style`: the rule's declaration block, resolved live from
     /// `rule` on each access. Writes mutate it under the shared lock and notify
-    /// the stylist. `owner` is the sheet's `<style>`/`<link>` node (for
-    /// `parentRule` → same-identity sheet).
-    Rule { owner: NodeId, rule: CssRule },
+    /// the stylist. `owner` is the rule's sheet (for `parentRule` →
+    /// same-identity sheet).
+    Rule { owner: SheetRef, rule: CssRule },
 }
 
 /// A `CSSStyleSheet`/`StyleSheet` host object.
@@ -61,8 +61,25 @@ pub(crate) enum SheetData {
     /// directly. `replaceSync` swaps its rules in place under the shared
     /// lock, so every adopting scope sees the update.
     Constructed {
-        sheet: style::stylesheets::DocumentStyleSheet,
+        handle: Rc<ConstructedSheet>,
+        /// The `[SameObject]` `cssRules` list. Held here rather than in the
+        /// node-keyed `same_object` table, so it lives exactly as long as
+        /// this wrapper does.
+        rules: RefCell<Option<JsValue>>,
     },
+}
+
+/// A constructed sheet, shared by its wrapper and every rule list, rule and
+/// rule declaration block that points back to it.
+pub(crate) struct ConstructedSheet {
+    pub sheet: style::stylesheets::DocumentStyleSheet,
+    /// A JS `WeakRef` to the sheet's wrapper, so `parentStyleSheet` answers
+    /// with the same object. It is weak because the wrapper holds its
+    /// `cssRules` list, the list holds its rules, and a rule holding the
+    /// wrapper strongly would close a cycle through Rust that the GC cannot
+    /// see. If the wrapper was collected while a rule lived on, a fresh one
+    /// over the same sheet is minted and stored back here.
+    pub wrapper: RefCell<JsValue>,
 }
 
 impl SheetData {
@@ -78,15 +95,34 @@ impl SheetData {
     pub(crate) fn constructed_sheet(&self) -> Option<style::stylesheets::DocumentStyleSheet> {
         match self {
             SheetData::Node { .. } => None,
-            SheetData::Constructed { sheet } => Some(sheet.clone()),
+            SheetData::Constructed { handle, .. } => Some(handle.sheet.clone()),
+        }
+    }
+
+    /// What this sheet's rules and rule lists point back to.
+    pub(crate) fn sheet_ref(&self) -> SheetRef {
+        match self {
+            SheetData::Node { owner } => SheetRef::Node(*owner),
+            SheetData::Constructed { handle, .. } => SheetRef::Constructed(Rc::clone(handle)),
         }
     }
 }
 
-/// A `CSSRule`/`CSSStyleRule` host object: a specific rule plus its owner node
+/// The sheet a rule view or rule list belongs to.
+#[derive(Clone)]
+pub(crate) enum SheetRef {
+    /// A `<style>`/`<link>` sheet, resolved live from the owner node so a
+    /// re-parse is followed.
+    Node(NodeId),
+    /// A constructed sheet. `replaceSync` swaps its rules in place, so its
+    /// `Arc` is stable for the wrapper's whole life.
+    Constructed(Rc<ConstructedSheet>),
+}
+
+/// A `CSSRule`/`CSSStyleRule` host object: a specific rule plus its sheet
 /// (to resolve the current sheet for mutations and `parentStyleSheet`).
 pub(crate) struct RuleData {
-    pub owner: NodeId,
+    pub owner: SheetRef,
     pub rule: CssRule,
     /// `[SameObject]` cache for `CSSStyleRule.style`.
     pub style: RefCell<Option<JsValue>>,
@@ -95,6 +131,6 @@ pub(crate) struct RuleData {
 /// A `CSSRuleList` host object over a sheet's top-level rules, with `[SameObject]`
 /// per-index wrapper identity (`cssRules[0] === cssRules[0]`).
 pub(crate) struct RuleListData {
-    pub owner: NodeId,
+    pub owner: SheetRef,
     pub items: RefCell<HashMap<u32, JsValue>>,
 }

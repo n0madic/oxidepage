@@ -696,6 +696,9 @@ pub(crate) struct JsRefs {
     pub wrapper_map: JsValue,
     pub cache_get: JsValue,
     pub cache_set: JsValue,
+    /// `(value) => WeakRef` and `(ref) => value | undefined`.
+    pub new_weak_ref: JsValue,
+    pub deref_weak_ref: JsValue,
     pub collection_proxy: JsValue,
     pub install_iterable: JsValue,
     /// Installs @@iterator = %Array.prototype.values% on an indexed-getter

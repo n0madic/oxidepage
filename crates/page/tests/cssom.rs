@@ -584,3 +584,89 @@ fn page_rules_through_insert_delete_and_replace() {
         "2|@page :left { margin: 1in; }|HierarchyRequestError|SyntaxError|SyntaxError|2"
     );
 }
+
+#[test]
+fn style_and_link_sheet_is_the_listed_sheet() {
+    let html = "<!DOCTYPE html><style id=s>p { color: red }</style>\
+                <link id=l rel=stylesheet href='data:text/css,a{}'>\
+                <link id=n rel=icon href='data:,x'>";
+    assert_eq!(
+        eval(
+            html,
+            "const s = document.getElementById('s');\
+             const l = document.getElementById('l');\
+             const before = [s.sheet === document.styleSheets[0], s.sheet === s.sheet,\
+               s.sheet.ownerNode === s, l.sheet === document.styleSheets[1],\
+               document.getElementById('n').sheet,\
+               document.createElement('style').sheet];\
+             s.remove();\
+             before.concat([s.sheet]).join('|')",
+        ),
+        "true|true|true|true|||"
+    );
+}
+
+#[test]
+fn constructed_sheet_css_rules() {
+    assert_eq!(
+        eval(
+            DIV,
+            "const sheet = new CSSStyleSheet();\
+             sheet.replaceSync('p { color: red } div { color: blue }');\
+             const rules = sheet.cssRules;\
+             const first = rules[0];\
+             const out = [rules === sheet.cssRules, rules.length, first === rules[0],\
+               first.selectorText, first.parentStyleSheet === sheet,\
+               first.style.parentRule.parentStyleSheet === sheet];\
+             sheet.insertRule('span { color: green }', 0);\
+             out.push(rules.length, rules[0].selectorText);\
+             sheet.deleteRule(0);\
+             sheet.replaceSync('b { color: red }');\
+             out.push(rules.length, rules[0].selectorText, rules[0] === first);\
+             out.join('|')",
+        ),
+        "true|2|true|p|true|true|3|span|1|b|false"
+    );
+}
+
+#[test]
+fn a_constructed_sheet_rule_edit_restyles_its_adopters() {
+    assert_eq!(
+        eval(
+            DIV,
+            "const sheet = new CSSStyleSheet();\
+             sheet.replaceSync('#d { color: rgb(1, 2, 3) }');\
+             document.adoptedStyleSheets = [sheet];\
+             const d = document.getElementById('d');\
+             const before = getComputedStyle(d).color;\
+             sheet.cssRules[0].style.color = 'rgb(4, 5, 6)';\
+             before + '|' + getComputedStyle(d).color",
+        ),
+        "rgb(1, 2, 3)|rgb(4, 5, 6)"
+    );
+}
+
+/// A rule points back to its constructed sheet weakly (the sheet holds its
+/// rule list, which holds its rules), so dropping every reference but the
+/// rule's must neither crash nor leave it without a parent.
+#[test]
+fn a_rule_outliving_its_constructed_sheet_wrapper() {
+    let page = load_html_page(DIV, PageOptions::default()).unwrap();
+    page.eval_to_string(
+        "globalThis.rule = (() => {\
+           const sheet = new CSSStyleSheet();\
+           sheet.replaceSync('p { color: red }');\
+           return sheet.cssRules[0];\
+         })(); 'ok'",
+    )
+    .unwrap();
+    page.collect_garbage();
+    assert_eq!(
+        page.eval_to_string(
+            "const p = rule.parentStyleSheet;\
+             [p === rule.parentStyleSheet, p.cssRules.length, p.cssRules[0].selectorText].join('|')",
+        )
+        .unwrap(),
+        "true|1|p"
+    );
+}

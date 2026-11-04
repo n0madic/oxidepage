@@ -26,7 +26,7 @@ fn owner_attr(cx: &BindCx<'_>, this: &SheetData, name: &str) -> Option<String> {
 pub(crate) fn resolve_sheet(cx: &BindCx<'_>, this: &SheetData) -> Option<DocumentStyleSheet> {
     match this {
         SheetData::Node { owner } => cx.sheet_for(*owner),
-        SheetData::Constructed { sheet } => Some(sheet.clone()),
+        SheetData::Constructed { handle, .. } => Some(handle.sheet.clone()),
     }
 }
 
@@ -67,10 +67,13 @@ pub(crate) fn set_disabled(
     value: bool,
 ) -> Result<(), JsThrow> {
     if let Some(sheet) = resolve_sheet(cx, &this) {
-        cx.state
-            .style
-            .borrow_mut()
-            .set_sheet_disabled(&sheet, value);
+        let mut style = cx.state.style.borrow_mut();
+        style.set_sheet_disabled(&sheet, value);
+        // A constructed sheet may be adopted by shadow roots, whose scopes
+        // `set_sheet_disabled` does not dirty.
+        if this.owner().is_none() {
+            style.note_constructed_sheet_changed();
+        }
     }
     Ok(())
 }

@@ -32,7 +32,7 @@ pub(crate) fn style(cx: &BindCx<'_>, this: Rc<RuleData>) -> Result<JsValue, JsTh
         return Ok(cached);
     }
     let decl = cx.new_style_decl(StyleDeclData::Rule {
-        owner: this.owner,
+        owner: this.owner.clone(),
         rule: this.rule.clone(),
     })?;
     *this.style.borrow_mut() = Some(decl.clone());

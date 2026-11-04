@@ -3384,6 +3384,11 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
     )?;
 
     let proto_html_style_element = cx.begin_interface("HTMLStyleElement", Some("HTMLElement"))?;
+    cx.define_getter(
+        &proto_html_style_element,
+        "sheet",
+        gen_html_style_element_get_sheet,
+    )?;
     cx.finish_interface(
         "HTMLStyleElement",
         &proto_html_style_element,
@@ -4190,6 +4195,11 @@ pub(crate) fn register_interfaces(cx: &BindCx<'_>) -> Result<(), JsThrow> {
         "hreflang",
         gen_html_link_element_get_hreflang,
         gen_html_link_element_set_hreflang,
+    )?;
+    cx.define_getter(
+        &proto_html_link_element,
+        "sheet",
+        gen_html_link_element_get_sheet,
     )?;
     cx.finish_interface(
         "HTMLLinkElement",
@@ -12212,6 +12222,11 @@ fn gen_html_meta_element_set_media(cx: &BindCx<'_>, call: &HostCall) -> Result<J
     Ok(JsValue::Undefined)
 }
 
+fn gen_html_style_element_get_sheet(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_element(&call.this)?;
+    imp::link_style::sheet(cx, this)
+}
+
 fn gen_html_template_element_get_content(
     cx: &BindCx<'_>,
     call: &HostCall,
@@ -13388,6 +13403,11 @@ fn gen_html_link_element_set_hreflang(
     let a0 = cx.arg_dom_string(call, 0)?;
     imp::html_link_element::set_hreflang(cx, this, a0)?;
     Ok(JsValue::Undefined)
+}
+
+fn gen_html_link_element_get_sheet(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {
+    let this = cx.this_html_link_element(&call.this)?;
+    imp::link_style::sheet(cx, this)
 }
 
 fn gen_html_form_element_get_action(cx: &BindCx<'_>, call: &HostCall) -> Result<JsValue, JsThrow> {

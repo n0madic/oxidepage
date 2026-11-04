@@ -3,7 +3,6 @@
 use oxidepage_base::NodeId;
 use oxidepage_js::{JsThrow, JsValue};
 
-use crate::cssdata::SheetData;
 use crate::cx::BindCx;
 
 /// The owner nodes of `document`'s author sheets, in document order.
@@ -24,6 +23,9 @@ fn sheet_owners(cx: &BindCx<'_>, document: NodeId) -> Vec<NodeId> {
     if document != cx.state.frame.document() {
         return Vec::new();
     }
+    // A `<style>` inserted or removed earlier in this script is in (or out of)
+    // the list at once, as CSSOM's "add/remove a CSS style sheet" are.
+    super::css_style_declaration::flush_inline_styles(cx);
     cx.state
         .style
         .borrow()
@@ -38,9 +40,7 @@ pub(crate) fn length(cx: &BindCx<'_>, document: NodeId) -> Result<f64, JsThrow> 
 
 pub(crate) fn item(cx: &BindCx<'_>, document: NodeId, index: u32) -> Result<JsValue, JsThrow> {
     match sheet_owners(cx, document).get(index as usize) {
-        Some(&owner) => cx.same_object(owner, "cssom-sheet", move |cx| {
-            cx.new_style_sheet(SheetData::Node { owner })
-        }),
+        Some(&owner) => cx.node_sheet_wrapper(owner),
         None => Ok(JsValue::Null),
     }
 }
