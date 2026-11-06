@@ -31,7 +31,7 @@ oxidepage-cdp = { path = "crates/cdp" }
 # External dependencies
 # Pinned: the nested-module `meta()` path (import.meta.url for statically
 # imported modules) depends on a 0.12.0 implementation detail (design ADR-0004).
-rquickjs = "=0.12.0"
+rquickjs = "=0.14.0"
 weedle2 = "5"
 selectors = "0.39"
 cssparser = "0.37"
